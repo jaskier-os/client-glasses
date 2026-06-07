@@ -1,0 +1,1589 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <TextureView
+        android:id="@+id/cameraPreview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent" />
+
+    <FrameLayout
+        android:id="@+id/chatContainer"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="#000000"
+        android:clipToOutline="false"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent">
+
+        <LinearLayout
+            android:id="@+id/mainContentLayout"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:background="#000000">
+
+            <!-- Debug text (hidden, re-enable with View.VISIBLE) -->
+            <TextView
+                android:id="@+id/debugStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:visibility="gone"
+                android:gravity="start"
+                android:text=""
+                android:textColor="#004400"
+                android:textSize="9sp"
+                android:fontFamily="monospace"
+                android:background="#000000"
+                android:singleLine="true"
+                android:focusable="false"
+                android:defaultFocusHighlightEnabled="false" />
+
+            <!-- Double-tap hint (shown briefly on first tap during LISTENING/RESPONDING) -->
+            <TextView
+                android:id="@+id/doubleTapHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Double-tap again to stop"
+                android:textColor="#00DD00"
+                android:textSize="11sp"
+                android:fontFamily="monospace"
+                android:background="#000000"
+                android:gravity="center"
+                android:paddingVertical="2dp"
+                android:visibility="gone"
+                android:focusable="false"
+                android:focusableInTouchMode="false"
+                android:defaultFocusHighlightEnabled="false" />
+
+            <!-- Status area: icon + text -->
+            <LinearLayout
+                android:id="@+id/statusArea"
+                android:layout_width="match_parent"
+                android:layout_height="20dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#000000"
+                android:visibility="invisible">
+
+                <ImageView
+                    android:id="@+id/statusIcon"
+                    android:layout_width="8dp"
+                    android:layout_height="8dp"
+                    android:src="@drawable/ic_status_dot"
+                    android:background="#000000"
+                    android:layout_marginEnd="4dp"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <TextView
+                    android:id="@+id/statusBar"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:gravity="center_vertical"
+                    android:text=""
+                    android:textColor="#00AA00"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace"
+                    android:background="#000000"
+                    android:singleLine="true"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <TextView
+                    android:id="@+id/progressBar"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:gravity="center_vertical"
+                    android:text=""
+                    android:textColor="#007700"
+                    android:textSize="10sp"
+                    android:fontFamily="monospace"
+                    android:background="#000000"
+                    android:singleLine="true"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+            </LinearLayout>
+
+            <!-- Content area -->
+            <FrameLayout
+                android:id="@+id/contentFrame"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:background="#000000">
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/chatRecycler"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:clipToPadding="false"
+                    android:overScrollMode="never"
+                    android:scrollbars="none"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <TextView
+                    android:id="@+id/chatEmptyHint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="bottom"
+                    android:text="Say wake word or long-tap the sensor to start"
+                    android:textColor="#335533"
+                    android:textSize="8sp"
+                    android:fontFamily="monospace"
+                    android:gravity="center"
+                    android:background="#000000"
+                    android:paddingBottom="8dp"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false"
+                    android:visibility="gone" />
+
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/chatListRecycler"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:clipToPadding="false"
+                    android:overScrollMode="never"
+                    android:scrollbars="none"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false"
+                    android:visibility="gone" />
+
+                <!-- Scroll position indicator bar -->
+                <View
+                    android:id="@+id/scrollIndicator"
+                    android:layout_width="1dp"
+                    android:layout_height="0dp"
+                    android:layout_gravity="end"
+                    android:background="#004400"
+                    android:alpha="0"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <!-- Translation content (shown when TRANSLATE tab active) -->
+                <FrameLayout
+                    android:id="@+id/translationContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <!-- Content drawn first -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:orientation="vertical"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <ScrollView
+                            android:id="@+id/translationScrollView"
+                            android:layout_width="match_parent"
+                            android:layout_height="0dp"
+                            android:layout_weight="1"
+                            android:background="#000000"
+                            android:overScrollMode="never"
+                            android:scrollbars="none"
+                            android:focusable="false"
+                            android:focusableInTouchMode="false"
+                            android:defaultFocusHighlightEnabled="false">
+
+                            <LinearLayout
+                                android:id="@+id/translationChunksContainer"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical"
+                                android:paddingBottom="18dp"
+                                android:background="#000000"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </ScrollView>
+
+                        <TextView
+                            android:id="@+id/translationStatus"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:textSize="10sp"
+                            android:textColor="#007700"
+                            android:fontFamily="monospace"
+                            android:background="#000000"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false"
+                            android:paddingStart="4dp"
+                            android:paddingBottom="2dp" />
+
+                    </LinearLayout>
+
+                    <!-- Button drawn last = on top in Z-order, visible over content -->
+                    <FrameLayout
+                        android:id="@+id/translationStartStopContainer"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:layout_gravity="end|bottom"
+                        android:layout_marginEnd="8dp"
+                        android:layout_marginBottom="8dp"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <ImageView
+                            android:id="@+id/translationStartStopIcon"
+                            android:layout_width="16dp"
+                            android:layout_height="16dp"
+                            android:layout_gravity="center"
+                            android:src="@drawable/ic_play"
+                            android:background="#000000"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                    </FrameLayout>
+
+                </FrameLayout>
+
+                <!-- Teleprompter content (shown when TELEPROMPTER tab active) -->
+                <FrameLayout
+                    android:id="@+id/teleprompterContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <!-- Mouse HID content (shown when MOUSE tab active) -->
+                <LinearLayout
+                    android:id="@+id/mouseContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:orientation="vertical"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:gravity="bottom"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:paddingBottom="8dp"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="0dp"
+                        android:layout_weight="1"
+                        android:background="#000000" />
+
+                    <TextView
+                        android:id="@+id/mouseConnectionStatus"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Waiting for host..."
+                        android:textColor="#007700"
+                        android:textSize="11sp"
+                        android:fontFamily="monospace"
+                        android:background="#000000"
+                        android:gravity="center"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <TextView
+                        android:id="@+id/mouseControlsHint"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Tap to start tracking"
+                        android:textColor="#004400"
+                        android:textSize="10sp"
+                        android:fontFamily="monospace"
+                        android:background="#000000"
+                        android:gravity="center"
+                        android:paddingTop="4dp"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                </LinearLayout>
+
+                <!-- Teleprompter scroll indicator (overlay on top of TP content) -->
+                <View
+                    android:id="@+id/tpScrollIndicator"
+                    android:layout_width="1dp"
+                    android:layout_height="0dp"
+                    android:layout_gravity="end"
+                    android:background="#004400"
+                    android:alpha="0"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <!-- Teleprompter stop button (shown when TP active) -->
+                <TextView
+                    android:id="@+id/tpStopButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="bottom|start"
+                    android:layout_marginStart="8dp"
+                    android:layout_marginBottom="8dp"
+                    android:text="Stop"
+                    android:textColor="#007700"
+                    android:textSize="10sp"
+                    android:fontFamily="monospace"
+                    android:background="#000000"
+                    android:paddingHorizontal="4dp"
+                    android:paddingVertical="2dp"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <!-- ReID content (shown when REID tab active) -->
+                <LinearLayout
+                    android:id="@+id/reidContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:orientation="vertical"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="0dp"
+                        android:layout_weight="1"
+                        android:background="#000000" />
+
+                    <!-- Face thumbnail bar -->
+                    <LinearLayout
+                        android:id="@+id/reidFaceBar"
+                        android:layout_width="match_parent"
+                        android:layout_height="56dp"
+                        android:orientation="horizontal"
+                        android:gravity="start"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <TextView
+                        android:id="@+id/reidFaceIdLabel"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:text=""
+                        android:textColor="#00FF00"
+                        android:textSize="11sp"
+                        android:fontFamily="monospace"
+                        android:background="#000000"
+                        android:layout_marginTop="8dp"
+                        android:paddingBottom="4dp"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <FrameLayout
+                        android:id="@+id/reidStartStopContainer"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:layout_gravity="center"
+                        android:layout_marginBottom="12dp"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <ImageView
+                            android:id="@+id/reidStartStopIcon"
+                            android:layout_width="16dp"
+                            android:layout_height="16dp"
+                            android:layout_gravity="center"
+                            android:src="@drawable/ic_play"
+                            android:background="#000000"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                    </FrameLayout>
+
+                </LinearLayout>
+
+                <!-- ReID Intel Modal (full-screen overlay, depth 3) -->
+                <ScrollView
+                    android:id="@+id/reidIntelModal"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false"
+                    android:overScrollMode="never"
+                    android:scrollbars="none">
+
+                    <LinearLayout
+                        android:id="@+id/reidIntelContent"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:background="#000000"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:paddingTop="8dp"
+                        android:paddingBottom="24dp"
+                        android:focusable="false"
+                        android:focusableInTouchMode="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                </ScrollView>
+
+                <!-- Music player content (shown when MUSIC tab active) -->
+                <FrameLayout
+                    android:id="@+id/musicContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <LinearLayout
+                        android:id="@+id/musicPlayerContent"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:orientation="vertical"
+                        android:gravity="bottom"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false"
+                        android:paddingBottom="8dp">
+
+                        <!-- Track name with clip for marquee -->
+                        <FrameLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:clipChildren="true"
+                            android:background="#000000"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false"
+                            android:paddingHorizontal="12dp"
+                            android:layout_marginBottom="8dp">
+
+                            <TextView
+                                android:id="@+id/musicTrackName"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="No track playing"
+                                android:textColor="#00AA00"
+                                android:textSize="12sp"
+                                android:fontFamily="monospace"
+                                android:background="#000000"
+                                android:singleLine="true"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </FrameLayout>
+
+                        <!-- Progress bar -->
+                        <FrameLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="center"
+                            android:layout_marginBottom="8dp"
+                            android:background="#000000"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false">
+
+                            <View
+                                android:id="@+id/musicProgressBg"
+                                android:layout_width="192dp"
+                                android:layout_height="3dp"
+                                android:layout_gravity="center"
+                                android:background="@drawable/bg_music_progress_track" />
+
+                            <View
+                                android:id="@+id/musicProgressFill"
+                                android:layout_width="0dp"
+                                android:layout_height="3dp"
+                                android:layout_gravity="center_vertical|start"
+                                android:layout_marginStart="64dp"
+                                android:background="@drawable/bg_music_progress_fill" />
+
+                        </FrameLayout>
+
+                        <!-- Control buttons row -->
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="center"
+                            android:background="#000000"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false">
+
+                            <FrameLayout
+                                android:id="@+id/musicPrevContainer"
+                                android:layout_width="32dp"
+                                android:layout_height="32dp"
+                                android:background="#000000"
+                                android:focusable="false"
+                                android:defaultFocusHighlightEnabled="false">
+
+                                <ImageView
+                                    android:id="@+id/musicPrevIcon"
+                                    android:layout_width="16dp"
+                                    android:layout_height="16dp"
+                                    android:layout_gravity="center"
+                                    android:src="@drawable/ic_skip_previous"
+                                    android:background="#000000"
+                                    android:focusable="false"
+                                    android:defaultFocusHighlightEnabled="false" />
+
+                            </FrameLayout>
+
+                            <FrameLayout
+                                android:id="@+id/musicPlayPauseContainer"
+                                android:layout_width="36dp"
+                                android:layout_height="36dp"
+                                android:layout_marginHorizontal="16dp"
+                                android:background="#000000"
+                                android:focusable="false"
+                                android:defaultFocusHighlightEnabled="false">
+
+                                <ImageView
+                                    android:id="@+id/musicPlayPauseIcon"
+                                    android:layout_width="20dp"
+                                    android:layout_height="20dp"
+                                    android:layout_gravity="center"
+                                    android:src="@drawable/ic_play"
+                                    android:background="#000000"
+                                    android:focusable="false"
+                                    android:defaultFocusHighlightEnabled="false" />
+
+                            </FrameLayout>
+
+                            <FrameLayout
+                                android:id="@+id/musicNextContainer"
+                                android:layout_width="32dp"
+                                android:layout_height="32dp"
+                                android:background="#000000"
+                                android:focusable="false"
+                                android:defaultFocusHighlightEnabled="false">
+
+                                <ImageView
+                                    android:id="@+id/musicNextIcon"
+                                    android:layout_width="16dp"
+                                    android:layout_height="16dp"
+                                    android:layout_gravity="center"
+                                    android:src="@drawable/ic_skip_next"
+                                    android:background="#000000"
+                                    android:focusable="false"
+                                    android:defaultFocusHighlightEnabled="false" />
+
+                            </FrameLayout>
+
+                        </LinearLayout>
+
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/musicEmptyHint"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="bottom"
+                        android:text="Start playing track and it will appear there"
+                        android:textColor="#335533"
+                        android:textSize="8sp"
+                        android:fontFamily="monospace"
+                        android:gravity="center"
+                        android:background="#000000"
+                        android:paddingBottom="8dp"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false"
+                        android:visibility="gone" />
+
+                </FrameLayout>
+
+                <!-- Todo content (shown when TODO tab active) -->
+                <FrameLayout
+                    android:id="@+id/todoContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <!-- Telegram auth container (AudioVisualizerView added programmatically) -->
+                <LinearLayout
+                    android:id="@+id/telegramAuthContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:orientation="vertical"
+                    android:gravity="center"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <TextView
+                        android:id="@+id/telegramAuthPrompt"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Speak to unlock"
+                        android:textColor="#00AA00"
+                        android:textSize="13sp"
+                        android:fontFamily="monospace"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <TextView
+                        android:id="@+id/telegramAuthStatus"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text=""
+                        android:textColor="#007700"
+                        android:textSize="11sp"
+                        android:fontFamily="monospace"
+                        android:background="#000000"
+                        android:paddingTop="4dp"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                </LinearLayout>
+
+                <!-- Telegram chat list -->
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/telegramChatListRecycler"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:clipToPadding="false"
+                    android:overScrollMode="never"
+                    android:scrollbars="none"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false"
+                    android:visibility="gone" />
+
+                <!-- Telegram chat messages -->
+                <FrameLayout
+                    android:id="@+id/telegramChatContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <androidx.recyclerview.widget.RecyclerView
+                        android:id="@+id/telegramChatRecycler"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:background="#000000"
+                        android:clipToPadding="false"
+                        android:overScrollMode="never"
+                        android:scrollbars="none"
+                        android:focusable="false"
+                        android:focusableInTouchMode="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <!-- Telegram voice overlay (bottom-anchored, over chat messages) -->
+                    <LinearLayout
+                        android:id="@+id/telegramVoiceOverlay"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="bottom"
+                        android:orientation="vertical"
+                        android:gravity="center_horizontal"
+                        android:background="#000000"
+                        android:paddingBottom="4dp"
+                        android:visibility="gone"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <TextView
+                            android:id="@+id/telegramVoicePreview"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text=""
+                            android:textColor="#00AA00"
+                            android:textSize="11sp"
+                            android:fontFamily="monospace"
+                            android:background="#000000"
+                            android:gravity="center"
+                            android:paddingTop="4dp"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                    </LinearLayout>
+
+                    <!-- Telegram send preview (shows final text + countdown) -->
+                    <LinearLayout
+                        android:id="@+id/telegramSendPreview"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:orientation="vertical"
+                        android:gravity="center"
+                        android:background="#000000"
+                        android:visibility="gone"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <TextView
+                            android:id="@+id/telegramSendText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=""
+                            android:textColor="#00DD00"
+                            android:textSize="13sp"
+                            android:fontFamily="monospace"
+                            android:background="#000000"
+                            android:gravity="center"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                        <TextView
+                            android:id="@+id/telegramSendCountdown"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Sending in 2s..."
+                            android:textColor="#007700"
+                            android:textSize="11sp"
+                            android:fontFamily="monospace"
+                            android:background="#000000"
+                            android:paddingTop="4dp"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                    </LinearLayout>
+
+                </FrameLayout>
+
+                <!-- Night vision content (shown when NIGHTVISION tab active) -->
+                <FrameLayout
+                    android:id="@+id/nightvisionContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <ImageView
+                        android:id="@+id/nightvisionPreview"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:scaleType="centerCrop"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                </FrameLayout>
+
+                <!-- Disconnect overlay (shown on MAP/TRANSLATE/TELEPROMPTER when BT lost) -->
+                <TextView
+                    android:id="@+id/disconnectedOverlay"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:text="Connection lost..."
+                    android:textColor="#004400"
+                    android:textSize="14sp"
+                    android:fontFamily="monospace"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+            </FrameLayout>
+
+            <!-- Map container: map image + pin button overlay -->
+            <FrameLayout
+                android:id="@+id/mapContainer"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:background="#000000"
+                android:visibility="gone"
+                android:focusable="false"
+                android:defaultFocusHighlightEnabled="false">
+
+                <!-- Content layer: vertical stack, no overlaps. Step strip overlays this layer (sibling below). -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:orientation="vertical"
+                    android:background="#000000">
+
+                    <!-- Spacer fills remaining vertical space above map -->
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="0dp"
+                        android:layout_weight="1"
+                        android:background="#000000" />
+
+                    <!-- Map: 90% of display width, height derived from bitmap aspect.
+                         The FrameLayout sizes to mapContentView; mapBaseFadeView is
+                         a sibling used for cross-fading to a new base bitmap, and
+                         mapArrowView floats on top with translation+rotation set
+                         per Choreographer frame for smooth motion. -->
+                    <FrameLayout
+                        android:id="@+id/mapImageFrame"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="center_horizontal"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:focusableInTouchMode="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <ImageView
+                            android:id="@+id/mapContentView"
+                            android:layout_width="288dp"
+                            android:layout_height="144dp"
+                            android:background="#000000"
+                            android:scaleType="fitCenter"
+                            android:focusable="false"
+                            android:focusableInTouchMode="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                        <ImageView
+                            android:id="@+id/mapBaseFadeView"
+                            android:layout_width="288dp"
+                            android:layout_height="144dp"
+                            android:background="#000000"
+                            android:scaleType="fitCenter"
+                            android:alpha="0"
+                            android:focusable="false"
+                            android:focusableInTouchMode="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                        <ImageView
+                            android:id="@+id/mapArrowView"
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:layout_gravity="top|left"
+                            android:src="@drawable/map_arrow"
+                            android:focusable="false" />
+                    </FrameLayout>
+
+                    <!-- Bottom bar: buttons left, pin right -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:background="#000000"
+                        android:paddingHorizontal="8dp"
+                        android:paddingVertical="4dp">
+
+                        <LinearLayout
+                            android:id="@+id/mapButtonColumn"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:visibility="gone"
+                            android:background="#000000"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false">
+
+                            <TextView
+                                android:id="@+id/mapStepsButton"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Steps"
+                                android:textColor="#007700"
+                                android:textSize="10sp"
+                                android:fontFamily="monospace"
+                                android:background="#000000"
+                                android:paddingHorizontal="12dp"
+                                android:paddingVertical="6dp"
+                                android:layout_marginEnd="6dp"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                            <TextView
+                                android:id="@+id/mapStopButton"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Finish"
+                                android:textColor="#007700"
+                                android:textSize="10sp"
+                                android:fontFamily="monospace"
+                                android:background="#000000"
+                                android:paddingHorizontal="12dp"
+                                android:paddingVertical="6dp"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+                        </LinearLayout>
+
+                        <View
+                            android:layout_width="0dp"
+                            android:layout_height="0dp"
+                            android:layout_weight="1" />
+
+                        <FrameLayout
+                            android:id="@+id/mapZoomSliderContainer"
+                            android:layout_width="64dp"
+                            android:layout_height="20dp"
+                            android:layout_marginEnd="8dp"
+                            android:background="#000000"
+                            android:visibility="gone"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false">
+
+                            <View
+                                android:id="@+id/mapZoomSliderTrack"
+                                android:layout_width="match_parent"
+                                android:layout_height="3dp"
+                                android:layout_gravity="center_vertical"
+                                android:layout_marginHorizontal="6dp"
+                                android:background="#003300" />
+
+                            <View
+                                android:id="@+id/mapZoomSliderFill"
+                                android:layout_width="match_parent"
+                                android:layout_height="3dp"
+                                android:layout_gravity="center_vertical|start"
+                                android:layout_marginStart="6dp"
+                                android:layout_marginEnd="6dp"
+                                android:background="#00FF00" />
+                        </FrameLayout>
+
+                        <ImageView
+                            android:id="@+id/mapPinButton"
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:src="@drawable/ic_pin"
+                            android:background="#000000"
+                            android:padding="4dp"
+                            android:visibility="gone"
+                            android:focusable="false"
+                            android:focusableInTouchMode="false"
+                            android:defaultFocusHighlightEnabled="false" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <!-- Steps modal: scrollable list of journey steps -->
+                <FrameLayout
+                    android:id="@+id/mapStepsModal"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:orientation="vertical"
+                        android:padding="8dp">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Journey Steps"
+                            android:textColor="#00FF00"
+                            android:textSize="12sp"
+                            android:fontFamily="monospace"
+                            android:layout_marginBottom="6dp" />
+
+                        <ScrollView
+                            android:id="@+id/stepsScrollView"
+                            android:layout_width="match_parent"
+                            android:layout_height="0dp"
+                            android:layout_weight="1"
+                            android:background="#000000"
+                            android:focusable="false"
+                            android:focusableInTouchMode="false"
+                            android:defaultFocusHighlightEnabled="false"
+                            android:overScrollMode="never"
+                            android:scrollbars="none">
+
+                            <LinearLayout
+                                android:id="@+id/stepsListContainer"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical" />
+                        </ScrollView>
+                    </LinearLayout>
+                </FrameLayout>
+
+                <FrameLayout
+                    android:id="@+id/mapStopModal"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="center"
+                        android:orientation="vertical"
+                        android:gravity="center_horizontal">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Stop journey?"
+                            android:textColor="#00FF00"
+                            android:textSize="14sp"
+                            android:fontFamily="monospace"
+                            android:layout_marginBottom="12dp" />
+
+                        <LinearLayout
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/modalStopBtn"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Stop"
+                                android:textColor="#007700"
+                                android:textSize="12sp"
+                                android:fontFamily="monospace"
+                                android:paddingHorizontal="16dp"
+                                android:paddingVertical="4dp"
+                                android:layout_marginEnd="16dp" />
+
+                            <TextView
+                                android:id="@+id/modalCancelBtn"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Cancel"
+                                android:textColor="#00FF00"
+                                android:textSize="12sp"
+                                android:fontFamily="monospace"
+                                android:paddingHorizontal="16dp"
+                                android:paddingVertical="4dp" />
+
+                        </LinearLayout>
+                    </LinearLayout>
+                </FrameLayout>
+
+            </FrameLayout>
+
+            <!-- Pill tab bar at the very bottom -->
+            <FrameLayout
+                android:id="@+id/tabBar"
+                android:layout_width="match_parent"
+                android:layout_height="22dp"
+                android:background="#000000"
+                android:focusable="false"
+                android:focusableInTouchMode="false"
+                android:defaultFocusHighlightEnabled="false">
+
+                <!-- Time indicator - bottom left -->
+                <TextView
+                    android:id="@+id/timeText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="start|center_vertical"
+                    android:layout_marginStart="2dp"
+                    android:text="00:00"
+                    android:textColor="#00FF00"
+                    android:textSize="9sp"
+                    android:fontFamily="monospace"
+                    android:background="#000000"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <!-- Weather row (just right of timeText on the left side) -->
+                <LinearLayout
+                    android:id="@+id/weatherRow"
+                    android:orientation="horizontal"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:layout_gravity="start|center_vertical"
+                    android:gravity="center_vertical"
+                    android:layout_marginStart="40dp"
+                    android:background="#000000"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <!-- Lone mode: surrounding-devices indicator (person icon + foreign count),
+                         left of the weather widget. Shown only while Lone mode is active. -->
+                    <ImageView
+                        android:id="@+id/loneIndicatorIcon"
+                        android:layout_width="12dp"
+                        android:layout_height="12dp"
+                        android:layout_gravity="center_vertical"
+                        android:src="@drawable/ic_lone_person"
+                        android:tint="#00FF00"
+                        android:visibility="gone"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <TextView
+                        android:id="@+id/loneIndicatorCount"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="center_vertical"
+                        android:paddingStart="2dp"
+                        android:paddingEnd="8dp"
+                        android:textSize="9sp"
+                        android:textColor="#00FF00"
+                        android:fontFamily="monospace"
+                        android:visibility="gone"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <ImageView
+                        android:id="@+id/weatherIcon"
+                        android:layout_width="12dp"
+                        android:layout_height="12dp"
+                        android:layout_gravity="center_vertical"
+                        android:src="@drawable/weather_cloudy"
+                        android:visibility="gone"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <TextView
+                        android:id="@+id/weatherTemp"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="center_vertical"
+                        android:paddingStart="3dp"
+                        android:textSize="9sp"
+                        android:textColor="#00FF00"
+                        android:fontFamily="monospace"
+                        android:visibility="gone"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <ImageView
+                        android:id="@+id/recordingIndicator"
+                        android:layout_width="12dp"
+                        android:layout_height="12dp"
+                        android:layout_gravity="center_vertical"
+                        android:layout_marginStart="6dp"
+                        android:src="@drawable/ic_video_rec"
+                        android:visibility="gone"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+                </LinearLayout>
+
+                <!-- Call indicator (HFP incoming/active) docked just left of the battery indicator -->
+                <LinearLayout
+                    android:id="@+id/callIndicator"
+                    android:orientation="horizontal"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="end|bottom"
+                    android:layout_marginEnd="56dp"
+                    android:gravity="center_vertical"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <ImageView
+                        android:id="@+id/callIndicatorLabel"
+                        android:layout_width="12dp"
+                        android:layout_height="12dp"
+                        android:layout_marginEnd="4dp"
+                        android:layout_gravity="center_vertical"
+                        android:src="@drawable/ic_phone_glow"
+                        android:background="#000000"
+                        android:contentDescription="@null"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <TextView
+                        android:id="@+id/callDurationText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="center_vertical"
+                        android:paddingStart="3dp"
+                        android:text=""
+                        android:textColor="#00FF00"
+                        android:textSize="9sp"
+                        android:fontFamily="monospace"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+                </LinearLayout>
+
+                <!-- Battery + WiFi indicators - bottom right -->
+                <LinearLayout
+                    android:id="@+id/batteryIndicator"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:layout_gravity="end|center_vertical"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingEnd="2dp"
+                    android:background="#000000"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <!-- HF mic muted indicator; only visible when an HFP call is
+                         active and the user has toggled mute via touchpad hold-tap. -->
+                    <ImageView
+                        android:id="@+id/micMuteIndicator"
+                        android:layout_width="12dp"
+                        android:layout_height="12dp"
+                        android:layout_gravity="center_vertical"
+                        android:layout_marginEnd="4dp"
+                        android:src="@drawable/ic_mic_off"
+                        android:contentDescription="mic muted"
+                        android:background="#000000"
+                        android:visibility="gone"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <!-- WiFi radio-signal icon; visible only when wifi is on. -->
+                    <ImageView
+                        android:id="@+id/wifiIndicator"
+                        android:layout_width="12dp"
+                        android:layout_height="12dp"
+                        android:layout_gravity="center_vertical"
+                        android:layout_marginEnd="4dp"
+                        android:src="@drawable/ic_wifi"
+                        android:contentDescription="wifi"
+                        android:background="#000000"
+                        android:visibility="gone"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <!-- Battery icon container -->
+                    <FrameLayout
+                        android:layout_width="16dp"
+                        android:layout_height="10dp"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <View
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:background="@drawable/battery_body_shape"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                        <View
+                            android:id="@+id/batteryFill"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_gravity="start|center_vertical"
+                            android:layout_margin="2dp"
+                            android:background="#00FF00"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+                    </FrameLayout>
+
+                    <!-- Terminal nub -->
+                    <View
+                        android:layout_width="2dp"
+                        android:layout_height="4dp"
+                        android:background="#00FF00"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <TextView
+                        android:id="@+id/batteryText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="100%"
+                        android:textColor="#00FF00"
+                        android:textSize="9sp"
+                        android:fontFamily="monospace"
+                        android:background="#000000"
+                        android:layout_marginStart="3dp"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+                </LinearLayout>
+
+                <!-- Centered pill container -->
+                <FrameLayout
+                    android:id="@+id/pillContainer"
+                    android:layout_width="190dp"
+                    android:layout_height="18dp"
+                    android:layout_gravity="center_horizontal|bottom"
+                    android:background="@drawable/pill_tab_bg"
+                    android:clipChildren="false"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <!-- Sliding highlight capsule (drawable inset keeps pill border visible) -->
+                    <View
+                        android:id="@+id/pillHighlight"
+                        android:layout_width="38dp"
+                        android:layout_height="match_parent"
+                        android:background="@drawable/pill_tab_highlight"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <!-- Tab icons row over the highlight -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:orientation="horizontal"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <FrameLayout
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1">
+
+                            <ImageView
+                                android:id="@+id/tabMusic"
+                                android:layout_width="13dp"
+                                android:layout_height="13dp"
+                                android:layout_gravity="center"
+                                android:src="@drawable/ic_music_note"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1">
+
+                            <ImageView
+                                android:id="@+id/tabTodo"
+                                android:layout_width="13dp"
+                                android:layout_height="13dp"
+                                android:layout_gravity="center"
+                                android:src="@drawable/ic_calendar"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1">
+
+                            <ImageView
+                                android:id="@+id/tabChat"
+                                android:layout_width="13dp"
+                                android:layout_height="13dp"
+                                android:layout_gravity="center"
+                                android:src="@drawable/ic_chat_bubble"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1">
+
+                            <ImageView
+                                android:id="@+id/tabChatList"
+                                android:layout_width="13dp"
+                                android:layout_height="13dp"
+                                android:layout_gravity="center"
+                                android:src="@drawable/ic_chat_list"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1">
+
+                            <ImageView
+                                android:id="@+id/tabTelegram"
+                                android:layout_width="13dp"
+                                android:layout_height="13dp"
+                                android:layout_gravity="center"
+                                android:src="@drawable/ic_telegram"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1">
+
+                            <ImageView
+                                android:id="@+id/tabReid"
+                                android:layout_width="13dp"
+                                android:layout_height="13dp"
+                                android:layout_gravity="center"
+                                android:src="@drawable/ic_person"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </FrameLayout>
+
+                        <!-- Night vision tab (commented out)
+                        <FrameLayout
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1">
+
+                            <ImageView
+                                android:id="@+id/tabNightvision"
+                                android:layout_width="16dp"
+                                android:layout_height="16dp"
+                                android:layout_gravity="center"
+                                android:src="@drawable/ic_nightvision"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </FrameLayout>
+                        -->
+
+                    </LinearLayout>
+
+                </FrameLayout>
+
+            </FrameLayout>
+
+        </LinearLayout>
+
+        <!-- Step strip overlay: anchored to the very top of the display (sibling of mainContentLayout
+             inside chatContainer). It first uses the empty space above the map content; only if it
+             still needs more room does it extend downward over the map. 3 visible rows + 1 hidden
+             buffer below the clip boundary, used by the slide animation. -->
+        <FrameLayout
+            android:id="@+id/mapStepStripClip"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:background="#000000"
+            android:clipChildren="true"
+            android:clipToPadding="true"
+            android:visibility="gone"
+            android:focusable="false"
+            android:focusableInTouchMode="false"
+            android:defaultFocusHighlightEnabled="false">
+
+            <LinearLayout
+                android:id="@+id/mapStepStrip"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="#000000"
+                android:focusable="false"
+                android:focusableInTouchMode="false"
+                android:defaultFocusHighlightEnabled="false">
+
+                <TextView
+                    android:id="@+id/mapStepRowPrev"
+                    android:layout_width="match_parent"
+                    android:layout_height="18dp"
+                    android:background="#000000"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace"
+                    android:gravity="center"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <TextView
+                    android:id="@+id/mapStepRowCurrent"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="#000000"
+                    android:textSize="13.5sp"
+                    android:fontFamily="monospace"
+                    android:gravity="center"
+                    android:maxLines="2"
+                    android:ellipsize="end"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <TextView
+                    android:id="@+id/mapStepRowNext"
+                    android:layout_width="match_parent"
+                    android:layout_height="18dp"
+                    android:background="#000000"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace"
+                    android:gravity="center"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
+                <TextView
+                    android:id="@+id/mapStepRowBuffer"
+                    android:layout_width="match_parent"
+                    android:layout_height="18dp"
+                    android:background="#000000"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace"
+                    android:gravity="center"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false" />
+            </LinearLayout>
+        </FrameLayout>
+
+    </FrameLayout>
+
+    <ImageView
+        android:id="@+id/minimapView"
+        android:layout_width="120dp"
+        android:layout_height="120dp"
+        android:background="#000000"
+        android:visibility="gone"
+        android:focusable="false"
+        android:focusableInTouchMode="false"
+        android:defaultFocusHighlightEnabled="false"
+        android:scaleType="centerCrop"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

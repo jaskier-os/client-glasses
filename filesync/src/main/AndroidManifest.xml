@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- Signature-level permission needed to toggle the WiFi radio on Android 10+. On rooted
+         Rokid firmware we grant this via `pm grant` in the deploy script so filesync can enable
+         WiFi briefly for each sync session and disable it after. Regular phones will refuse
+         the grant; the WifiDirectHost.toggleWifi() path logs and aborts gracefully in that case. -->
+    <uses-permission
+        android:name="android.permission.NETWORK_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.OVERRIDE_WIFI_CONFIG"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Location foreground-service type so the WifiP2pManager permission check
+         (which requires FINE_LOCATION: allow, not just "foreground" appops mode)
+         treats our background service as location-foreground during sync. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Signature-level permission gating the audio-archive-sync broadcast. Declared
+         in the listener app manifest; because filesync is same-signature, the grant
+         is automatic. Used by this app as SENDER, see FileSyncService.maybeRequestAudioArchiveSync. -->
+    <uses-permission android:name="com.repository.glasses.listener.permission.AUDIO_ARCHIVE_SYNC" />
+
+    <application
+        android:name=".FileSyncApp"
+        android:allowBackup="false"
+        android:label="File Sync">
+
+        <service
+            android:name=".FileSyncService"
+            android:exported="true"
+            android:foregroundServiceType="dataSync|location">
+            <intent-filter>
+                <action android:name="com.repository.glasses.filesync.BIND" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="com.repository.glasses.filesync.BIND_NEW_FILE" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".boot.BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>

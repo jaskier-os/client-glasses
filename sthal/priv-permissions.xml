@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  privapp-permissions-com.repository.glasses.listener.xml
+
+  Grants the signature|privileged permissions required by the glasses listener
+  app on a device where the app is NOT signed with the platform key. Dropped
+  into /system/etc/permissions/ via the DIY overlay:
+    /data/local/diy-overlay/system/etc/permissions/privapp-permissions-com.repository.glasses.listener.xml
+
+  The listener APK itself must be in /system/priv-app/ (also via overlay) for
+  PackageManager to treat it as a privileged app. That install step is out of
+  scope for this worktree.
+-->
+<permissions>
+    <privapp-permissions package="com.repository.glasses.listener">
+        <!-- Read HAL-captured audio from the sound trigger LAB. -->
+        <permission name="android.permission.CAPTURE_AUDIO_HOTWORD"/>
+        <!-- Keep the listener alive as a foreground service through Doze. -->
+        <permission name="android.permission.CAPTURE_AUDIO_OUTPUT"/>
+        <!-- Required by SoundTrigger.listModules / attachModule on API 31+:
+             the middleware dispatches privapp callers via
+             listModulesAsMiddleman, which requires this permission.
+             Without it the call throws SecurityException and we fall back
+             to ARM-ONNX. -->
+        <permission name="android.permission.SOUNDTRIGGER_DELEGATE_IDENTITY"/>
+        <!-- Required by BluetoothA2dpSink.connect/disconnect on API 31+:
+             these methods are gated by signature|privileged and return
+             silently/false without this permission. Needed for Stage E
+             wear-sensor A2DP routing to tear down the A2DP link when
+             the glasses are removed so the host PC falls back to its
+             local speaker automatically. -->
+        <permission name="android.permission.BLUETOOTH_PRIVILEGED"/>
+        <!-- Path D SVA: SoundTriggerManager.loadKeyphraseSoundModel +
+             startRecognition require these on Android 12+. Without
+             MANAGE_SOUND_TRIGGER the middleware throws SecurityException
+             before binder serialization, so the 1 MB transaction limit
+             never gets a chance to bite. -->
+        <permission name="android.permission.MANAGE_SOUND_TRIGGER"/>
+        <permission name="android.permission.KEYPHRASE_ENROLLMENT_APPLICATION"/>
+        <permission name="android.permission.MANAGE_VOICE_KEYPHRASES"/>
+    </privapp-permissions>
+</permissions>

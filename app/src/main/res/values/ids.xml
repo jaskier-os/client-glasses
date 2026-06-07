@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="spring_translate_x" type="id" />
+    <item name="spring_scale_x" type="id" />
+    <item name="spring_scale_y" type="id" />
+    <item name="tab_hover_tint_anim" type="id" />
+    <item name="tab_hover_target_color" type="id" />
+</resources>

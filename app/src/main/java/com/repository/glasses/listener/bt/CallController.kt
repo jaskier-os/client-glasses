@@ -1,0 +1,775 @@
+package com.repository.glasses.listener.bt
+
+import android.content.Context
+import android.content.Intent
+import android.media.AudioAttributes
+import android.media.MediaPlayer
+import android.os.SystemClock
+import android.util.Log
+import java.io.IOException
+import java.util.concurrent.TimeUnit
+import com.repository.glasses.listener.MainActivity
+import com.repository.glasses.listener.R
+import com.repository.glasses.listener.audio.TtsPlayer
+import com.repository.glasses.listener.audio.routing.WearSensor
+import com.repository.glasses.listener.service.ListenerService
+import com.repository.glasses.listener.ui.CallOverlay
+import com.repository.glasses.tracing.GT
+import org.json.JSONObject
+
+/**
+ * High-level state machine for HFP incoming/ongoing calls on the glasses.
+ *
+ * HFP call state constants (match AOSP BluetoothHeadsetClientCall):
+ *   INCOMING=4, ACTIVE=0, WAITING=5, HELD=1, DIALING=2, ALERTING=3, TERMINATED=7.
+ * Audio state: DISCONNECTED=0, CONNECTED=1, CONNECTING=2.
+ *
+ * Reacts to BtManagerBridge.CallListener callbacks, drives CallOverlay for
+ * incoming-call UI, controls LED ring pattern via Rokid lights_ctrl, pauses
+ * TTS on answer, broadcasts ACTION_CALL_UI_STATE so MainActivity can adjust
+ * focus + show/hide bottom-bar indicators (call duration, HF mic-mute icon).
+ * Also owns HF mic mute toggle (driven by touchpad hold-tap during any
+ * active SCO session, including PC-as-AG cases without an HFP call event).
+ */
+class CallController : BtManagerBridge.CallListener {
+
+    enum class CallPhase { IDLE, INCOMING, OUTGOING_DIALING, ACTIVE, ENDING }
+
+    companion object {
+        private const val TAG = "App:Call"
+
+        // HFP call states
+        private const val STATE_ACTIVE = 0
+        private const val STATE_HELD = 1
+        private const val STATE_DIALING = 2
+        private const val STATE_ALERTING = 3
+        private const val STATE_INCOMING = 4
+        private const val STATE_WAITING = 5
+        private const val STATE_TERMINATED = 7
+
+        // Audio states. AOSP BluetoothHeadsetClient defines STATE_AUDIO_*
+        // as DISCONNECTED=0, CONNECTING=1, CONNECTED=2.
+        private const val AUDIO_DISCONNECTED = 0
+        private const val AUDIO_CONNECTING = 1
+        private const val AUDIO_CONNECTED = 2
+
+        // Rokid lights_ctrl PHONE_RING event
+        private const val LIGHTS_EVENT_TYPE_SPECIAL = 3
+        private const val LIGHTS_EVENT_PHONE_RING = 3017
+    }
+
+    private var bridge: BtManagerBridge? = null
+    private var overlay: CallOverlay? = null
+    private var ttsPlayer: TtsPlayer? = null
+    private var ctx: Context? = null
+    private var remoteLog: ((String) -> Unit)? = null
+    private var ringtonePlayer: MediaPlayer? = null
+    private var wearSensor: WearSensor? = null
+    @Volatile private var contactsCache: ContactsCache? = null
+    @Volatile private var activeAgMac: String = ""
+
+    /**
+     * Wire the contacts cache that should be consulted when an HFP call arrives
+     * with an empty name field (AOSP HFP profile only carries the number). The
+     * AG identifier scopes the lookup so multiple paired phones don't collide.
+     */
+    fun setActiveAg(agMac: String, cache: ContactsCache) {
+        activeAgMac = agMac
+        contactsCache = cache
+        try { cache.loadIntoMemory(agMac) } catch (_: Exception) {}
+    }
+
+    /**
+     * Wear state as tracked by this controller. null = unknown (no signal received yet).
+     * We default to true (worn) so that before the first wear event we behave as before
+     * (full UX on incoming call). If a "0" broadcast arrives, we transition to OFF_HEAD.
+     */
+    @Volatile private var wornState: Boolean = true
+
+    @Volatile var phase: CallPhase = CallPhase.IDLE
+        private set
+    @Volatile var currentCallId: Int = -1
+        private set
+    @Volatile var currentAddr: String = ""
+        private set
+    @Volatile var currentNumber: String = ""
+        private set
+    @Volatile var currentName: String = ""
+        private set
+    @Volatile var startedElapsedRealtime: Long = 0L
+        private set
+    @Volatile var scoActive: Boolean = false
+        private set
+    @Volatile var micMuted: Boolean = false
+        private set
+
+    // Dedupe keys
+    private var lastCallKey: Long = -1L           // (callId << 8) | state
+    private var lastAudioKey: String = ""         // addr|state
+
+    fun start(
+        bridge: BtManagerBridge,
+        overlay: CallOverlay,
+        ttsPlayer: TtsPlayer,
+        ctx: Context,
+        remoteLog: ((String) -> Unit)? = null
+    ) {
+        this.bridge = bridge
+        this.overlay = overlay
+        this.ttsPlayer = ttsPlayer
+        this.ctx = ctx.applicationContext
+        this.remoteLog = remoteLog
+        Log.i(TAG, "event=controller_start")
+        log("CallController started")
+
+        // Seed wornState from the property so first decision is correct even before any broadcast.
+        wornState = readWearProperty() ?: true
+        Log.i(TAG, "event=wear_initial worn=$wornState")
+
+        val sensor = WearSensor(ctx = ctx.applicationContext, log = { log("wear: $it") })
+        wearSensor = sensor
+        sensor.start(object : WearSensor.Listener {
+            override fun onWearChanged(wearing: Boolean) {
+                handleWearChanged(wearing)
+            }
+        })
+    }
+
+    fun stop() {
+        hideLed()
+        stopRingtone()
+        overlay?.hide()
+        reset()
+        try { wearSensor?.stop() } catch (_: Exception) {}
+        wearSensor = null
+        bridge = null
+        overlay = null
+        ttsPlayer = null
+        ctx = null
+        Log.i(TAG, "event=controller_stop")
+        log("CallController stopped")
+    }
+
+    /**
+     * Called by ListenerService via the BtManagerBridge addOnBoundListener hook.
+     * Queries the current call snapshot and aligns the glasses UI with it.
+     */
+    fun onBtManagerBound() {
+        Log.i(TAG, "event=bt_bound_resync phase=$phase worn=$wornState")
+        resyncFromSnapshot("bt_bound")
+        // Always re-emit UI state on bind. When MainActivity restarts (config
+        // change, process recreated) it registers callUiStateReceiver fresh and
+        // would otherwise miss the indicator state until the next snapshot
+        // change. resyncFromSnapshot only broadcasts on transitions; force one
+        // here so a re-bound UI sees current micMuted/scoActive immediately.
+        broadcastUiState()
+    }
+
+    // ---- Public control ----
+
+    fun accept(): Boolean {
+        Log.i(TAG, "event=action_accept_entry phase=$phase id=$currentCallId")
+        val b = bridge ?: run {
+            Log.w(TAG, "event=action_accept_fail reason=no_bridge")
+            return false
+        }
+        val addr = resolveAddr()
+        if (addr.isEmpty()) {
+            Log.w(TAG, "event=action_accept_fail reason=no_hfp_device")
+            log("accept: no HFP device")
+            return false
+        }
+        Log.i(TAG, "event=action_accept_invoke addr=$addr id=$currentCallId")
+        log("accept addr=$addr")
+        val ok = b.acceptCall(addr, 0)
+        Log.i(TAG, "event=action_accept_result ok=$ok addr=$addr")
+        return ok
+    }
+
+    fun decline(): Boolean {
+        Log.i(TAG, "event=action_decline_entry phase=$phase id=$currentCallId")
+        val b = bridge ?: run {
+            Log.w(TAG, "event=action_decline_fail reason=no_bridge")
+            return false
+        }
+        val addr = resolveAddr()
+        if (addr.isEmpty()) {
+            Log.w(TAG, "event=action_decline_fail reason=no_hfp_device")
+            log("decline: no HFP device")
+            return false
+        }
+        Log.i(TAG, "event=action_decline_invoke addr=$addr id=$currentCallId")
+        log("decline addr=$addr")
+        val ok = b.rejectCall(addr)
+        Log.i(TAG, "event=action_decline_result ok=$ok addr=$addr")
+        return ok
+    }
+
+    /**
+     * Toggle the HF microphone mute on the AG side. Only valid in CallPhase.ACTIVE;
+     * silently no-ops otherwise so a stray hold-tap during INCOMING / IDLE doesn't
+     * accidentally arm a mute that nobody asked for. UI state lives here -- the
+     * indicator subscribes via the ACTION_CALL_UI_STATE broadcast.
+     */
+    fun toggleHfMicMute(): Boolean {
+        // Live-refresh from bt-manager so we don't miss SCO sessions that came
+        // up before our broadcast receiver registered (e.g. PC AG already
+        // streaming when the listener bound, no AG_CALL_CHANGED ever fires).
+        try { resyncFromSnapshot("mute_toggle_entry") } catch (e: Exception) {
+            log("mute toggle resync failed: ${e.message}")
+        }
+        Log.i(TAG, "event=action_mute_toggle_entry phase=$phase sco=$scoActive muted=$micMuted")
+        // Gate on actual HF audio activity, not call phase. When the AG is a PC
+        // (or anything that brings up SCO without sending AG_CALL_CHANGED), phase
+        // stays IDLE forever -- but the wearer is clearly speaking and wants to
+        // mute. scoActive is the real "mic is hot" signal here.
+        if (!scoActive && phase != CallPhase.ACTIVE) {
+            Log.i(TAG, "event=action_mute_toggle_skip reason=no_hf_audio phase=$phase sco=$scoActive")
+            return false
+        }
+        val b = bridge ?: run {
+            Log.w(TAG, "event=action_mute_toggle_fail reason=no_bridge")
+            return false
+        }
+        val addr = resolveAddr()
+        if (addr.isEmpty()) {
+            Log.w(TAG, "event=action_mute_toggle_fail reason=no_hfp_device")
+            return false
+        }
+        val next = !micMuted
+        Log.i(TAG, "event=action_mute_toggle_invoke addr=$addr next=$next")
+        log("toggleHfMicMute addr=$addr next=$next")
+        val ok = b.setHfMicMute(addr, next)
+        Log.i(TAG, "event=action_mute_toggle_result ok=$ok addr=$addr next=$next")
+        if (ok) {
+            micMuted = next
+            broadcastUiState()
+        }
+        return ok
+    }
+
+    fun terminateActive(): Boolean {
+        Log.i(TAG, "event=action_terminate_entry phase=$phase id=$currentCallId")
+        val b = bridge ?: run {
+            Log.w(TAG, "event=action_terminate_fail reason=no_bridge")
+            return false
+        }
+        val addr = resolveAddr()
+        if (addr.isEmpty() || currentCallId < 0) {
+            Log.w(TAG, "event=action_terminate_fail reason=no_active addr='$addr' id=$currentCallId")
+            log("terminateActive: no active call (addr='$addr' id=$currentCallId)")
+            return false
+        }
+        Log.i(TAG, "event=action_terminate_invoke addr=$addr id=$currentCallId")
+        log("terminateActive addr=$addr id=$currentCallId")
+        val ok = b.terminateCall(addr, currentCallId)
+        Log.i(TAG, "event=action_terminate_result ok=$ok addr=$addr id=$currentCallId")
+        return ok
+    }
+
+    private fun resolveAddr(): String {
+        if (currentAddr.isNotEmpty()) return currentAddr
+        val b = bridge ?: return ""
+        return b.getPrimaryHfpDeviceAddress()
+    }
+
+    // ---- BtManagerBridge.CallListener ----
+
+    override fun onCallStateChanged(
+        deviceAddress: String,
+        callId: Int,
+        uuid: String,
+        state: Int,
+        number: String,
+        name: String,
+        multiParty: Boolean,
+        outgoing: Boolean
+    ) = GT.section("audio.hfp.call_state") {
+        GT.counter("audio.hfp.call_active", if (state == STATE_ACTIVE) 1L else 0L)
+        val key = ((callId.toLong() and 0xFFFFFF) shl 8) or (state.toLong() and 0xFF)
+        if (key == lastCallKey) {
+            Log.d(TAG, "event=call_state_dedup addr=$deviceAddress id=$callId state=$state")
+            return@section
+        }
+        lastCallKey = key
+
+        val stateName = when (state) {
+            STATE_ACTIVE -> "ACTIVE"
+            STATE_HELD -> "HELD"
+            STATE_DIALING -> "DIALING"
+            STATE_ALERTING -> "ALERTING"
+            STATE_INCOMING -> "INCOMING"
+            STATE_WAITING -> "WAITING"
+            STATE_TERMINATED -> "TERMINATED"
+            else -> "UNKNOWN($state)"
+        }
+        Log.i(TAG, "event=call_state addr=$deviceAddress id=$callId state=$stateName outgoing=$outgoing multiParty=$multiParty hasName=${name.isNotEmpty()} hasNum=${number.isNotEmpty()}")
+        log("onCallStateChanged addr=$deviceAddress id=$callId state=$state num='$number' name='$name' out=$outgoing")
+
+        // Drop spurious events from secondary AGs. Symptom: when two phones are
+        // paired, both send AG_CALL_CHANGED for the same call. The wrong AG
+        // arrives with a bogus number (hidden-API hashed toString() value like
+        // "-1466788360" or empty). If we honored those, currentAddr gets clobbered
+        // and the next accept/decline goes to the wrong device, returning false.
+        val numberLooksReal = number.isNotEmpty() &&
+            (number.startsWith("+") || number.firstOrNull()?.isDigit() == true)
+        if (!numberLooksReal && state != STATE_TERMINATED) {
+            Log.w(TAG, "event=call_state_drop addr=$deviceAddress state=$state reason=bogus_number num='$number'")
+            return@section
+        }
+        // If we already latched a different AG, ignore late events from another
+        // one until we go IDLE.
+        if (currentAddr.isNotEmpty() && deviceAddress != currentAddr && phase != CallPhase.IDLE) {
+            Log.w(TAG, "event=call_state_drop addr=$deviceAddress reason=other_ag_active current=$currentAddr")
+            return@section
+        }
+        currentAddr = deviceAddress
+        currentCallId = callId
+        currentNumber = number
+        // HFP itself does not transmit caller name. If the AG-supplied name is
+        // empty, fall back to a contacts-cache lookup synced from the phone.
+        currentName = name.ifEmpty {
+            val looked = try { contactsCache?.lookup(number).orEmpty() } catch (_: Exception) { "" }
+            Log.i(TAG, "event=name_lookup number=$number cache=${contactsCache != null} ag=$activeAgMac result='$looked'")
+            looked
+        }
+
+        when (state) {
+            STATE_INCOMING, STATE_WAITING -> enterIncoming()
+            STATE_DIALING, STATE_ALERTING -> enterDialing()
+            STATE_ACTIVE -> enterActive()
+            STATE_TERMINATED -> enterIdle("terminated")
+            STATE_HELD -> { /* no UI change for hold */ }
+        }
+    }
+
+    override fun onCallAudioStateChanged(deviceAddress: String, audioState: Int) = GT.section("audio.hfp.sco_state") {
+        GT.counter("audio.hfp.sco_active", if (audioState == AUDIO_CONNECTED) 1L else 0L)
+        val key = "$deviceAddress|$audioState"
+        if (key == lastAudioKey) {
+            Log.d(TAG, "event=sco_state_dedup addr=$deviceAddress state=$audioState")
+            return@section
+        }
+        lastAudioKey = key
+
+        val stateName = when (audioState) {
+            AUDIO_CONNECTED -> "CONNECTED"
+            AUDIO_DISCONNECTED -> "DISCONNECTED"
+            AUDIO_CONNECTING -> "CONNECTING"
+            else -> "UNKNOWN($audioState)"
+        }
+        Log.i(TAG, "event=sco_state addr=$deviceAddress state=$stateName phase=$phase")
+        log("onCallAudioStateChanged addr=$deviceAddress state=$audioState")
+
+        when (audioState) {
+            AUDIO_CONNECTED -> {
+                scoActive = true
+                Log.i(TAG, "event=sco_connected addr=$deviceAddress phase=$phase")
+                if (phase != CallPhase.ACTIVE && (phase == CallPhase.INCOMING || phase == CallPhase.OUTGOING_DIALING)) {
+                    Log.i(TAG, "event=sco_upgrade_to_active addr=$deviceAddress from_phase=$phase")
+                    // SCO came up before AG call-state ACTIVE -- upgrade now
+                    enterActive()
+                } else {
+                    broadcastUiState()
+                }
+            }
+            AUDIO_DISCONNECTED -> {
+                scoActive = false
+                // Mute is meaningless without an active SCO uplink; clear it so
+                // the next session starts unmuted and the indicator hides.
+                if (micMuted) {
+                    Log.i(TAG, "event=mute_clear reason=sco_disconnected addr=$deviceAddress")
+                    micMuted = false
+                }
+                Log.i(TAG, "event=sco_disconnected addr=$deviceAddress phase=$phase")
+                if (phase == CallPhase.ACTIVE) {
+                    Log.w(TAG, "event=sco_dropped_during_active addr=$deviceAddress")
+                    enterIdle("sco-dropped")
+                } else {
+                    // Even when phase is IDLE (e.g. PC HFP mic without a real call),
+                    // notify UI so the mute indicator hides.
+                    broadcastUiState()
+                }
+            }
+            AUDIO_CONNECTING -> {
+                Log.i(TAG, "event=sco_connecting addr=$deviceAddress phase=$phase")
+                broadcastUiState()
+            }
+        }
+    }
+
+    override fun onHfpConnectionChanged(deviceAddress: String, state: Int) {
+        // BluetoothProfile states: DISCONNECTED=0, CONNECTING=1, CONNECTED=2, DISCONNECTING=3
+        val stateName = when (state) {
+            0 -> "DISCONNECTED"
+            1 -> "CONNECTING"
+            2 -> "CONNECTED"
+            3 -> "DISCONNECTING"
+            else -> "UNKNOWN($state)"
+        }
+        Log.i(TAG, "event=hfp_conn_state addr=$deviceAddress state=$stateName")
+        log("onHfpConnectionChanged addr=$deviceAddress state=$state")
+    }
+
+    // ---- Phase transitions ----
+
+    private fun enterIncoming() {
+        if (phase == CallPhase.INCOMING) return
+        val prev = phase
+        phase = CallPhase.INCOMING
+        Log.i(TAG, "event=phase_transition from=$prev to=INCOMING addr=$currentAddr id=$currentCallId worn=$wornState")
+        log("phase -> INCOMING worn=$wornState")
+        if (wornState) {
+            showIncomingUi()
+        } else {
+            Log.i(TAG, "event=incoming_suppressed_off_head addr=$currentAddr id=$currentCallId")
+            log("incoming suppressed (off-head); will restore on don")
+        }
+    }
+
+    /**
+     * Actually surface the incoming call on the glasses: overlay + ringtone + LED
+     * + foreground MainActivity + UI-state broadcast. Used by enterIncoming() when
+     * worn, and by the wear-on/bt-bound resync path when we discover a call that
+     * was already incoming.
+     */
+    private fun showIncomingUi() {
+        overlay?.showIncoming(currentName, currentNumber)
+        showLed()
+        ctx?.let { startRingtone(it) }
+        launchMainActivity()
+        broadcastUiState()
+    }
+
+    private fun enterDialing() {
+        if (phase == CallPhase.OUTGOING_DIALING) return
+        val prev = phase
+        phase = CallPhase.OUTGOING_DIALING
+        Log.i(TAG, "event=phase_transition from=$prev to=OUTGOING_DIALING addr=$currentAddr id=$currentCallId")
+        log("phase -> OUTGOING_DIALING")
+        broadcastUiState()
+    }
+
+    private fun enterActive() {
+        if (phase == CallPhase.ACTIVE) return
+        val prev = phase
+        phase = CallPhase.ACTIVE
+        startedElapsedRealtime = SystemClock.elapsedRealtime()
+        Log.i(TAG, "event=phase_transition from=$prev to=ACTIVE addr=$currentAddr id=$currentCallId scoActive=$scoActive")
+        log("phase -> ACTIVE")
+        overlay?.hide()
+        hideLed()
+        stopRingtone()
+        try { ttsPlayer?.interrupt() } catch (e: Exception) {
+            log("ttsPlayer.interrupt failed: ${e.message}")
+        }
+        broadcastUiState()
+    }
+
+    private fun enterIdle(reason: String) {
+        if (phase == CallPhase.IDLE) return
+        val prev = phase
+        val durMs = if (startedElapsedRealtime > 0L) SystemClock.elapsedRealtime() - startedElapsedRealtime else 0L
+        Log.i(TAG, "event=phase_transition from=$prev to=IDLE reason=$reason durMs=$durMs addr=$currentAddr id=$currentCallId")
+        log("phase -> IDLE ($reason)")
+        phase = CallPhase.IDLE
+        overlay?.hide()
+        hideLed()
+        stopRingtone()
+        broadcastUiState()
+        reset()
+    }
+
+    private fun reset() {
+        phase = CallPhase.IDLE
+        currentCallId = -1
+        currentAddr = ""
+        currentNumber = ""
+        currentName = ""
+        startedElapsedRealtime = 0L
+        scoActive = false
+        micMuted = false
+        lastCallKey = -1L
+        lastAudioKey = ""
+    }
+
+    // ---- Side effects ----
+
+    private fun broadcastUiState() {
+        val c = ctx ?: return
+        val intent = Intent(ListenerService.ACTION_CALL_UI_STATE).apply {
+            setPackage(c.packageName)
+            putExtra("phase", phase.name)
+            putExtra("number", currentNumber)
+            putExtra("name", currentName)
+            putExtra("callId", currentCallId)
+            putExtra("startedElapsedRealtime", startedElapsedRealtime)
+            putExtra("scoActive", scoActive)
+            putExtra("micMuted", micMuted)
+        }
+        c.sendBroadcast(intent)
+    }
+
+    private fun launchMainActivity() {
+        val c = ctx ?: return
+        try {
+            val intent = Intent(c, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            c.startActivity(intent)
+        } catch (e: Exception) {
+            log("launchMainActivity failed: ${e.message}")
+        }
+    }
+
+    private fun showLed() {
+        runShell(
+            "service call lights_ctrl 8 i32 $LIGHTS_EVENT_TYPE_SPECIAL i32 $LIGHTS_EVENT_PHONE_RING"
+        )
+    }
+
+    private fun hideLed() {
+        runShell(
+            "service call lights_ctrl 9 i32 $LIGHTS_EVENT_TYPE_SPECIAL i32 $LIGHTS_EVENT_PHONE_RING"
+        )
+    }
+
+    private fun runShell(cmd: String) {
+        Thread {
+            try {
+                val process = ProcessBuilder(listOf("sh", "-c", cmd))
+                    .redirectErrorStream(true)
+                    .start()
+                val output = process.inputStream.bufferedReader().use { it.readText() }
+                val finished = process.waitFor(2, TimeUnit.SECONDS)
+                if (!finished) {
+                    process.destroy()
+                    log("runShell timeout cmd='$cmd'")
+                    return@Thread
+                }
+                val exit = process.exitValue()
+                if (exit != 0) {
+                    log("runShell non-zero exit=$exit cmd='$cmd' out='${output.trim()}'")
+                }
+            } catch (e: IOException) {
+                log("runShell io failed: ${e.message}")
+            } catch (e: InterruptedException) {
+                log("runShell interrupted: ${e.message}")
+                Thread.currentThread().interrupt()
+            } catch (e: Exception) {
+                log("runShell failed: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun startRingtone(ctx: Context) {
+        if (ringtonePlayer != null) return
+        try {
+            val mp = MediaPlayer.create(ctx, R.raw.ringtone_incoming) ?: run {
+                log("startRingtone: MediaPlayer.create returned null")
+                return
+            }
+            mp.isLooping = true
+            mp.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            )
+            mp.setOnErrorListener { _: android.media.MediaPlayer, _: Int, _: Int -> true }
+            mp.start()
+            ringtonePlayer = mp
+            log("ringtone started")
+        } catch (e: Exception) {
+            log("startRingtone failed: ${e.message}")
+        }
+    }
+
+    private fun stopRingtone() {
+        val mp = ringtonePlayer ?: return
+        ringtonePlayer = null
+        try {
+            if (mp.isPlaying) mp.stop()
+        } catch (e: Exception) {
+            log("stopRingtone stop failed: ${e.message}")
+        }
+        try {
+            mp.release()
+            log("ringtone stopped")
+        } catch (e: Exception) {
+            log("stopRingtone release failed: ${e.message}")
+        }
+    }
+
+    private fun log(msg: String) {
+        Log.d(TAG, msg)
+        remoteLog?.invoke("CallController: $msg")
+    }
+
+    // ---- Wear handling ----
+
+    private fun readWearProperty(): Boolean? {
+        return try {
+            val cls = Class.forName("android.os.SystemProperties")
+            val m = cls.getMethod("get", String::class.java, String::class.java)
+            val v = m.invoke(null, "vendor.rkd.glasses.is_take_on", "") as String
+            when (v) {
+                "1" -> true
+                "0" -> false
+                else -> null
+            }
+        } catch (t: Throwable) {
+            log("readWearProperty failed: ${t.message}")
+            null
+        }
+    }
+
+    private fun handleWearChanged(wearing: Boolean) {
+        if (wornState == wearing) return
+        val prev = wornState
+        wornState = wearing
+        Log.i(TAG, "event=wear_changed from=$prev to=$wearing phase=$phase")
+        log("wear changed $prev -> $wearing phase=$phase")
+
+        if (wearing) {
+            // OFF -> ON. Restore UI for whatever state the call is actually in.
+            if (phase == CallPhase.INCOMING) {
+                // Late-surface suppressed incoming UI.
+                Log.i(TAG, "event=wear_on_restore_incoming id=$currentCallId")
+                showIncomingUi()
+            } else {
+                // No active incoming inside us; resync from the snapshot in case the
+                // call originated or transitioned while we were off-head.
+                resyncFromSnapshot("wear_on")
+            }
+        } else {
+            // ON -> OFF. Hide user-visible artifacts but keep internal state so
+            // re-donning mid-ring restores the UI.
+            if (phase == CallPhase.INCOMING) {
+                Log.i(TAG, "event=wear_off_suppress_incoming id=$currentCallId")
+                overlay?.hide()
+                hideLed()
+                stopRingtone()
+                // Reset UI (MainActivity) to IDLE focus so nothing is visible.
+                broadcastUiStatePhase(CallPhase.IDLE)
+            } else if (phase == CallPhase.ACTIVE) {
+                // Call audio stays routed -- we just don't need to show anything.
+                overlay?.hide()
+                // Keep ACTIVE broadcast in case the UI comes back; no ringtone anyway.
+            }
+        }
+    }
+
+    private fun resyncFromSnapshot(reason: String) {
+        val b = bridge ?: return
+        val json = try { b.getCallSnapshotJson() } catch (_: Exception) { "{}" }
+        val snap = parseSnapshot(json)
+        Log.i(TAG, "event=snapshot_resync reason=$reason raw='$json' parsed=$snap worn=$wornState phase=$phase")
+        log("snapshot($reason): $json")
+        if (snap == null) return
+
+        // Always sync SCO state from the snapshot. The HFP-HF AUDIO_STATE_CHANGED
+        // broadcast can fire before we register a receiver (PC AG already
+        // streaming when the listener starts). Keeping scoActive in sync here
+        // makes the touchpad mute toggle work even with no call event ever.
+        val nowSco = snap.audioState == AUDIO_CONNECTED
+        if (nowSco != scoActive) {
+            Log.i(TAG, "event=snapshot_sco_sync from=$scoActive to=$nowSco audioState=${snap.audioState}")
+            scoActive = nowSco
+            if (!nowSco && micMuted) {
+                Log.i(TAG, "event=mute_clear reason=snapshot_sco_off")
+                micMuted = false
+            }
+            if (snap.address.isNotEmpty()) currentAddr = snap.address
+            broadcastUiState()
+        }
+
+        if (snap.callState == null) {
+            // No call event but SCO may still be active (e.g. PC HFP mic
+            // streaming). scoActive sync above already broadcasted UI state.
+            return
+        }
+
+        // Sync internal call metadata from snapshot so overlay/MainActivity can render it.
+        if (snap.address.isNotEmpty()) currentAddr = snap.address
+        snap.callId?.let { if (it >= 0) currentCallId = it }
+        snap.number?.let { currentNumber = it }
+        snap.name?.let { currentName = it }
+
+        when (snap.callState) {
+            STATE_INCOMING, STATE_WAITING -> {
+                if (phase != CallPhase.INCOMING) {
+                    phase = CallPhase.INCOMING
+                    Log.i(TAG, "event=phase_transition from=resync to=INCOMING worn=$wornState")
+                }
+                if (wornState) showIncomingUi()
+            }
+            STATE_ACTIVE -> {
+                if (phase != CallPhase.ACTIVE) {
+                    phase = CallPhase.ACTIVE
+                    // We missed the real call start; use now() as an approximation.
+                    startedElapsedRealtime = SystemClock.elapsedRealtime()
+                    Log.i(TAG, "event=phase_transition from=resync to=ACTIVE approx_start=$startedElapsedRealtime")
+                    stopRingtone()
+                    overlay?.hide()
+                    hideLed()
+                    broadcastUiState()
+                }
+            }
+            else -> {
+                // DIALING / ALERTING / HELD / TERMINATED: ignore for resync.
+            }
+        }
+    }
+
+    private data class CallSnapshot(
+        val address: String,
+        val hfpState: Int,
+        val audioState: Int,
+        val callState: Int?,  // null if no call
+        val callId: Int?,
+        val number: String?,
+        val name: String?,
+    )
+
+    private fun parseSnapshot(json: String): CallSnapshot? {
+        return try {
+            val obj = JSONObject(json)
+            val addr = obj.optString("address", "")
+            val hfp = obj.optInt("state", -1)
+            val audio = obj.optInt("audioState", -1)
+            val callObj = obj.opt("call")
+            if (callObj == null || callObj == JSONObject.NULL || callObj !is JSONObject) {
+                CallSnapshot(addr, hfp, audio, null, null, null, null)
+            } else {
+                CallSnapshot(
+                    address = addr,
+                    hfpState = hfp,
+                    audioState = audio,
+                    callState = callObj.optInt("state", -1).takeIf { it >= 0 },
+                    callId = callObj.optInt("id", -1).takeIf { it >= 0 },
+                    number = callObj.optString("number", ""),
+                    name = callObj.optString("name", ""),
+                )
+            }
+        } catch (e: Exception) {
+            log("parseSnapshot failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun broadcastUiStatePhase(forcedPhase: CallPhase) {
+        val c = ctx ?: return
+        val intent = Intent(ListenerService.ACTION_CALL_UI_STATE).apply {
+            setPackage(c.packageName)
+            putExtra("phase", forcedPhase.name)
+            putExtra("number", currentNumber)
+            putExtra("name", currentName)
+            putExtra("callId", currentCallId)
+            putExtra("startedElapsedRealtime", startedElapsedRealtime)
+            putExtra("scoActive", scoActive)
+            putExtra("micMuted", micMuted)
+        }
+        c.sendBroadcast(intent)
+    }
+}

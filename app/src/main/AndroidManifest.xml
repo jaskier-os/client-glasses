@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Signature-level permission for the cross-process audio-archive sync broadcast.
+         Declared here (listener app owns the permission) and used by both the listener
+         (receiver) and filesync (sender) apps. Since both apks are signed with the same
+         key the grant is automatic. Any third-party app is blocked by the OS from
+         sending or receiving this action. -->
+    <permission
+        android:name="com.repository.glasses.listener.permission.AUDIO_ARCHIVE_SYNC"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.repository.glasses.listener.permission.AUDIO_ARCHIVE_SYNC" />
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- SVA path D: SoundTriggerManager keyphrase detection. Privileged perm,
+         needs listener installed as priv-app + privapp-permissions XML grant. -->
+    <uses-permission android:name="android.permission.CAPTURE_AUDIO_HOTWORD"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.MANAGE_VOICE_KEYPHRASES"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.MANAGE_SOUND_TRIGGER"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.KEYPHRASE_ENROLLMENT_APPLICATION"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <!-- Granted only when app is privapp + whitelisted in
+         /system/etc/permissions/privapp-permissions-com.repository.glasses.listener.xml.
+         Required by BluetoothA2dpSink.connect/disconnect for Stage E wear-sensor
+         A2DP link teardown. Harmless for non-privapp builds (silently denied). -->
+    <uses-permission android:name="android.permission.BLUETOOTH_PRIVILEGED"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="true" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Required so AudioFlinger delivers real mic samples to the :backend service while the
+         glasses MainActivity is not in the foreground. Without this, Android 12+ mic privacy
+         caches RECORD_AUDIO at UID-level as "foreground only" and the AudioRecord stream
+         delivers all-zero PCM. The service element below uses foregroundServiceType="microphone". -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.SET_WALLPAPER" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- Brightness changes from the phone. WRITE_SETTINGS is a "special"
+         permission with no runtime prompt we can trigger from a headless
+         service, so deploy-to-glasses.sh grants it via `appops set ... allow`. -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
+
+    <!-- SoundTrigger HAL integration (Phase 3 custom HAL).
+         signature|privileged. The app is granted it ONLY when the custom
+         sthal deployment runs:
+             - priv-permissions xml is dropped in /system/etc/permissions/
+             - the APK is placed under /system/priv-app/
+         Until that overlay is in place this uses-permission entry is
+         declared but inert, and WakeWordPipeline's HAL probe will fail and
+         fall back to the existing ARM-ONNX path transparently.
+         CAPTURE_AUDIO_HOTWORD alone covers the reflection path into
+         SoundTriggerManager.attachGenericSoundModel; MANAGE_SOUND_TRIGGER
+         would only be needed for the system-level admin API we don't use. -->
+    <uses-permission android:name="android.permission.CAPTURE_AUDIO_HOTWORD"
+        tools:ignore="ProtectedPermissions" />
+    <!-- SOUNDTRIGGER_DELEGATE_IDENTITY (API 31+): required when calling
+         SoundTrigger.listModules / attachModule from a privapp. The
+         middleware routes privapp callers through listModulesAsMiddleman,
+         which throws SecurityException without this permission. Same
+         signature|privileged mechanism as CAPTURE_AUDIO_HOTWORD; must
+         also be declared in the privapp-permissions XML. -->
+    <uses-permission android:name="android.permission.SOUNDTRIGGER_DELEGATE_IDENTITY"
+        tools:ignore="ProtectedPermissions" />
+
+    <queries>
+        <package android:name="com.rokid.os.sprite.assistserver" />
+        <package android:name="com.rokid.os.sprite.launcher" />
+        <package android:name="com.rokid.os.master.screenstream" />
+        <package android:name="com.repository.glasses.btmanager" />
+        <package android:name="com.repository.glasses.capture" />
+        <package android:name="com.repository.glasses.filesync" />
+    </queries>
+
+    <application
+        android:name=".GlassesListenerApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="Glasses Listener"
+        android:requestLegacyExternalStorage="true"
+        android:theme="@style/Theme.GlassesListener">
+
+        <!-- Vendor PAL client used by AcdNativeDetector for DSP-side wake-word
+             VAD. Lib must also be listed in /vendor/etc/public.libraries.txt
+             (see /data/local/diy-overlay/vendor/etc/public.libraries.txt). -->
+        <uses-native-library android:name="libpalclient.so" android:required="false" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|locale|layoutDirection|screenLayout|smallestScreenSize|density|fontScale|navigation|keyboard|uiMode"
+>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".service.ListenerService"
+            android:exported="false"
+            android:process=":backend"
+            android:foregroundServiceType="microphone|connectedDevice" />
+
+        <service
+            android:name=".service.UiKeepaliveService"
+            android:exported="false" />
+
+        <service
+            android:name=".mouse.HidMouseService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- ML Kit auto-inits via ContentProvider in main process only.
+             Duplicate it for :backend where ReidCameraCapturer runs. -->
+        <provider
+            android:name="com.google.mlkit.common.internal.MlKitInitProvider"
+            android:authorities="${applicationId}.mlkitinitprovider"
+            android:exported="false"
+            android:process=":backend"
+            tools:replace="android:authorities,android:process" />
+
+        <service
+            android:name=".media.MediaNotificationListener"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="false"
+            android:process=":backend">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".service.ScreenOffAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <receiver
+            android:name=".boot.BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver android:name="com.repository.glasses.listener.audio.routing.PairingAutoAcceptReceiver"
+            android:exported="true"
+            android:priority="2147483647">
+            <intent-filter android:priority="2147483647">
+                <action android:name="android.bluetooth.device.action.PAIRING_REQUEST" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>

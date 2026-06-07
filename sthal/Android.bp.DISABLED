@@ -1,0 +1,46 @@
+// sthal/Android.bp.DISABLED — reference AOSP soong recipe.
+//
+// INTENTIONALLY NAMED .DISABLED so the file is not picked up by Soong if this
+// tree is ever grafted into an AOSP checkout. The canonical build path is the
+// NDK CMakeLists.txt. Rename to `Android.bp` only when building inside AOSP.
+//
+// When enabled, this produces the same .so as the CMake build, but with the
+// proper vendor partition install path.
+
+cc_library_shared {
+    name: "sound_trigger.primary.neo",
+    vendor: true,
+    relative_install_path: "hw",
+    srcs: [
+        "src/sound_trigger_hw.cpp",
+        "src/qnn_runtime.cpp",
+        "src/mic_reader.cpp",
+    ],
+    local_include_dirs: ["include", "src"],
+    shared_libs: [
+        "liblog",
+        "libdl",
+    ],
+    cppflags: [
+        "-Wall",
+        "-Wextra",
+        "-Wformat=2",
+        "-Wshadow",
+        "-Werror=return-type",
+        "-fvisibility=hidden",
+        "-fno-rtti",
+        "-fno-exceptions",
+    ],
+    ldflags: [
+        "-Wl,--gc-sections",
+        "-Wl,--as-needed",
+        "-Wl,-z,defs",
+    ],
+    arch: {
+        arm64: {
+            enabled: true,
+        },
+    },
+    // We never want to ship this built against AOSP's libhardware; the
+    // include/sound_trigger_hw.h compat header is authoritative.
+}

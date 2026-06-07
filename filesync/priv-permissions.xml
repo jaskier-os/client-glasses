@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  privapp-permissions-com.repository.glasses.filesync.xml
+
+  Grants the signature|privileged permissions required by the glasses
+  filesync app on a device where the app is NOT signed with the platform key.
+  Dropped into /system/etc/permissions/ via the DIY overlay:
+    /data/local/diy-overlay/system/etc/permissions/privapp-permissions-com.repository.glasses.filesync.xml
+
+  The filesync APK itself must live in /system/priv-app/ (also via overlay)
+  for PackageManager to treat it as a privileged app.
+-->
+<permissions>
+    <privapp-permissions package="com.repository.glasses.filesync">
+        <!-- Required by WifiManager.setWifiEnabled() on Android 10+; without
+             this the call silently returns false and filesync can't bring
+             the radio up after the glasses boot with WiFi off. -->
+        <permission name="android.permission.NETWORK_SETTINGS"/>
+        <!-- Required by WifiP2pManager.createGroup with a pre-baked
+             WifiP2pConfig (setNetworkName + setPassphrase). Without this,
+             the framework silently ignores the passphrase/SSID and falls
+             back to an auto-generated group. -->
+        <permission name="android.permission.OVERRIDE_WIFI_CONFIG"/>
+        <!-- Nearby-devices gate for Android 13+ WifiP2pManager calls. Harmless
+             on 12 but future-proofs the overlay. -->
+        <permission name="android.permission.NEARBY_WIFI_DEVICES"/>
+        <!-- Declared in AndroidManifest (priv-app must allowlist every sig|priv
+             perm it requests or PackageManager boot-aborts). Used for WiFi +
+             global settings tweaks when bringing up the radio. -->
+        <permission name="android.permission.WRITE_SECURE_SETTINGS"/>
+    </privapp-permissions>
+</permissions>

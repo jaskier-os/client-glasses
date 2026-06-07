@@ -1,0 +1,17 @@
+{
+  "_comment": "HTP backend-extensions per-graph config for qnn-context-binary-generator. Target: Rokid Neo (qcom,neo / NEO LUNA-V2), aDSP Hexagon v73. vtcm_mb=2 is conservative for Neo (smaller VTCM than 8Gen2-class). hvx_threads=2 matches the 4x A55 CPU pairing; raise to 4 if perf is insufficient once on-device. graph_names lists the four wake-word pipeline stages compiled by compile_onnx_to_qnn.sh.",
+  "graphs": [
+    {
+      "graph_names": ["silero_vad", "melspectrogram", "embedding_model", "sireneviy"],
+      "vtcm_mb": 2,
+      "O": 1,
+      "hvx_threads": 2,
+      "fp16_relaxed_precision": 1
+    }
+  ],
+  "devices": [
+    {
+      "dsp_arch": "v73"
+    }
+  ]
+}

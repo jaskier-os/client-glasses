@@ -1,0 +1,7 @@
+{
+  "_comment": "Top-level HTP backend-extensions pointer. The real per-graph knobs (dsp_arch, vtcm_mb, hvx_threads, O) are in qnn_htp_ext_config.json. The context-binary-generator only accepts the narrow backend_extensions schema here; anything else is rejected.",
+  "backend_extensions": {
+    "shared_library_path": "libQnnHtpNetRunExtensions.so",
+    "config_file_path": "qnn_htp_ext_config.json"
+  }
+}
