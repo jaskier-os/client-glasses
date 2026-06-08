@@ -448,3 +448,43 @@ This is an irreducible floor on this device. Do NOT add reflection workarounds
 - AndroidX: core-ktx, appcompat, constraintlayout, lifecycle-service, recyclerview.
 - AIDL: `IBtManager`, `ICapture`, `IAssistServer`/`IAssistClient` (Rokid
   MasterAssistService).
+
+## Firmware / rooting / flashing (firmware/)
+
+The rooting + flashing tooling lives in `firmware/` in this repo. The large OS images
+are NOT committed; they are fetched on demand into a gitignored cache.
+
+- `firmware/fetch-os.sh` -- downloads + extracts a stock OTA build into
+  `firmware/os-cache/<version>/` (symlinked as `os-cache/current`). Run this first.
+- `firmware/root-firmware.sh` -- builds the rooted `super_4.img` from the cached stock
+  images (reads `STOCK_DIR=firmware/os-cache/current`); `--post-flash` deploys the
+  Tier-2 priv-app APKs.
+- `firmware/scripts/` -- stock flash helpers + `firmware/scripts/CLAUDE.md`, which has
+  per-script descriptions, the **non-interactive enter-edl + QDL** flashing procedure,
+  and all the firmware hard rules (never flash modified vbmeta, never flash the active
+  A/B slot, the 1.17 vs 1.18 abl bootloop rule, never touch USB state, always poll
+  `sys.boot_completed` after a reflash, Tier-2 overlay vs reflash). READ THAT before
+  touching a device.
+
+### Where to get OS builds
+- Aliyun OTA (pinned in fetch-os.sh, version 1.18.100-20260426-150101):
+  `https://rokid-glass-ota.oss-cn-hangzhou.aliyuncs.com/dailybuild/glass15/<version>/RVE01-<version>.zip`
+- Community firmware index / mirror (use to find other OS versions):
+  `https://rokid.andersmadsen.dk/firmware`
+
+### Disabled Rokid system apps (persist via pm hide)
+`assistserver`, `launcher`, `live`, `com.rokid.glass.ota`, `screenstream` are hidden so
+we have full control with no artificial limits. KEEP enabled: `com.rokid.cxrservice`
+(CXR-S bridge -- required for the phone<->glasses BT relay) and `com.rokid.sysconfig`.
+
+### Wake-word model
+The `wake-word-training/` folder in this repo trains the "sireneviy" wake word and
+produces the ONNX models the app ships. The on-device SVA/SoundTrigger path is blocked
+by a baked-in custom HAL -- see wake-word-training and the firmware notes if revisiting.
+
+### Never (firmware/device)
+- Never `rm -rf /data/dalvik-cache/*` or `/data/system/package_cache/*` on the glasses
+  (crashes the OS immediately; just reboot -- caches regenerate).
+- Never sideload the listener priv-app with plain `adb install` -- it won't get
+  `BLUETOOTH_PRIVILEGED` (setScanMode throws SecurityException). Deploy via
+  `scripts/deploy-to-glasses.sh` (Tier-2 priv-app overlay + reboot).
