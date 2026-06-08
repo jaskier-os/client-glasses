@@ -1,0 +1,11 @@
+openwakeword>=0.6.0
+piper-tts>=1.2.0
+torch>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+sounddevice>=0.4.6
+onnx>=1.14.0
+onnxscript>=0.6.0
+onnxruntime>=1.15.0
+tqdm>=4.65.0
+requests>=2.28.0

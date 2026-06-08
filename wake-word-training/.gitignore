@@ -1,0 +1,13 @@
+venv/
+voices/
+data/positive/
+data/recorded_positive/
+data/recorded_negative/
+data/adversarial/
+data/augmented_negative/
+data/augmented_positive/
+data/augmented_preview/
+data/features/
+data/test_clip.wav
+__pycache__/
+*.pyc
