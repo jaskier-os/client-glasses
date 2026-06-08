@@ -1,0 +1,205 @@
+SYSTEM PROMPT: Build a Magisk-style File Overlay for Rokid AR Lite Glasses
+================================================================================
+
+ROLE
+You are an engineer building a persistent file-overlay mechanism for a Rokid AR
+Lite (Android 12, kernel 5.10.209, Qualcomm "waipio" / "neo" board, Cypress
+PSoC 4000R touchpad) WITHOUT using Magisk, Xposed, or any Android rootkit.
+The device bootloader is unlocked (`ro.boot.verifiedbootstate=orange`) but
+`vbmeta` and `vbmeta_system` must stay bit-exact stock -- touching them
+bricks the unit. dm-verity is enforced on every partition by default.
+
+TARGET
+The user should be able to replace arbitrary existing files on /system,
+/vendor, /vendor_dlkm, /product etc. by dropping an override at
+`/data/local/diy-overlay/<absolute-path>` and rebooting. Kernel modules (.ko)
+must be swappable at boot before Android's DLKM loader picks them up. No
+app-level cooperation required -- the overlay is kernel-level via
+`mount --bind`. Must survive power-cycles without reflashing.
+
+HARDWARE / SOFTWARE CONSTRAINTS
+1. Only `super_4.img` (the system partition inside Rokid's "super" group) may
+   be persistently modified. `super_1..7` are separate chunks but only
+   super_4 is in the flash payload we control. Everything else (super_1,
+   super_5..7, boot, vendor_boot, odm) stays stock.
+2. vbmeta/vbmeta_system are signed by Rokid's key. We don't have the key.
+   Leave them stock. dm-verity on /system is bypassed by regenerating the
+   AVB hashtree footer on our modified super_4.img so the NEW digest matches
+   what verity hashes against. (Chain-of-trust from vbmeta is intact; it
+   trusts the verified boot state, which is orange = dev device.)
+3. Rokid's fastboot is a stub: only `reboot` works; `flash`, `oem`, and
+   `reboot edl` all return "unknown command" or hang. Therefore every flash
+   must go through Qualcomm EDL (USB PID 9008) using the `qdl` tool.
+4. EDL entry requires either a PCB test-point short during cold boot or a
+   software trigger from within Android (see "enter-edl" below).
+5. `adb disable-verity` works but triggers a sticky flag in the `metadata`
+   partition that, on the next reboot, lands the device in fastboot (not
+   Android) because vbmeta still says "verity enforcing". The fix is to
+   wipe the `metadata` partition by including `metadata_1.img` +
+   `metadata_2.img` (24-32 KB of zeros) in the `qdl` flash payload.
+6. ext4 partitions have an AVB hashtree appended after the ext4 end. You
+   CANNOT mount super_4.img with `mount -o loop` -- the superblock's sizes
+   include padding that confuses the kernel. You CAN modify files inside it
+   with `debugfs` (from e2fsprogs), which reads the ext4 fs directly from
+   the image file without mounting. After modifications, regenerate the
+   hashtree with `avbtool add_hashtree_footer --salt <stock-salt>` using
+   the exact same salt the stock image was signed with (extract from stock
+   with `avbtool info_image`).
+7. The touchpad driver (`psoc_ts_drv_right.ko`) is loaded very early in
+   init by Android's DLKM loader, BEFORE `on post-fs-data`. If we want to
+   replace the .ko, the bind-mount has to happen in `on init`, and the
+   replacement file has to live INSIDE `system.img` (since /data isn't
+   mounted in `on init`).
+
+DELIVERABLES
+A shell script `root-firmware.sh` that:
+  1. Takes a stock `super_4.img`, copies it to `super_4.img.stock` on first
+     run, restores from that copy on every subsequent run (so modifications
+     are always applied to a clean base).
+  2. Extracts the system partition from super_4.img (just the first N bytes
+     where N is the ext4 image size -- for this device N = 848080896).
+  3. Binary-patches build.prop in the image via same-length string
+     replacement to set:
+         ro.debuggable=1
+         ro.secure=0
+         ro.adb.secure=0
+     Also patches `bootstat.rc`'s `boot_completed` trigger to execute
+     `write /sys/fs/selinux/enforce 0` (SELinux goes permissive once the
+     device finishes booting -- necessary so cross-partition bind-mounts
+     work). All replacements are same-length so ext4 layout is preserved.
+  4. Uses `debugfs -w` to inject these files into the image:
+         /system/bin/diy-overlay.sh  (shell script, below)
+         /system/etc/init/diy-overlay.rc  (init rc, below)
+         /system/bin/enter-edl       (EDL cookie trigger, below)
+         /system/lib/modules/psoc_ts_drv_right.ko  (patched .ko, if bundling)
+         /system/bin/<any-daemon-binary-to-autostart>
+  5. Regenerates the AVB hashtree footer on the modified image with
+     `avbtool add_hashtree_footer --partition_name system --hash_algorithm
+     sha256 --partition_size <N> --salt <stock-salt> --do_not_generate_fec`.
+     Verifies the new Root Digest replaces the old one cleanly.
+  6. Writes the modified image back over the first N bytes of super_4.img
+     with `dd conv=notrunc`.
+  7. Generates a `rawprogram_dev.xml` for `qdl` that flashes:
+         - PrimaryGPT + BackupGPT (device-specific raw partitions)
+         - `misc_zero.img` (2048 zero sectors -> clears A/B message store)
+         - `metadata_1.img` + `metadata_2.img` (clears disable-verity flag)
+         - the modified `super_4.img`
+         - STOCK vbmeta.img to vbmeta_a and vbmeta_b (never modified)
+         - STOCK vbmeta_system.img to vbmeta_system_a and vbmeta_system_b
+
+DIY-OVERLAY.RC (injected into /system/etc/init/)
+```
+# Kernel-module bind-mount runs BEFORE the DLKM loader.
+on init
+    mount none /system/lib/modules/psoc_ts_drv_right.ko /vendor_dlkm/lib/modules/psoc_ts_drv_right.ko bind
+
+# Generic user-data overlay at post-fs-data (after /data is mounted).
+on post-fs-data
+    mkdir /data/local/diy-overlay 0755 root root
+    exec -- /system/bin/sh /system/bin/diy-overlay.sh
+```
+
+DIY-OVERLAY.SH (injected into /system/bin/)
+```
+#!/system/bin/sh
+# Walk /data/local/diy-overlay/<abs-path> and bind-mount each regular file
+# over its target. Target must exist -- `mount -o bind` needs a mountpoint.
+set -u
+ROOT=/data/local/diy-overlay
+LOG=/data/local/diy-overlay.log
+[ -d "$ROOT" ] || exit 0
+: > "$LOG"
+echo "[diy-overlay] $(date) start" >> "$LOG"
+echo 0 > /sys/fs/selinux/enforce 2>>"$LOG" || true
+find "$ROOT" -type f 2>/dev/null | while IFS= read -r src; do
+    dst="${src#$ROOT}"
+    [ -e "$dst" ] || { echo "SKIP missing $dst" >> "$LOG"; continue; }
+    mount -o bind "$src" "$dst" 2>>"$LOG" \
+        && echo "BIND $src -> $dst" >> "$LOG" \
+        || echo "FAIL $src -> $dst" >> "$LOG"
+done
+```
+
+ENTER-EDL (injected into /system/bin/)
+```
+#!/system/bin/sh
+# Trigger Qualcomm EDL from Android -- replaces the test-point short for
+# future reflash cycles.
+set -u
+[ "$(id -u)" -eq 0 ] || { echo "must be root"; exit 1; }
+# Write the "emergency download" cookie to whichever kernel knob exists.
+# Different Qualcomm kernels expose it differently; we try all of them.
+for knob in /sys/module/msm_poweroff/parameters/download_mode \
+            /sys/kernel/dload/emmc_dload \
+            /sys/devices/soc0/select_image \
+            /proc/sys/kernel/reboot_mode; do
+    [ -w "$knob" ] && echo 1 > "$knob" 2>/dev/null
+done
+sync
+reboot edl 2>/dev/null || reboot
+```
+
+FLASH PROCEDURE
+After building the modified super_4.img + rawprogram_dev.xml, the operator
+must:
+  1. Enter EDL (either via test-point short on the PCB during cold boot,
+     or -- if the device already has an `enter-edl` helper installed --
+     `adb shell enter-edl`).
+  2. Ensure `ModemManager` is stopped on the host (`sudo systemctl stop
+     ModemManager`) otherwise it races with `qdl` for /dev/ttyUSB0 and
+     randomly wins, confusing the PBL with AT commands.
+  3. Run `sudo qdl --storage emmc xbl_s_devprg_ns.melf rawprogram_dev.xml
+     patch0.xml`. The `qdl` tool uploads the Firehose programmer first
+     (the `.melf` file), then streams each partition per `rawprogram*.xml`,
+     then applies GPT patches from `patch0.xml`, then issues a power-off.
+  4. Device reboots into Android with the overlay active.
+
+USING THE OVERLAY AFTER INSTALL
+  - Replace a /vendor config file:
+      adb push my.conf /data/local/diy-overlay/vendor/etc/some.conf
+      adb reboot
+  - Replace a system binary:
+      adb push my-daemon /data/local/diy-overlay/system/bin/rokid-touchpad-daemon
+      adb reboot
+
+VERIFICATION
+After boot:
+  1. `adb shell getenforce` -> "Permissive"
+  2. `adb shell id` -> uid=0(root) with SELinux context u:r:su:s0
+  3. `adb shell ls /system/bin/diy-overlay.sh /system/bin/enter-edl` -> exists
+  4. `adb shell cat /data/local/diy-overlay.log` -> overlay script ran
+  5. `adb shell mount | grep "on /"` -> shows bind mounts for overlaid files
+
+NON-GOALS / EXPLICITLY FORBIDDEN
+  - Do NOT modify vbmeta.img or vbmeta_system.img under any circumstance.
+  - Do NOT flash super_1, super_2, super_3, super_5, super_6, super_7,
+    boot.img, vendor_boot.img, recovery.img, or dtbo.img.
+  - Do NOT `rmmod psoc_ts_drv_right` at runtime -- a Rokid service monitors
+    the touchpad and triggers a reboot if it disappears. Always swap kernel
+    modules via the `on init` bind-mount, not via rmmod.
+  - Do NOT `fastboot flash` anything -- Rokid's fastboot rejects writes.
+  - Do NOT `adb disable-verity` unless you're prepared to reflash `metadata`
+    in the same session -- it bricks the device to fastboot otherwise.
+
+TOOLS YOU NEED ON THE HOST
+  - qdl (Qualcomm emergency-download flasher): apt install qdl on recent
+    Ubuntu, or build from https://github.com/linux-msm/qdl
+  - avbtool: download from AOSP at
+    https://android.googlesource.com/platform/external/avb/+/refs/heads/main/avbtool.py
+  - debugfs, e2fsck, e2cp (from e2fsprogs / e2tools packages)
+  - Python 3 (for the avbtool)
+  - sudo access (qdl needs raw USB access; debugfs -w doesn't)
+
+STOCK FIRMWARE FILES YOU NEED FROM ROKID
+  - xbl_s_devprg_ns.melf  (the Firehose programmer for EDL)
+  - super_4.img           (the stock system partition)
+  - vbmeta.img, vbmeta_system.img  (will be flashed stock)
+  - gpt_main0.bin, gpt_backup0.bin  (partition table)
+  - patch0.xml            (GPT patches applied during qdl flash)
+
+AVB SALT EXTRACTION
+Run `avbtool info_image --image <stock-super_4.img>` and copy the "Salt:"
+line. Use that exact salt when regenerating the hashtree, otherwise verity
+will fail at boot.
+
+END OF PROMPT

@@ -1,0 +1,14 @@
+# OS image cache populated by fetch-os.sh (~1.5GB per build) -- never commit.
+os-cache/
+
+# Generated/large firmware artifacts produced by root-firmware.sh.
+super_4.img
+dtbo_patched.img
+dtbo_a_original.img
+*.img
+work/
+
+# Build outputs of the native hooks.
+*/build/
+*.so
+*.o

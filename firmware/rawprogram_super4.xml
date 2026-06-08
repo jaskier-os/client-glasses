@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Flash list: GPT (discoverable) + 1.17 abl_a/abl_b (verity tolerance) +
+     patched super_4. Intentionally omits: misc (zeroing destroyed slot state
+     last time); vbmeta / vbmeta_system (strict-signed, modifications
+     instant-brick); super_5 (system_ext stays stock). -->
+<data>
+  <program SECTOR_SIZE_IN_BYTES="512" filename="../yodaos-stock-full/gpt_main0.bin"   label="PrimaryGPT" num_partition_sectors="34" partofsingleimage="true" physical_partition_number="0" readbackverify="false" size_in_KB="17.0" sparse="false" start_byte_hex="0x0" start_sector="0" file_sector_offset="0"/>
+  <program SECTOR_SIZE_IN_BYTES="512" filename="../yodaos-stock-full/gpt_backup0.bin" label="BackupGPT"  num_partition_sectors="33" partofsingleimage="true" physical_partition_number="0" readbackverify="false" size_in_KB="16.5" sparse="false" start_byte_hex="0x0" start_sector="NUM_DISK_SECTORS-33." file_sector_offset="0"/>
+  <program SECTOR_SIZE_IN_BYTES="512" filename="abl_old.elf" label="abl_a" num_partition_sectors="2048" partofsingleimage="false" physical_partition_number="0" readbackverify="false" size_in_KB="1024.0" sparse="false" start_byte_hex="0x1ec900000" start_sector="16140288" file_sector_offset="0"/>
+  <program SECTOR_SIZE_IN_BYTES="512" filename="abl_old.elf" label="abl_b" num_partition_sectors="2048" partofsingleimage="false" physical_partition_number="0" readbackverify="false" size_in_KB="1024.0" sparse="false" start_byte_hex="0x1eca00000" start_sector="16142336" file_sector_offset="0"/>
+  <program SECTOR_SIZE_IN_BYTES="512" filename="super_4.img" label="super" num_partition_sectors="1719664" partofsingleimage="false" physical_partition_number="0" readbackverify="false" start_sector="3538944" file_sector_offset="0"/>
+</data>

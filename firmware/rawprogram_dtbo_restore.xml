@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Restore original dtbo_a from backup. Fuse-locked bootloader rejected
+     unsigned-modified dtbo, dropping device to fastboot. Putting stock back. -->
+<data>
+  <program SECTOR_SIZE_IN_BYTES="512"
+           filename="dtbo_a_original.img"
+           label="dtbo_a"
+           num_partition_sectors="49152"
+           partofsingleimage="false"
+           physical_partition_number="0"
+           readbackverify="false"
+           size_in_KB="24576.0"
+           sparse="false"
+           start_sector="16261136"
+           file_sector_offset="0"/>
+</data>

@@ -1,0 +1,7 @@
+LIBAAUDIO {
+  global:
+    AAudioStream_write;
+    AAudioStreamBuilder_openStream;
+  local:
+    *;
+};
