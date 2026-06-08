@@ -124,6 +124,49 @@ peer is negotiated at runtime. The only build requirement is the SDK path: copy
 `local.properties.example` to `local.properties` and set `sdk.dir` (or
 `ANDROID_HOME` / `ANDROID_SDK_ROOT`).
 
+## ReID OSINT feature flags
+
+The russia-specific ReID OSINT / intel feature is gated by a build flag that
+defaults OFF. Set it in `local.properties` (or as an env var of the same name --
+env wins); it is declared in `app/build.gradle.kts` and read as `BuildConfig.*`.
+Documented in `local.properties.example`.
+
+This repo's flag:
+
+- **`ENABLE_REID_OSINT`** (default `false`) -- enables the person "intel" (OSINT)
+  request + intel modal (`requestPersonIntel` in `MainActivity.kt`, gated on
+  `BuildConfig.ENABLE_REID_OSINT`). The core ReID tab and on-device face
+  recognition are NOT gated and work regardless.
+
+### Related switches in other repos
+
+The feature spans the whole stack; flipping it on end-to-end means setting flags
+in three repos:
+
+- **client-phone** (`local.properties` / env, `BuildConfig.*`):
+  - `ENABLE_REID_RU_TABS` -- shows the ReID "Phone Numbers" sub-tab + person
+    "Intel" tab in the phone UI (`ReidSubTabAdapter.kt`, `ReidFragment.kt`,
+    `PersonDetailTabAdapter.kt`, `PersonDetailActivity.kt`).
+  - `ENABLE_REID_OSINT` -- enables the assistant-driven OSINT lookup tool
+    (`lookup_person_info` -> `searchPersonInfo`) in `ListenerService.kt`. Core
+    face re-id (`identify_person`) is NOT gated.
+- **reid/reid-analytics backend** (`backend/.env`): `ENABLE_OSINT` -- mounts the
+  OSINT/sherlock API routes (`osint-photos`/`osint-reports`, `search-phone`,
+  `persons/batch-phone-lookup`, `persons/:id/search-info`) in
+  `backend/routes/reidRoutes.js`. When off, those routes are not mounted and
+  return 404.
+- **reid/reid-analytics frontend** (`frontend/.env`): `VITE_ENABLE_OSINT` -- shows
+  the person "OSINT" tab + sections in `PersonDetail.jsx`.
+
+The glasses (and phone) OSINT lookups call the reid-analytics backend as their
+data source, so flipping only the client flag without the backend's `ENABLE_OSINT`
+yields 404s.
+
+**To enable the whole feature:** phone `local.properties`
+`ENABLE_REID_RU_TABS=true` + `ENABLE_REID_OSINT=true`; glasses `local.properties`
+`ENABLE_REID_OSINT=true`; reid-analytics backend `.env` `ENABLE_OSINT=true`;
+reid-analytics frontend `.env` `VITE_ENABLE_OSINT=true`.
+
 ## Deploy (MANDATORY -- read before installing anything)
 
 ALWAYS deploy via the in-repo script. Never run `gradlew` install tasks or plain
