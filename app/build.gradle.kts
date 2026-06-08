@@ -3,6 +3,17 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Build-time config resolution. Precedence:
+//   1. environment variables (CI-friendly)
+//   2. local.properties (gitignored, see local.properties.example)
+//   3. safe placeholder defaults supplied at call sites
+val localProps = java.util.Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun cfg(key: String, default: String): String =
+    System.getenv(key) ?: localProps.getProperty(key) ?: default
+
 android {
     namespace = "com.repository.glasses.listener"
     compileSdk = 34
@@ -13,6 +24,12 @@ android {
         targetSdk = 34
         versionCode = 16
         versionName = "2.4.1"
+
+        // OSINT-style ReID person "intel" lookups. Disabled by default; set
+        // ENABLE_REID_OSINT=true in local.properties (or env) to enable.
+        // Core face re-identification (the ReID tab / face recognition) is
+        // NOT gated by this.
+        buildConfigField("Boolean", "ENABLE_REID_OSINT", cfg("ENABLE_REID_OSINT", "false"))
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         testProguardFiles("proguard-androidtest.pro")
@@ -82,6 +99,7 @@ android {
 
     buildFeatures {
         aidl = true
+        buildConfig = true
     }
 
     compileOptions {

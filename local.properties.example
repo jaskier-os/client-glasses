@@ -9,3 +9,11 @@
 # Alternatively, set the ANDROID_HOME / ANDROID_SDK_ROOT environment variable
 # and Gradle will pick the SDK up without this file.
 sdk.dir=/path/to/Android/Sdk
+
+# --- OSINT ReID lookups (OPTIONAL) ---
+# Gates the OSINT-style person "intel" lookup in the ReID screen
+# (requestPersonIntel / intel modal). Core face re-identification (the ReID
+# tab and face recognition) is unaffected. Disabled by default; set to true
+# (here or as an env var) to enable. Can also be supplied as an environment
+# variable of the same name (env takes precedence over local.properties).
+ENABLE_REID_OSINT=false

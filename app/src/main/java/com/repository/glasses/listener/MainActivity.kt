@@ -7511,10 +7511,12 @@ class MainActivity : AppCompatActivity() {
                             updateFocusVisual(focusState)
                             lastCenterPressTime = 0L
                         } else {
-                            // Open intel modal (depth 3)
+                            // Open intel modal (depth 3). OSINT-gated: when
+                            // ENABLE_REID_OSINT is off the intel modal is not
+                            // offered (core face re-id remains usable).
                             val face = reidVerifiedFaces.getOrNull(reidSelectedFaceIndex)
                             val uid = face?.optString("uid", "") ?: ""
-                            if (uid.isNotEmpty()) {
+                            if (BuildConfig.ENABLE_REID_OSINT && uid.isNotEmpty()) {
                                 showReidIntelModal(reidLastPersonIntel)
                             }
                         }
@@ -8501,6 +8503,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestPersonIntel() {
+        // OSINT person-intel lookups are gated. Core face re-id is unaffected.
+        if (!BuildConfig.ENABLE_REID_OSINT) return
         val face = reidVerifiedFaces.getOrNull(reidSelectedFaceIndex) ?: return
         val uid = face.optString("uid", "")
         if (uid.isEmpty()) {
