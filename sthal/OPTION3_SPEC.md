@@ -31,7 +31,7 @@ To suspend while worn, the listening must be done by the DSP, not by the AP.
 
 ### sthal (existing scaffolding)
 
-`<repo-root>/sthal/`
+`/media/varingait/Lobotomite/Repository/AI/clients/glasses/sthal/`
 
 - `src/sound_trigger_hw.cpp` — Implements the AOSP `sound_trigger_hw_device`
   ops. Functions wired today: `getProperties`, `getPropertiesExtended`,
@@ -59,7 +59,7 @@ To suspend while worn, the listening must be done by the DSP, not by the AP.
 
 ### Listener app (already prepared)
 
-`<repo-root>/app/src/main/java/com/repository/glasses/listener/wakeword/`
+`/media/varingait/Lobotomite/Repository/AI/clients/glasses/app/src/main/java/com/repository/glasses/listener/wakeword/`
 
 - `WakeWordPipeline.kt:74` — Constructor takes `useNativeHal: Boolean = true`.
 - `WakeWordPipeline.kt:197-216` — `start()` documents the "armed-passive"

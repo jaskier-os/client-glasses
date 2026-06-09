@@ -6,12 +6,12 @@ The Rokid AR Lite listener app runs an always-on wake-word detector entirely on 
 
 Process layout (from `AndroidManifest.xml`):
 
-- `:backend` process: `ListenerService` (declared `android:process=":backend"` at `<repo-root>/app/src/main/AndroidManifest.xml:125-128`). All wake-word work runs here -- `WakeWordPipeline` is constructed by `ListenerService.onCreate` so it lives in `:backend`.
+- `:backend` process: `ListenerService` (declared `android:process=":backend"` at `/media/varingait/Lobotomite/Repository/AI/clients/glasses/app/src/main/AndroidManifest.xml:125-128`). All wake-word work runs here -- `WakeWordPipeline` is constructed by `ListenerService.onCreate` so it lives in `:backend`.
 - Default process: `MainActivity` -- the UI. It does NOT register a receiver for `ACTION_WAKE_WORD_HIT`; the broadcast is consumed inside the listener service via a `RECEIVER_NOT_EXPORTED` registration.
 
 ## Data flow when listening for wake word (useNativeAcd=false path)
 
-1. `AudioRecorder` (in `capture/`) opens the mic at 16 kHz mono PCM_S16LE and pushes frames into `MicBus` (`<repo-root>/app/src/main/java/com/repository/glasses/listener/capture/MicBus.kt`). MicBus is a fan-out pub/sub: each `onPcmFrame(pcmMono16k, offset, length, epochNanos)` is delivered synchronously to every `MicSubscriber`.
+1. `AudioRecorder` (in `capture/`) opens the mic at 16 kHz mono PCM_S16LE and pushes frames into `MicBus` (`/media/varingait/Lobotomite/Repository/AI/clients/glasses/app/src/main/java/com/repository/glasses/listener/capture/MicBus.kt`). MicBus is a fan-out pub/sub: each `onPcmFrame(pcmMono16k, offset, length, epochNanos)` is delivered synchronously to every `MicSubscriber`.
 2. Subscribers under demand: `WakeWordPipeline`, `LocalOpusWriter` (audio archive), `PrebufferingAudioSubscriber` (4 s rolling pre-buffer for replay), and the BT live-stream Opus encoder when the live gate is open.
 3. `WakeWordPipeline.onPcmFrame` (`wakeword/WakeWordPipeline.kt:444-494`) copies the slice (MicBus reuses the array next frame) and dispatches the chunk onto a single-thread `WakeWord-Infer` executor.
 4. RMS gate at 0.002 (`WakeWordPipeline.kt:120` + check at `:616`) discards near-silence.
@@ -23,8 +23,8 @@ Process layout (from `AndroidManifest.xml`):
 
 ## Classes involved
 
-- `WakeWordPipeline` (entry, `:backend`) -- `<repo-root>/app/src/main/java/com/repository/glasses/listener/wakeword/WakeWordPipeline.kt:75-965`. Public API: `start()`, `stop()`, `isRunning()`, `injectPcmFile(path)` (debug only).
-- `AcdNativeDetector` -- `<repo-root>/app/src/main/java/com/repository/glasses/listener/wakeword/AcdNativeDetector.kt`. Skipped entirely when `useNativeAcd=false`; the pipeline subscribes to MicBus directly.
+- `WakeWordPipeline` (entry, `:backend`) -- `/media/varingait/Lobotomite/Repository/AI/clients/glasses/app/src/main/java/com/repository/glasses/listener/wakeword/WakeWordPipeline.kt:75-965`. Public API: `start()`, `stop()`, `isRunning()`, `injectPcmFile(path)` (debug only).
+- `AcdNativeDetector` -- `/media/varingait/Lobotomite/Repository/AI/clients/glasses/app/src/main/java/com/repository/glasses/listener/wakeword/AcdNativeDetector.kt`. Skipped entirely when `useNativeAcd=false`; the pipeline subscribes to MicBus directly.
 - `MicBus` + `AudioRecorder` -- `capture/MicBus.kt`, `capture/AudioRecorder.kt`. Driven by `ListenerService.startMicStream` / `stopMicStream`.
 - `ListenerService.wakeWordHitReceiver` -- `service/ListenerService.kt:1247-1290`. In-process receiver for `ACTION_WAKE_WORD_HIT`; opens the 30 s BT live-utterance gate and relays the wake event to the phone over RFCOMM.
 - `ListenerService.reconcileWakeWord` -- `service/ListenerService.kt:3541` (and onward through ~end-of-method, ~25 lines).
@@ -140,12 +140,12 @@ val needed = worn && (phoneAudioConnected || pcAudioConnected || ww)
 
 ## Files the implementer will touch
 
-- `<workspace>/AI/clients/phone/app/src/main/java/com/repository/listener/ui/GlassesSettingsActivity.kt` (UI row + send)
-- `<workspace>/AI/clients/phone/app/src/main/java/com/repository/listener/ui/GlassesSettingsFragment.kt` (UI row, if fragment-backed)
-- `<workspace>/AI/clients/phone/app/src/main/java/com/repository/listener/bt/PhoneBtHost.kt:1594-1608` (include key in full snapshot)
-- `<repo-root>/app/src/main/java/com/repository/glasses/listener/config/GlassesConfig.kt` (var + load/save/applySettings)
-- `<repo-root>/app/src/main/java/com/repository/glasses/listener/service/ListenerService.kt:2844-2850` (boot gate)
-- `<repo-root>/app/src/main/java/com/repository/glasses/listener/service/ListenerService.kt:3541` (`reconcileWakeWord` -- add `&& wakeWordEnabled` to `needed`)
-- `<repo-root>/app/src/main/java/com/repository/glasses/listener/service/ListenerService.kt:5670-5688` (`onSettings` -- call `setWakeWordEnabled` after `applySettings`)
+- `/media/varingait/Lobotomite/Repository/AI/clients/phone/app/src/main/java/com/repository/listener/ui/GlassesSettingsActivity.kt` (UI row + send)
+- `/media/varingait/Lobotomite/Repository/AI/clients/phone/app/src/main/java/com/repository/listener/ui/GlassesSettingsFragment.kt` (UI row, if fragment-backed)
+- `/media/varingait/Lobotomite/Repository/AI/clients/phone/app/src/main/java/com/repository/listener/bt/PhoneBtHost.kt:1594-1608` (include key in full snapshot)
+- `/media/varingait/Lobotomite/Repository/AI/clients/glasses/app/src/main/java/com/repository/glasses/listener/config/GlassesConfig.kt` (var + load/save/applySettings)
+- `/media/varingait/Lobotomite/Repository/AI/clients/glasses/app/src/main/java/com/repository/glasses/listener/service/ListenerService.kt:2844-2850` (boot gate)
+- `/media/varingait/Lobotomite/Repository/AI/clients/glasses/app/src/main/java/com/repository/glasses/listener/service/ListenerService.kt:3541` (`reconcileWakeWord` -- add `&& wakeWordEnabled` to `needed`)
+- `/media/varingait/Lobotomite/Repository/AI/clients/glasses/app/src/main/java/com/repository/glasses/listener/service/ListenerService.kt:5670-5688` (`onSettings` -- call `setWakeWordEnabled` after `applySettings`)
 - New method `setWakeWordEnabled(enabled: Boolean)` in `ListenerService.kt` (location: near other reconcile helpers, ~`:3500`)
 - Optional, only if a discrete BT message type is preferred over piggy-backing on `CH_SETTINGS` JSON: both `BtProtocol.kt` files (phone + glasses) plus a new dispatch arm in `GlassesBtClient.kt:127`.

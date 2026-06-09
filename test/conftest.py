@@ -14,7 +14,23 @@ from datetime import datetime
 import pytest
 import uiautomator2 as u2
 
-GLASSES_SERIAL = "1901092534009177"
+def _first_adb_device():
+    try:
+        out = subprocess.run(
+            ["adb", "devices"], capture_output=True, text=True, check=False
+        ).stdout
+    except Exception:
+        return ""
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            return parts[0]
+    return ""
+
+
+# Glasses ADB serial. Override with GLASSES_SERIAL env var; otherwise fall back
+# to the first attached adb device.
+GLASSES_SERIAL = os.environ.get("GLASSES_SERIAL") or _first_adb_device()
 GLASSES_PACKAGE = "com.repository.glasses.listener"
 SCREENSHOTS_DIR = os.path.join(os.path.dirname(__file__), "screenshots")
 REPORTS_DIR = os.path.join(os.path.dirname(__file__), "reports")

@@ -37,7 +37,7 @@ object GlassesConfig {
     @Volatile var brightness: Int = 8
     @Volatile var screenTimeoutSec: Int = 300
     @Volatile var powerTimeoutMin: Int = 60
-    @Volatile var wakewordEnabled: Boolean = true
+    @Volatile var wakewordEnabled: Boolean = false
     @Volatile var alwaysRecordEnabled: Boolean = true
     @Volatile var onDemandRecordingActive: Boolean = false
     @Volatile var batteryPct: Int = 100

@@ -1,12 +1,16 @@
 package com.repository.glasses.listener.ui
 
 import android.animation.ValueAnimator
+import android.content.Context
 import android.content.res.Resources
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
 import android.widget.LinearLayout
@@ -26,6 +30,10 @@ class JobDisplayAdapter : RecyclerView.Adapter<JobDisplayAdapter.JobViewHolder>(
             this * Resources.getSystem().displayMetrics.density
 
         private val timeFormat = SimpleDateFormat("MMM d HH:mm", Locale.US)
+
+        private const val GLYPH_TICK = 0
+        private const val GLYPH_BOLT = 1
+        private const val GLYPH_PENDING = 2
     }
 
     private val items = mutableListOf<JobDisplayItem>()
@@ -36,92 +44,186 @@ class JobDisplayAdapter : RecyclerView.Adapter<JobDisplayAdapter.JobViewHolder>(
 
     override val adapterItemCount: Int get() = items.size
 
+    /**
+     * Small vector glyph for the timeline column: a tick (done), a bolt (recurring),
+     * or a hollow ring (pending). Drawn directly so we avoid monospace text-glyph hacks.
+     */
+    class TimelineGlyph(context: Context) : View(context) {
+        private val paint = Paint().apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 1f * Resources.getSystem().displayMetrics.density
+        }
+        var glyph: Int = GLYPH_PENDING
+        var glyphColor: Int = Lum.GLOW
+        private val path = Path()
+
+        init {
+            setBackgroundColor(Lum.VOID)
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            paint.color = glyphColor
+            val w = width.toFloat()
+            val h = height.toFloat()
+            path.reset()
+            when (glyph) {
+                GLYPH_TICK -> {
+                    paint.style = Paint.Style.STROKE
+                    path.moveTo(w * 0.18f, h * 0.55f)
+                    path.lineTo(w * 0.42f, h * 0.78f)
+                    path.lineTo(w * 0.84f, h * 0.24f)
+                    canvas.drawPath(path, paint)
+                }
+                GLYPH_BOLT -> {
+                    paint.style = Paint.Style.FILL
+                    path.moveTo(w * 0.58f, h * 0.06f)
+                    path.lineTo(w * 0.20f, h * 0.56f)
+                    path.lineTo(w * 0.46f, h * 0.56f)
+                    path.lineTo(w * 0.40f, h * 0.94f)
+                    path.lineTo(w * 0.80f, h * 0.42f)
+                    path.lineTo(w * 0.52f, h * 0.42f)
+                    path.close()
+                    canvas.drawPath(path, paint)
+                }
+                else -> {
+                    paint.style = Paint.Style.STROKE
+                    val inset = paint.strokeWidth / 2f + 0.5f
+                    canvas.drawCircle(w / 2f, h / 2f, w / 2f - inset, paint)
+                }
+            }
+        }
+    }
+
     class JobViewHolder(
         val container: LinearLayout,
-        val nameView: TextView,
-        val statusView: TextView,
-        val timeView: TextView
+        val glyphView: TimelineGlyph,
+        val connector: View,
+        val whenView: TextView,
+        val whatView: TextView
     ) : RecyclerView.ViewHolder(container) {
         var borderAnimator: ValueAnimator? = null
         var currentDrawable: GradientDrawable? = null
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): JobViewHolder {
-        val nameView = TextView(parent.context).apply {
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setTextColor(Lum.BRIGHT)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            setBackgroundColor(Lum.VOID)
+        // Timeline column: 18dp wide, centered, paddingTop 4dp.
+        val glyphView = TimelineGlyph(parent.context)
+
+        val connector = View(parent.context).apply {
+            setBackgroundColor(Lum.TRACE)
         }
 
-        val statusView = TextView(parent.context).apply {
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        val timelineColumn = LinearLayout(parent.context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, 4.dpToPx(), 0, 0)
             setBackgroundColor(Lum.VOID)
+            addView(glyphView, LinearLayout.LayoutParams(
+                10.dpToPx(),
+                11.dpToPx()
+            ))
+            // Vertical connector fills remaining height below the glyph.
+            addView(connector, LinearLayout.LayoutParams(
+                1.dpToPx(),
+                0,
+                1f
+            ).apply {
+                topMargin = 2.dpToPx()
+            })
         }
 
-        val timeView = TextView(parent.context).apply {
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        // "when" line: DIM, meta size, uppercase, letterSpacing 0.16em.
+        val whenView = TextView(parent.context).apply {
+            typeface = Typeface.DEFAULT
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 6f)
             setTextColor(Lum.DIM)
+            letterSpacing = 0.16f
             setBackgroundColor(Lum.VOID)
+        }
+
+        // "what" line: primary body size.
+        val whatView = TextView(parent.context).apply {
+            typeface = Typeface.DEFAULT
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            setLineSpacing(0f, 1.4f)
+            setTextColor(Lum.MID)
+            setBackgroundColor(Lum.VOID)
+        }
+
+        val contentColumn = LinearLayout(parent.context).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Lum.VOID)
+            addView(whenView, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
+            addView(whatView, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
         }
 
         val container = LinearLayout(parent.context).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            gravity = Gravity.TOP
             layoutParams = RecyclerView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
                 bottomMargin = 4.dpToPx()
             }
-            setPadding(8.dpToPx(), 6.dpToPx(), 8.dpToPx(), 6.dpToPx())
+            setPadding(4.dpToPx(), 3.dpToPx(), 4.dpToPx(), 3.dpToPx())
             setBackgroundColor(Lum.VOID)
-            addView(nameView, LinearLayout.LayoutParams(
+            addView(timelineColumn, LinearLayout.LayoutParams(
+                18.dpToPx(),
+                LinearLayout.LayoutParams.MATCH_PARENT
+            ).apply {
+                marginEnd = 6.dpToPx()
+            })
+            addView(contentColumn, LinearLayout.LayoutParams(
                 0,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
-            ).apply {
-                marginEnd = 8.dpToPx()
-            })
-            addView(statusView, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginEnd = 8.dpToPx()
-            })
-            addView(timeView, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
             ))
         }
 
-        return JobViewHolder(container, nameView, statusView, timeView)
+        return JobViewHolder(container, glyphView, connector, whenView, whatView)
     }
 
     override fun onBindViewHolder(holder: JobViewHolder, position: Int) {
         val item = items[position]
+        val isLast = position == items.size - 1
 
-        holder.nameView.text = item.name.ifEmpty { "Job" }
-        holder.nameView.setTextColor(Lum.BRIGHT)
+        // Map status -> design states: done / recurring / pending.
+        when (item.status) {
+            "completed" -> {
+                holder.glyphView.glyph = GLYPH_TICK
+                holder.glyphView.glyphColor = Lum.DIM
+            }
+            "running", "needs_input" -> {
+                holder.glyphView.glyph = GLYPH_BOLT
+                holder.glyphView.glyphColor = Lum.BRIGHT
+            }
+            else -> {
+                holder.glyphView.glyph = GLYPH_PENDING
+                holder.glyphView.glyphColor = Lum.GLOW
+            }
+        }
+        holder.glyphView.invalidate()
 
-        holder.statusView.text = item.status
-        holder.statusView.setTextColor(when (item.status) {
-            "completed" -> Lum.GLOW
-            "running" -> Lum.BRIGHT
-            "pending" -> Lum.DIM
-            "needs_input" -> Lum.BRIGHT
-            else -> Lum.MID
-        })
+        // Connector hidden on the last row.
+        holder.connector.visibility = if (isLast) View.INVISIBLE else View.VISIBLE
 
-        holder.timeView.text = if (item.scheduledAt > 0) {
-            timeFormat.format(Date(item.scheduledAt))
+        // "when" line from scheduled time.
+        holder.whenView.text = if (item.scheduledAt > 0) {
+            timeFormat.format(Date(item.scheduledAt)).uppercase()
         } else {
             ""
         }
+
+        // "what" line: job name, dimmed when done.
+        holder.whatView.text = item.name.ifEmpty { "Job" }
+        holder.whatView.setTextColor(if (item.status == "completed") Lum.DIM else Lum.MID)
 
         holder.borderAnimator?.cancel()
 
@@ -142,7 +244,7 @@ class JobDisplayAdapter : RecyclerView.Adapter<JobDisplayAdapter.JobViewHolder>(
     ) {
         val drawable = GradientDrawable().apply {
             setColor(Lum.VOID)
-            cornerRadius = 8f.dpToPx()
+            cornerRadius = 6f.dpToPx()
             setStroke(0, Lum.GHOST)
         }
         container.background = drawable

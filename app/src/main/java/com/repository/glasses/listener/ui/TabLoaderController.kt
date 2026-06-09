@@ -51,6 +51,10 @@ class TabLoaderController(
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply { gravity = Gravity.CENTER }
         container.addView(s, lp)
+        // The container holds per-tab content views (todoContainer, recyclers, etc.) that
+        // were inflated/added before this spinner; without bringing it to front the spinner
+        // draws BEHIND the opaque tab content and is never visible. Force it on top.
+        s.bringToFront()
         s.alpha = 0f
         Anim.fadeIn(s, 150L)
         s.start()

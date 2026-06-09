@@ -10,7 +10,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WRAPPER="$HERE/build/app_process64"
 HOOK="$HERE/build/libsinkconn_hook.so"
-SERIAL="${GLASSES_SERIAL:-1901092544026001}"
+SERIAL="${GLASSES_SERIAL:-}"
 
 if [ ! -f "$WRAPPER" ] || [ ! -f "$HOOK" ]; then
     echo "Missing build artefacts; run ./build.sh first." >&2

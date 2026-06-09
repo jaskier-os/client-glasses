@@ -855,36 +855,56 @@
                         android:layout_height="wrap_content"
                         android:layout_gravity="center_horizontal"
                         android:background="#000000"
+                        android:clipChildren="false"
+                        android:clipToPadding="false"
                         android:focusable="false"
                         android:focusableInTouchMode="false"
                         android:defaultFocusHighlightEnabled="false">
 
-                        <ImageView
-                            android:id="@+id/mapContentView"
+                        <com.repository.glasses.listener.ui.KeystoneFrame
+                            android:id="@+id/mapKeystone"
                             android:layout_width="288dp"
                             android:layout_height="144dp"
-                            android:background="#000000"
-                            android:scaleType="fitCenter"
+                            android:layout_gravity="center"
+                            android:clipChildren="false"
+                            android:clipToPadding="false"
                             android:focusable="false"
                             android:focusableInTouchMode="false"
-                            android:defaultFocusHighlightEnabled="false" />
+                            android:defaultFocusHighlightEnabled="false">
 
-                        <ImageView
-                            android:id="@+id/mapBaseFadeView"
-                            android:layout_width="288dp"
-                            android:layout_height="144dp"
-                            android:background="#000000"
-                            android:scaleType="fitCenter"
-                            android:alpha="0"
-                            android:focusable="false"
-                            android:focusableInTouchMode="false"
-                            android:defaultFocusHighlightEnabled="false" />
+                            <!-- Oversized square (at least the 288x144 window diagonal,
+                                 ~322dp) so that however the map rotates about the window
+                                 center it always fully covers the window with no black
+                                 corners. centerCrop fills the square; KeystoneFrame clips
+                                 the overflow to the window. No background, since a black
+                                 ImageView would paint over the sibling below it. -->
+                            <ImageView
+                                android:id="@+id/mapContentView"
+                                android:layout_width="330dp"
+                                android:layout_height="330dp"
+                                android:layout_gravity="center"
+                                android:scaleType="centerCrop"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                            <ImageView
+                                android:id="@+id/mapBaseFadeView"
+                                android:layout_width="330dp"
+                                android:layout_height="330dp"
+                                android:layout_gravity="center"
+                                android:scaleType="centerCrop"
+                                android:alpha="0"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+                        </com.repository.glasses.listener.ui.KeystoneFrame>
 
                         <ImageView
                             android:id="@+id/mapArrowView"
                             android:layout_width="24dp"
                             android:layout_height="24dp"
-                            android:layout_gravity="top|left"
+                            android:layout_gravity="center"
                             android:src="@drawable/map_arrow"
                             android:focusable="false" />
                     </FrameLayout>
@@ -1329,23 +1349,26 @@
                         android:defaultFocusHighlightEnabled="false" />
                 </LinearLayout>
 
-                <!-- Centered pill container -->
+                <!-- Centered tab container (no pill outline) -->
                 <FrameLayout
                     android:id="@+id/pillContainer"
                     android:layout_width="190dp"
-                    android:layout_height="18dp"
+                    android:layout_height="28dp"
                     android:layout_gravity="center_horizontal|bottom"
-                    android:background="@drawable/pill_tab_bg"
+                    android:background="@android:color/transparent"
                     android:clipChildren="false"
                     android:focusable="false"
                     android:defaultFocusHighlightEnabled="false">
 
-                    <!-- Sliding highlight capsule (drawable inset keeps pill border visible) -->
-                    <View
+                    <!-- Moving circular selection highlight (flattens with speed).
+                         Transparent background so the square view's corners don't
+                         paint opaque black over the row behind it; only the
+                         self-drawn oval emits. -->
+                    <com.repository.glasses.listener.ui.TabHighlightView
                         android:id="@+id/pillHighlight"
                         android:layout_width="38dp"
                         android:layout_height="match_parent"
-                        android:background="@drawable/pill_tab_highlight"
+                        android:background="@android:color/transparent"
                         android:focusable="false"
                         android:defaultFocusHighlightEnabled="false" />
 

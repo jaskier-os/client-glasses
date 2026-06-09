@@ -25,12 +25,23 @@ class BatteryLedArmer(
 ) {
     companion object {
         private const val STILL_ARM_MS = 60_000L
+        // Motion must persist this long before we treat the device as moving.
+        // Resting on a charger, the surface picks up isolated micro-vibrations
+        // (HVAC, footsteps, the desk being bumped) every ~30-50s; without
+        // hysteresis each lone spike flips stillness->false and restarts the
+        // 60s arm countdown, so the LED almost never arms. Requiring ~2s of
+        // SUSTAINED motion ignores those spikes while still catching the
+        // continuous jitter of a worn device (which keeps the privacy gate).
+        private const val MOTION_SUSTAIN_MS = 2_000L
     }
 
     // useWakeup=true: the glasses sit on a charger with the screen off, so the
     // non-wakeup IMU would stop delivering and freeze the stillness verdict.
     // The wakeup variant keeps motion detection alive during idle.
-    private val stillness = StillnessSensor(ctx, log, useWakeup = true)
+    // motionSustainMs: reject isolated desk vibrations (see MOTION_SUSTAIN_MS).
+    private val stillness = StillnessSensor(
+        ctx, log, useWakeup = true, motionSustainMs = MOTION_SUSTAIN_MS,
+    )
     private val handler = Handler(Looper.getMainLooper())
 
     @Volatile private var charging = false

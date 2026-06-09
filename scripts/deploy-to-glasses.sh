@@ -1,13 +1,11 @@
 #!/bin/bash
 set -e
 
-# Deploy glasses app + bt-manager + capture + filesync: build debug, install via ADB or relay.
+# Deploy glasses app + bt-manager + capture + filesync: build debug, install via ADB.
 # Usage: bash deploy-to-glasses.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-GLASSES_DIR="$REPO_ROOT"
+GLASSES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_APK="$GLASSES_DIR/app/build/outputs/apk/debug/app-debug.apk"
 BT_MGR_APK="$GLASSES_DIR/bt-manager/build/outputs/apk/debug/bt-manager-debug.apk"
 CAPTURE_APK="$GLASSES_DIR/capture/build/outputs/apk/debug/capture-debug.apk"
@@ -243,69 +241,5 @@ if [ -n "$GLASSES_SERIAL" ]; then
     exit 0
 fi
 
-echo "Glasses not found via ADB, falling back to relay..."
-
-# --- Relay deploy (app APK only -- bt-manager, capture, filesync must be installed via ADB) ---
-
-IP="192.168.0.103"
-RELAY_PORT="5030"
-RELAY_URL="http://$IP:$RELAY_PORT"
-
-echo "Checking relay server at $RELAY_URL/status ..."
-STATUS_JSON=$(curl -s "$RELAY_URL/status" 2>/dev/null || true)
-STATUS=$(echo "$STATUS_JSON" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
-
-if [ "$STATUS" = "ready" ]; then
-    echo "Relay server ready (glasses connected)."
-elif [ "$STATUS" = "connecting" ]; then
-    echo "Relay server is connecting to glasses. APK will be queued."
-elif [ "$STATUS" = "not_connected" ]; then
-    echo "Relay server running but glasses not connected. APK will be queued."
-    echo "Connect glasses in the app first for immediate upload."
-else
-    echo "Relay server not reachable."
-    echo "Make sure the listener app is running on the phone with sideloading enabled."
-    exit 1
-fi
-
-LOCAL_HASH=$(sha256sum "$APP_APK" | cut -d' ' -f1)
-REMOTE_HASH=$(curl -s "$RELAY_URL/hash" 2>/dev/null || true)
-
-if [ "$LOCAL_HASH" = "$REMOTE_HASH" ]; then
-    echo "APK unchanged (hash match), requesting re-upload..."
-    RESPONSE=$(curl -s -X POST "$RELAY_URL/retry")
-else
-    APK_SIZE=$(stat -c%s "$APP_APK")
-    echo "Sending APK to relay ($APK_SIZE bytes)..."
-    RESPONSE=$(curl -s -X POST --data-binary @"$APP_APK" \
-        -H "Content-Type: application/octet-stream" \
-        "$RELAY_URL/upload")
-fi
-
-echo "Relay response: $RESPONSE"
-echo "NOTE: bt-manager, capture, and filesync APKs must be installed via ADB separately."
-echo "Done."
-
-# Open the deployed app on glasses
-open_glasses_app() {
-    local PHONE_IP="${1:-192.168.0.103}"
-    local PACKAGE="com.repository.glasses.listener"
-    local ACTIVITY="com.repository.glasses.listener.MainActivity"
-
-    echo "Opening app on glasses via BT..."
-    curl -s -X POST "http://${PHONE_IP}:5030/open-app" \
-        -H "Content-Type: application/json" \
-        -d "{\"package\":\"${PACKAGE}\",\"activity\":\"${ACTIVITY}\"}"
-    echo "App opened on glasses"
-}
-
-# Close the app by opening launcher (pushes app to background)
-close_glasses_app() {
-    local PHONE_IP="${1:-192.168.0.103}"
-
-    echo "Closing app (opening launcher) on glasses via BT..."
-    curl -s -X POST "http://${PHONE_IP}:5030/open-app" \
-        -H "Content-Type: application/json" \
-        -d "{\"package\":\"com.rokid.glass.launcher\",\"activity\":\"com.rokid.glass.launcher.LauncherActivity\"}"
-    echo "App closed (pushed to background)"
-}
+echo "Glasses not found via ADB. Connect the glasses over USB and retry."
+exit 1

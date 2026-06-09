@@ -114,7 +114,7 @@ class ListenerService : LifecycleService(),
         const val ACTION_MAP_TAB_VISIBLE = "com.repository.glasses.listener.MAP_TAB_VISIBLE"
         const val ACTION_NAV_STEPS = "com.repository.glasses.listener.NAV_STEPS"
         const val ACTION_NAV_STEP_INDEX = "com.repository.glasses.listener.NAV_STEP_INDEX"
-        const val EXTRA_MAP_BITMAP = "map_bitmap"
+        const val EXTRA_MAP_BITMAP_BYTES = "map_bitmap_bytes"
 
         const val ACTION_CHAT_LIST = "com.repository.glasses.listener.CHAT_LIST"
         const val EXTRA_CHAT_LIST = "chat_list"
@@ -206,11 +206,8 @@ class ListenerService : LifecycleService(),
         const val ACTION_TODO_TOGGLE = "com.repository.glasses.listener.TODO_TOGGLE"
         const val ACTION_TODO_ADD = "com.repository.glasses.listener.TODO_ADD"
         const val ACTION_TODO_REMOVE = "com.repository.glasses.listener.TODO_REMOVE"
-        const val ACTION_REQUEST_TELEGRAM_SAVED = "com.repository.glasses.listener.REQUEST_TELEGRAM_SAVED"
         const val ACTION_TODO_LIST_LOADED = "com.repository.glasses.listener.TODO_LIST_LOADED"
-        const val ACTION_TELEGRAM_SAVED_LOADED = "com.repository.glasses.listener.TELEGRAM_SAVED_LOADED"
         const val EXTRA_TODO_JSON = "todo_json"
-        const val EXTRA_TELEGRAM_JSON = "telegram_json"
         const val EXTRA_TODO_ID = "todo_id"
         const val EXTRA_TODO_TEXT = "todo_text"
 
@@ -355,6 +352,8 @@ class ListenerService : LifecycleService(),
     @Volatile
     private var state = State.IDLE
     private lateinit var btClient: GlassesBtClient
+    /** Dedicated relay for the binary map base-frame stream (MAP_UUID). Null if init failed. */
+    private var mapRelay: com.repository.glasses.listener.bt.MessageRelay? = null
     private lateinit var ttsPlayer: TtsPlayer
     private lateinit var notificationTtsPlayer: TtsPlayer
     private lateinit var notificationOverlay: NotificationOverlay
@@ -402,12 +401,19 @@ class ListenerService : LifecycleService(),
     private var batteryLedArmer: com.repository.glasses.listener.power.BatteryLedArmer? = null
     private val batteryLedReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(c: Context?, i: android.content.Intent?) {
-            val status = i?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) ?: -1
-            batteryLedArmer?.setCharging(
-                status == android.os.BatteryManager.BATTERY_STATUS_CHARGING ||
-                    status == android.os.BatteryManager.BATTERY_STATUS_FULL
-            )
+            batteryLedArmer?.setCharging(isCablePlugged(i))
         }
+    }
+
+    // "Charging" for the battery LED means a cable is PLUGGED, not the charge
+    // STATUS. EXTRA_STATUS flaps CHARGING<->FULL<->NOT_CHARGING every ~1s at high
+    // SoC (mp2724 trickle/maintenance), which would disarm the LED and restart
+    // the 60s still-arm timer every second. EXTRA_PLUGGED stays non-zero for the
+    // whole time the cable is in -- the app-side mirror of the daemon's reliance
+    // on the charger `online` node over `status`.
+    private fun isCablePlugged(i: android.content.Intent?): Boolean {
+        val plugged = i?.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, -1) ?: -1
+        return plugged > 0
     }
 
     // On-glasses audio pipelines fed by MicBus (always-on mic pump).
@@ -2283,6 +2289,35 @@ class ListenerService : LifecycleService(),
             broadcastDebugStatus("BT:init_exception:${e.message}")
         }
 
+        // Dedicated map relay on its own RFCOMM socket (MAP_UUID). The map base frame
+        // arrives as a single binary arg (raw WEBP) on CH_MAP_BITMAP_BIN; everything else
+        // stays on the main messaging relay. Kept separate so heavy 10-15 FPS map traffic
+        // cannot starve latency-sensitive messaging frames.
+        try {
+            val relay = com.repository.glasses.listener.bt.MessageRelay(
+                btManagerBridge,
+                applicationContext,
+                com.repository.glasses.listener.bt.MessageRelay.MAP_UUID,
+                com.repository.glasses.listener.bt.MessageRelay.MAP_SERVICE_NAME,
+            )
+            relay.remoteLog = { btLog(it) }
+            relay.listener = object : com.repository.glasses.listener.bt.MessageRelay.Listener {
+                override fun onConnected() { btLog("Map relay connected") }
+                override fun onDisconnected() { btLog("Map relay disconnected") }
+                override fun onMessage(channel: String, args: List<String>) {
+                    btLog("Map relay unexpected string channel: $channel")
+                }
+                override fun onBinaryMessage(channel: String, payload: ByteArray) {
+                    if (channel == com.repository.glasses.listener.bt.BtProtocol.CH_MAP_BITMAP_BIN) {
+                        onMapBitmapBytes(payload)
+                    }
+                }
+            }
+            mapRelay = relay
+        } catch (e: Exception) {
+            btErr("Map relay init failed: ${e.message}")
+        }
+
         // Init CaptureBridge + FunctionButtonHandler. ScreenOffAccessibilityService is the
         // source of KEYCODE_CAMERA events (system-wide, foreground-independent) and posts
         // them here via ACTION_FN_KEY broadcasts, which drive the long-press state machine
@@ -2358,6 +2393,12 @@ class ListenerService : LifecycleService(),
                 btClient.initialize()
                 btLog("BT initialized: ${btClient.initStatus}")
                 broadcastDebugStatus("BT:${btClient.initStatus}")
+                try {
+                    mapRelay?.start()
+                    btLog("Map relay started")
+                } catch (e: Exception) {
+                    btErr("Map relay start failed: ${e.message}")
+                }
             } catch (e: Exception) {
                 broadcastDebugStatus("BT:init_exception:${e.message}")
             }
@@ -2839,11 +2880,7 @@ class ListenerService : LifecycleService(),
                 batteryLedReceiver,
                 IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)
             )
-            val status = initialBattery?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) ?: -1
-            batteryLedArmer?.setCharging(
-                status == android.os.BatteryManager.BATTERY_STATUS_CHARGING ||
-                    status == android.os.BatteryManager.BATTERY_STATUS_FULL
-            )
+            batteryLedArmer?.setCharging(isCablePlugged(initialBattery))
             btLog("BatteryLedArmer wired: battery receiver registered, charging seeded")
         } catch (e: Exception) {
             batteryLedArmer = null
@@ -3084,11 +3121,6 @@ class ListenerService : LifecycleService(),
         registerReceiver(
             todoRemoveReceiver,
             IntentFilter(ACTION_TODO_REMOVE),
-            Context.RECEIVER_NOT_EXPORTED
-        )
-        registerReceiver(
-            telegramSavedRequestReceiver,
-            IntentFilter(ACTION_REQUEST_TELEGRAM_SAVED),
             Context.RECEIVER_NOT_EXPORTED
         )
         registerReceiver(
@@ -6836,17 +6868,18 @@ class ListenerService : LifecycleService(),
         })
     }
 
-    override fun onMapBitmap(bitmapBase64: String) {
+    // Map base frame arrives as raw WEBP bytes on the dedicated map RFCOMM socket
+    // (MAP_UUID / CH_MAP_BITMAP_BIN), routed here from mapRelay.onBinaryMessage. No base64.
+    private fun onMapBitmapBytes(payload: ByteArray) {
         sendBroadcast(Intent(ACTION_MAP_BITMAP).apply {
             setPackage(packageName)
-            putExtra(EXTRA_MAP_BITMAP, bitmapBase64)
+            putExtra(EXTRA_MAP_BITMAP_BYTES, payload)
         })
         // Update overlay if active
         mapOverlayView?.let { iv ->
             overlayHandler.post {
                 try {
-                    val bytes = Base64.decode(bitmapBase64, Base64.NO_WRAP)
-                    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@post
+                    val bmp = BitmapFactory.decodeByteArray(payload, 0, payload.size) ?: return@post
                     val green = BitmapUtils.toMonochromeGreen(bmp)
                     bmp.recycle()
                     val old = (iv.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap
@@ -7108,14 +7141,6 @@ class ListenerService : LifecycleService(),
         })
     }
 
-    override fun onTelegramSavedResponse(json: String) {
-        btLog("Telegram saved response received: ${json.length} chars")
-        sendBroadcast(Intent(ACTION_TELEGRAM_SAVED_LOADED).apply {
-            setPackage(packageName)
-            putExtra(EXTRA_TELEGRAM_JSON, json)
-        })
-    }
-
     override fun onAlarmListResponse(json: String) {
         btLog("Alarm list response: ${json.length} chars")
         sendBroadcast(Intent(ACTION_ALARM_LIST_LOADED).apply {
@@ -7153,17 +7178,20 @@ class ListenerService : LifecycleService(),
         })
     }
 
-    override fun onTgMessagesResponse(json: String) {
-        btLog("TG messages response: ${json.length} chars")
+    override fun onTgMessagesResponse(chatId: String, json: String) {
+        btLog("TG messages response: chatId=$chatId ${json.length} chars")
         // Large JSON (with images/long threads) can exceed the 1MB Binder transaction limit
         // for broadcast intents, causing CannotDeliverBroadcastException. Write to a shared
-        // file and pass the path instead.
+        // file and pass the path instead. The chatId always rides along so the UI can route
+        // the response by WHICH chat it answers (chatId="me" = Saved sub-tab, else chat browser)
+        // instead of guessing from a transient in-flight flag.
         if (json.length > 200_000) {
             try {
                 val file = java.io.File(filesDir, "tg_messages_payload.json")
                 file.writeText(json)
                 sendBroadcast(Intent(ACTION_TG_MESSAGES).apply {
                     setPackage(packageName)
+                    putExtra(EXTRA_TG_CHAT_ID, chatId)
                     putExtra("tg_messages_file", file.absolutePath)
                 })
                 return
@@ -7173,6 +7201,7 @@ class ListenerService : LifecycleService(),
         }
         sendBroadcast(Intent(ACTION_TG_MESSAGES).apply {
             setPackage(packageName)
+            putExtra(EXTRA_TG_CHAT_ID, chatId)
             putExtra(EXTRA_TG_MESSAGES_JSON, json)
         })
     }
@@ -7878,13 +7907,6 @@ class ListenerService : LifecycleService(),
             val id = intent.getStringExtra(EXTRA_TODO_ID) ?: return
             btLog("Todo remove from UI: $id")
             btClient.sendTodoRemove(id)
-        }
-    }
-
-    private val telegramSavedRequestReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            btLog("Telegram saved request from UI -- sending to phone")
-            btClient.sendTelegramSavedRequest()
         }
     }
 
@@ -8629,7 +8651,6 @@ class ListenerService : LifecycleService(),
         try { unregisterReceiver(todoToggleReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(todoAddReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(todoRemoveReceiver) } catch (_: Exception) {}
-        try { unregisterReceiver(telegramSavedRequestReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(alarmListRequestReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(jobListRequestReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(tgChatListRequestReceiver) } catch (_: Exception) {}
@@ -8672,6 +8693,7 @@ class ListenerService : LifecycleService(),
         try { liveUtteranceHandler.removeCallbacks(liveUtteranceRevertRunnable) } catch (_: Exception) {}
         try { stopMicStream("onDestroy") } catch (_: Exception) {}
         try { btClient.shutdown() } catch (_: Exception) {}
+        try { mapRelay?.let { it.listener = null; it.stop() } } catch (_: Exception) {}
         try { syncChannelHandler?.detach() } catch (_: Exception) {}
         try { fileSyncBridge.unbind() } catch (_: Exception) {}
         try { unregisterReceiver(fnKeyReceiver) } catch (_: Exception) {}

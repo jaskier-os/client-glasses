@@ -1,128 +1,8 @@
-# CLAUDE.md -- client-glasses
+# CLAUDE.md
 
-Guidance for Claude Code working in this repo. This is the **glasses half** of a
-glasses + phone AR assistant. Listener app for Rokid AR glasses (YodaOS /
-Android 12, arm64): it captures mic audio, runs on-device wake-word + VAD, takes
-photos, draws an on-glasses overlay, does on-device face detection (ReID), and
-relays messages/files to the companion phone over Bluetooth RFCOMM and Wi-Fi
-Direct. It does NOT talk to the backend directly -- the phone app relays to the
-orchestrator. The phone app is in the `client-phone` repo.
+Companion client for Rokid AR glasses. Kotlin, native Android (no React Native). Communicates with the phone app over BT via CXR-S SDK. Phone handles wake word detection, VAD, recording, transcription, AI orchestration, and relays results back. Glasses handle audio streaming, TTS playback, camera capture, on-device face detection (ReID), screen/HUD recording, navigation, translation display, teleprompter, notifications, and a multi-tab UI.
 
-For the whole-system map (orchestrator, agents, port allocation, communicator),
-see the `jaskier-os/orchestrator` repo's CLAUDE.md / docs rather than duplicating
-it here.
-
-**Listener package:** `com.repository.glasses.listener`
-
-IMPORTANT: NEVER USE EMOJIS ANYWHERE IN LOGGING, CODE, OR OTHER TEXT.
-
-IMPORTANT: Treat this codebase as work in progress. Never do
-backwards-compatibility or legacy support unless explicitly asked to. Remove code
-that becomes redundant. After any replacement, remove every orphan (field,
-comment, import) that references the old system.
-
-## Modules
-
-Gradle multi-module project (`settings.gradle.kts`): `:app`, `:bt-manager`,
-`:capture`, `:filesync`, `:glasses-tracing`. The `sthal/`, `*-daemon/`,
-`wake-word-training/`, `*-test*/`, `KOTI_AEC/`, `WebRTC_AECM/`, `external/`,
-`nightvision-asset/`, `test/`, `docs/` trees are research/native/test tooling,
-not part of the APK.
-
-| Module | Type | Role |
-|---|---|---|
-| `app/` | listener APK (`com.repository.glasses.listener`) | Main glasses app: UI (`MainActivity`, default process) + `:backend` service (`ListenerService`). Bundles wake-word/VAD models + native C++ via CMake/NDK. |
-| `bt-manager/` | priv-app APK (`com.repository.glasses.btmanager`) | System-app Bluetooth broker. Wraps hidden `BluetoothA2dpSink` / `BluetoothHeadsetClient` reflection, RFCOMM sockets, BLE advertising/wake, plus `ProfileAutoConnector` (HFP+A2DP after pairing). Listener binds via `IBtManager.aidl`. Needs `BLUETOOTH_PRIVILEGED` (`bt-manager/priv-permissions.xml`). |
-| `capture/` | priv-app APK (`com.repository.glasses.capture`) | Out-of-process camera/HUD capture service (`ICapture.aidl`). Isolates Camera2 + MediaCodec so a capture crash can't take the listener down. No privapp-permissions XML -- plain `adb install` is correct for capture (it is a normal user app). |
-| `filesync/` | priv-app APK (`com.repository.glasses.filesync`) | WiFi P2P file/log sync server. Hosts the persistent log at `/sdcard/Download/glasses-client.log` over HTTP on port 8848. Needs WiFi privileged perms (`filesync/priv-permissions.xml`). |
-| `glasses-tracing/` | shared Android lib (Kotlin) | `GT.section` / `GT.counter` Perfetto helpers. Consumed by `app`, `bt-manager`, `capture`, `filesync`. See "Perfetto Tracing". |
-| `glasses-power-daemon/` | native arm64 C binary (`/system/bin/glasses-power-daemon`) | Root daemon: screen timeout, fold/take-off suspend, time sync, `enforce_psensor`/`enforce_hall` unlatch on boot, LED battery indicator, tombstone collection. Init `class core`, auto-respawn. Has its own CLAUDE.md. |
-| `touchpad-daemon/` | native arm64 C binary (`/system/bin/rokid-touchpad-daemon`) + patched `psoc_ts_drv_right.ko` | Grabs `/dev/input/event1` from the PSoC touchpad, emits filtered/scaled `KEY_KP*` events on a uinput device, defers `KEY_PROG1`. Also contains the PSoC firmware-patch pipeline. Has its own CLAUDE.md. |
-| `sthal/` | sound trigger HAL (`sound_trigger.primary.neo.so`) + Sirenev wakeword models | Replaces Rokid's stock sound-trigger HAL with a SoC-DSP-offloaded one. Baked into super_4 via `root-firmware.sh`. Own privapp-permissions XML (`sthal/priv-permissions.xml`). |
-| `wake-word-training/` | Python | Wake-word model training/augmentation (`augment_samples.py`, `generate_clips.py`, `stress_test.py`, etc.). Models land in `app/`. |
-| `touchpad-test-app/`, `led-cam-test/` | standalone APKs | Diagnostic harnesses. Not deployed in production. |
-| `KOTI_AEC/`, `WebRTC_AECM/` | C/C++ source + JNI | AEC variants; `WebRTC_AECM/` is the live AECM path (`audio/WebRtcAecm.kt`). `KOTI_AEC/` is reference. |
-| `external/` | vendored deps | Currently `speexdsp`. |
-| `nightvision-asset/` | binary asset + deploy script | `nightvision_unet.onnx` for the Night Vision tab + pusher. |
-| `test/` | Python pytest harness | E2E tests, `adb/` helpers. |
-| `docs/` | Markdown | Hardware reference (touchpad, mic audio, Rokid service binding). |
-
-## Architecture: Separate Processes
-
-The listener app runs as TWO separate Android processes:
-- **ListenerService** (`:backend` process) -- backend: BT communication, audio
-  streaming, camera capture, ReID, screen recording, TTS playback, Rokid OS
-  integration, notification overlay, all device commands. ~3500 lines.
-- **MainActivity** (default process) -- UI only. Multi-tab interface
-  (chat, chat list, ReID, todo, night vision, translation, map, teleprompter).
-
-They do NOT share memory. Data flows ListenerService -> MainActivity via local
-broadcasts (`sendBroadcast` / `BroadcastReceiver`) carrying Intent extras
-(strings, not object references). A broadcast only reaches MainActivity if its
-receiver is registered for that action.
-
-**Auto-start:** `BootReceiver` starts ListenerService and launches MainActivity
-on `BOOT_COMPLETED` and `MY_PACKAGE_REPLACED`.
-
-## Source Structure (listener app)
-
-```
-app/src/main/java/com/repository/glasses/listener/
-  MainActivity.kt              -- UI, tab navigation, focus state machine, key input
-  GlassesListenerApp.kt        -- Application class
-  service/ListenerService.kt   -- Backend process. BT, audio, camera, ReID, recording, TTS
-  bt/        GlassesBtClient.kt, BtProtocol.kt, MessageRelay, BtManagerBridge (RFCOMM relay)
-  capture/   AudioRecorder.kt, CameraCapturer.kt, ArCameraPreview.kt, HudRecorder.kt
-  reid/      ReidController.kt (ML Kit face detection), ReidCameraCapturer.kt
-  nightvision/ NightVisionPreview.kt
-  rokid/     RokidServiceBridge.kt (AIDL to MasterAssistService), RokidNavigationController.kt, AssistantSuppressor.kt
-  audio/     TtsPlayer.kt, OpusEncoder, SpeexEchoCanceller, WebRtcAecm.kt
-  config/    GlassesConfig.kt (model, deviceId, notification duration, wearing sensitivity)
-  boot/      BootReceiver.kt
-  ui/        ChatAdapter, ChatListAdapter, TeleprompterController, TodoChecklistAdapter,
-             NotificationOverlay (WindowManager overlay), ScrollDrainer, Lum.kt, etc.
-  util/      LogCollector.kt, ScreenStateReceiver.kt
-```
-
-### UI Tabs
-
-`TabId` enum: `CHAT`, `CHAT_LIST`, `REID`, `TODO`, `NIGHTVISION`, `TRANSLATE`,
-`MAP`, `TELEPROMPTER`. Default active: `TODO, CHAT, CHAT_LIST, TRANSLATE,
-TELEGRAM, REID`. `MAP`/`TELEPROMPTER`/`NIGHTVISION` are added/removed
-dynamically. `FocusState` machine has a `*_FOCUSED` state per tab plus `TAB_NAV`
-and `STOP_MODAL`.
-
-**Adding a dynamic tab:** the selected tab is identified by `currentTabId: TabId`,
-not a numeric index. The pill highlight sits at
-`activeTabs.indexOf(currentTabId) * TAB_SLOT_DP`. To add/remove without breaking
-pill placement:
-1. Add the value to the `TabId` enum.
-2. `show<X>Tab()`: build the icon View, `insertTabFrameAt(activeIdx, frame)`,
-   then `activeTabs.add(activeIdx, TabId.<X>)`.
-3. `hide<X>Tab()`: capture `idx = activeTabs.indexOf(TabId.<X>)`, remove the icon,
-   then `activeTabs.remove(TabId.<X>)`.
-4. **Always** finish with exactly one `afterTabsChanged(switchToAdded = TabId.<X>)`
-   (add) or `afterTabsChanged(removedAt = idx)` (remove). That hook resizes the
-   pill container, picks the surviving `TabId` to focus, and re-anchors
-   `pillHighlight.translationX`. Mutating `activeTabs` without it desyncs the pill
-   -- you'll see a `NAV: pill width mismatch` warning in `glasses-client.log`.
-
-## Build
-
-Build with **JDK 17**. JDK 21 breaks R8 on the minified debug variant. The debug
-variant is the one we ship (minify + shrink enabled). Native code is `arm64-v8a`
-only -- you need the Android SDK + NDK.
-
-```bash
-./gradlew :app:assembleDebug      # listener APK only
-./gradlew assembleDebug           # all modules
-./gradlew clean
-```
-
-The APK needs no server endpoint or secrets -- all transport is local and the
-peer is negotiated at runtime. The only build requirement is the SDK path: copy
-`local.properties.example` to `local.properties` and set `sdk.dir` (or
-`ANDROID_HOME` / `ANDROID_SDK_ROOT`).
+**Package:** `com.repository.glasses.listener`
 
 ## ReID OSINT feature flags
 
@@ -167,247 +47,518 @@ yields 404s.
 `ENABLE_REID_OSINT=true`; reid-analytics backend `.env` `ENABLE_OSINT=true`;
 reid-analytics frontend `.env` `VITE_ENABLE_OSINT=true`.
 
-## Deploy (MANDATORY -- read before installing anything)
+## Architecture: Separate Processes
 
-ALWAYS deploy via the in-repo script. Never run `gradlew` install tasks or plain
-`adb install` by hand for the priv-app packages.
+The app runs as TWO separate Android processes:
+- **ListenerService** (`:backend` process) -- background service handling BT communication, audio streaming, camera capture, ReID, screen recording, TTS playback, Rokid OS integration, notification overlay, and all device commands. This is the backend.
+- **MainActivity** (default process) -- UI only. Multi-tab interface with chat, chat list, ReID, todo, night vision, translation, map, and teleprompter views. Communicates with ListenerService via local broadcasts (`sendBroadcast`/`BroadcastReceiver`).
 
-```bash
-bash scripts/deploy-to-glasses.sh
+They do NOT share memory. Data flows from ListenerService to MainActivity via Intent extras (strings, not object references). A broadcast sent from ListenerService only reaches MainActivity if the receiver is registered for that action.
+
+**Auto-start:** `BootReceiver` starts ListenerService and launches MainActivity on `BOOT_COMPLETED` and `MY_PACKAGE_REPLACED`.
+
+## Modules
+
+Top-level Gradle subprojects + bundled native libraries living in this directory. Most are referenced elsewhere in this file; this section just gives a one-line tour so nothing stays unexplained.
+
+| Module | Type | Role |
+|---|---|---|
+| `app/` | listener APK (`com.repository.glasses.listener`) | The main glasses app (UI + `:backend` service). Everything in "Source Structure" below lives here. |
+| `bt-manager/` | priv-app APK (`com.repository.glasses.btmanager`) | System-app Bluetooth broker. Wraps hidden `BluetoothA2dpSink` / `BluetoothHeadsetClient` reflection, RFCOMM sockets, BLE advertising/wake, plus `ProfileAutoConnector` that brings HFP+A2DP up after pairing. Listener binds via `IBtManager.aidl`. Needs `BLUETOOTH_PRIVILEGED` (privapp-permissions XML in repo root). |
+| `capture/` | priv-app APK (`com.repository.glasses.capture`) | Out-of-process camera/HUD capture service exposing `ICapture.aidl`. Isolates Camera2 + MediaCodec from the listener process so a capture crash can't take the listener with it. |
+| `filesync/` | priv-app APK (`com.repository.glasses.filesync`) | WiFi P2P file/log sync server. Hosts the persistent log at `/sdcard/Download/glasses-client.log` over HTTP on port 8848 (used by `test/adb/pull_glasses_log.sh`). |
+| `glasses-power-daemon/` | native arm64 C binary (`/system/bin/glasses-power-daemon`) | Root daemon for screen timeout, fold/take-off shutdown, time sync, and the `enforce_psensor`/`enforce_hall` unlatch on boot. Init service `class core`, auto-respawn. |
+| `glasses-tracing/` | shared Android library (Kotlin) | The `GT.section` / `GT.counter` Perfetto helpers. Consumed by `app`, `bt-manager`, `capture`, `filesync` so all four APKs emit slices with the `gt.` prefix. See "Perfetto Tracing" below. |
+| `sthal/` | sound trigger HAL (`sound_trigger.primary.neo.so`) + Sirenev wakeword models | Replaces Rokid's stock sound-trigger HAL with our SoC-DSP-offloaded one. Baked into super_4 via `root-firmware.sh`. Has its own privapp-permissions XML. |
+| `touchpad-daemon/` | native arm64 C binary (`/system/bin/rokid-touchpad-daemon`) + patched `psoc_ts_drv_right.ko` | Grabs `/dev/input/event1` from the PSoC touchpad and emits filtered/scaled `KEY_KP*` events on a uinput device. Also defers `KEY_PROG1` to suppress accidental Rokid AI triggers. See "Touchpad Daemon + App-Side Scroll". |
+| `touchpad-test-app/` | standalone APK | Diagnostic harness for the touchpad daemon -- visualizes incoming key events. Not deployed in production. |
+| `led-cam-test/` | standalone APK | Diagnostic harness for the LED ring + camera HAL. Not deployed in production. |
+| `KOTI_AEC/` | C/C++ source | Korean-style AEC variant (WebRTC + Speex 1.0/1.2). Reference implementation; the live AEC path is `WebRTC_AECM/`. |
+| `WebRTC_AECM/` | C/C++ source + JNI | The actual mobile-AECM port used by the listener's audio pipeline (`audio/WebRtcAecm.kt`). |
+| `external/` | vendored deps | Currently just `speexdsp` (used by the AEC/AECM modules). |
+| `nightvision-asset/` | binary asset + deploy script | `nightvision_unet.onnx` ONNX model for the Night Vision tab, plus `deploy-nightvision-asset.sh` to push it to the glasses. |
+| `raw_data/` | captured PCM | Sample microphone recordings used by AEC bring-up tests. |
+| `test/` | Python pytest harness | E2E tests, `adb/` helpers, `fn-button-daemon.sh`. |
+| `docs/` | Markdown notes | Hardware reference docs (touchpad, mic audio, Rokid service binding). |
+
+## Source Structure
+
+```
+app/src/main/java/com/repository/glasses/listener/
+  MainActivity.kt              -- UI, tab navigation, focus state machine, key input
+  GlassesListenerApp.kt        -- Application class
+  service/
+    ListenerService.kt         -- Backend process (~3500 lines). BT, audio, camera, ReID, recording, TTS
+  bt/
+    GlassesBtClient.kt         -- CXRServiceBridge wrapper for BT communication
+    BtProtocol.kt              -- Channel names and message format constants
+  capture/
+    AudioRecorder.kt           -- Mic audio capture
+    CameraCapturer.kt          -- Camera2 API photo/video capture
+    ArCameraPreview.kt         -- AR camera preview surface
+    HudRecorder.kt             -- HUD overlay recording
+  reid/
+    ReidController.kt          -- Face detection controller (ML Kit)
+    ReidCameraCapturer.kt      -- Camera feed for ReID pipeline
+  nightvision/
+    NightVisionPreview.kt      -- Night vision camera mode
+  rokid/
+    RokidServiceBridge.kt      -- AIDL binding to MasterAssistService
+    RokidNavigationController.kt -- Rokid OS navigation launch
+    AssistantSuppressor.kt     -- Suppresses Rokid's built-in assistant
+  audio/
+    TtsPlayer.kt               -- TTS audio playback
+  config/
+    GlassesConfig.kt           -- Runtime settings (model, deviceId, notification duration, wearing sensitivity)
+  boot/
+    BootReceiver.kt            -- Auto-start on boot / package update
+  ui/
+    ChatAdapter.kt, ChatListAdapter.kt, ChatMessage.kt, ChatSummaryItem.kt
+    TeleprompterController.kt  -- Teleprompter scroll/pause/speed control
+    TodoChecklistAdapter.kt, TodoItem.kt
+    TelegramSavedAdapter.kt, TelegramMessage.kt
+    NotificationOverlay.kt     -- WindowManager overlay for phone notifications
+    SpinnerView.kt, Lum.kt, Anim.kt, BitmapUtils.kt, MessageItemAnimator.kt
+  util/
+    LogCollector.kt            -- In-memory + external file log collector
+    ScreenStateReceiver.kt     -- Screen on/off events
 ```
 
-It builds debug, then installs `app`, `bt-manager`, `capture`, `filesync` via
-ADB (or via the phone relay if no direct ADB). It installs the priv-app modules
-(`listener`, `bt-manager`, `filesync`) via the
-`/data/local/diy-overlay/system/priv-app/<pkg>/<apk>` overlay slot using an
-in-place `cat > target` rewrite (a direct `adb push` to the busy bind-mount
-silently no-ops), removes any `/data/app` sideload shadows, reboots once, waits
-for `sys.boot_completed=1`, verifies each priv-app resolved to
-`/system/priv-app/`, then applies runtime grants (`MANAGE_EXTERNAL_STORAGE`,
-`WRITE_SETTINGS`, `NETWORK_SETTINGS`, `OVERRIDE_WIFI_CONFIG`,
-`WRITE_SECURE_SETTINGS`, `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION`),
-notification-listener allow, accessibility enable, and the HOME role. `capture`
-is a normal user app and gets `adb install -r`.
+## UI Tabs
 
-IMPORTANT: NEVER bypass `scripts/deploy-to-glasses.sh`, and NEVER use plain
-`adb install` / `adb install -r` / `pm install` for any package shipping a
-privapp-permissions XML (`com.repository.glasses.listener`,
-`com.repository.glasses.filesync`, `com.repository.glasses.btmanager`). Those
-packages MUST be installed via the priv-app overlay slot followed by a reboot.
-`adb install` puts the APK under `/data/app/`, which shadows the priv-app slot
-and silently strips signature/privileged grants (`BLUETOOTH_PRIVILEGED`,
-`NETWORK_SETTINGS`, `OVERRIDE_WIFI_CONFIG`, `CHANGE_WIFI_STATE`, etc.). Symptoms:
-pairing / `setScanMode` SecurityException on listener, `setWifiEnabled` returns
-false on filesync, audio sync stalls in IDLE, BT bridge ops fail. The other
-correct path is `Recon/rokid-docs/yodaos-root-full/root-firmware.sh --post-flash`
-after reflashing super_4. Both apply ALL required grants/appops/roles
-automatically; never reapply them by hand and never skip the reboot.
+`TabId` enum: `CHAT`, `CHAT_LIST`, `REID`, `TODO`, `NIGHTVISION`, `TRANSLATE`, `MAP`, `TELEPROMPTER`
 
-IMPORTANT: When changing the AndroidManifest.xml of any priv-app deployed via the
-overlay (`listener`, `filesync`, `btmanager`), BUMP `versionCode` (and ideally
-`versionName`) in that module's `build.gradle.kts`. The priv-app slot's APK is
-bind-mounted at the same path each boot; if `versionCode` doesn't change, PMS
-reuses the cached parse from `/data/system/package_cache/` and ignores the new
-manifest -- the classic symptom is a `foregroundServiceType` mismatch crash where
-PMS reports the OLD type. Bumping `versionCode` forces re-parse. The cache can
-also be cleared with `adb shell su 0 rm -rf /data/system/package_cache/*` +
-reboot, but bumping the version is the durable fix and should be the default for
-any manifest-affecting change.
+Default active tabs: `TODO, CHAT, CHAT_LIST, TRANSLATE, TELEGRAM, REID`. Others (`MAP`, `TELEPROMPTER`, `NIGHTVISION`) are added/removed dynamically when their features activate.
 
-IMPORTANT: NEVER use `pm clear`, `pm uninstall`, `adb shell wipe`, or any
-destructive app-data command unless the user explicitly asks. These destroy user
-settings, permissions, and cached state. Always use the overlay reinstall path
-(it keeps data).
+`FocusState` machine: `TAB_NAV`, `CHAT_FOCUSED`, `LIST_FOCUSED`, `MAP_FOCUSED`, `STOP_MODAL`, `TRANSLATE_FOCUSED`, `TELEPROMPTER_FOCUSED`, `REID_FOCUSED`, `TODO_FOCUSED`, `NIGHTVISION_FOCUSED`
+
+### Adding a new dynamic tab
+
+The selected tab is identified by `currentTabId: TabId`, not by a numeric index. The pill highlight (`pillHighlight`) sits at `activeTabs.indexOf(currentTabId) * TAB_SLOT_DP` and is rebuilt every time the tab list mutates. To add a new dynamically-toggled tab without breaking pill placement:
+
+1. Add the value to the `TabId` enum in `MainActivity.kt`.
+2. In `show<X>Tab()`: build the icon `View`, insert it into `tabIconsRow` via `insertTabFrameAt(activeIdx, frame)`, then `activeTabs.add(activeIdx, TabId.<X>)`.
+3. In `hide<X>Tab()`: capture `val idx = activeTabs.indexOf(TabId.<X>)`, remove the icon from `tabIconsRow`, then `activeTabs.remove(TabId.<X>)`.
+4. **Always** finish with exactly one call to `afterTabsChanged(switchToAdded = TabId.<X>)` (on add, when the new tab should auto-focus) or `afterTabsChanged(removedAt = idx)` (on remove). That single hook resizes the pill container, picks the right surviving `TabId` to focus, and re-anchors `pillHighlight.translationX` on its icon -- so the pill always ends up under the currently selected tab regardless of where the mutation happened.
+
+Mutating `activeTabs` without calling `afterTabsChanged` desyncs the pill from the icon row. The pill's `applyPillAndTints` step logs a `NAV: pill width mismatch` warning to `glasses-client.log` when this happens, which is your signal to add the missing call.
+
+## Deploy to Glasses
+
+Builds all four modules (bt-manager + capture + filesync + app), installs the
+priv-app APKs via the `/system/priv-app` overlay slot, reboots so PMS re-applies
+the privapp-permissions, and applies runtime grants. Requires the glasses
+connected over USB (the script auto-detects them by `ro.product.model`).
+
+```bash
+bash /media/varingait/Lobotomite/Repository/AI/clients/glasses/scripts/deploy-to-glasses.sh
+```
 
 ## ADB via USB Cable
 
-When the glasses are on a USB cable, direct ADB access is available (`adb
-devices` shows the glasses serial). This enables direct logcat, screencap, and
-hardware control otherwise impossible over BT. Always pass `-s <serial>`. (Serials
-have changed over time; read it from `adb devices` rather than hard-coding.)
+When glasses are connected via USB cable, direct ADB access is available (`adb devices` shows `<GLASSES_SERIAL>`). This enables direct debugging, app install, screencap, and hardware control that is otherwise impossible over BT.
 
 ### Device Info
 
-- **Model:** RG-glasses (Rokid AR Lite, OEM RV101). **Android:** 12 (API 32).
-- **SoC:** Qualcomm "neo", 4x Cortex-A55. **RAM:** 1.7 GB. **Storage:** 19 GB.
-- **Display:** 480x640 @ 240dpi, JBD4020 Micro-LED waveguide (right eye), up to 144 Hz.
-- **Camera:** 1x front, HAL v3.7, RAW + HDR.
-- **Mics:** built-in 8-channel (16 kHz, PCM16) + back mic (mono/stereo, 8k-48k).
-- **Sensors:** ICM-4x6xx IMU, proximity (UCS146E0, also wear detection), ambient
-  light. **No magnetometer.**
-- **BT:** A2DP Sink, HFP HF -- glasses are the audio receiver from the phone.
-- **WiFi:** 802.11, WiFi Aware, WiFi Direct.
+- **Model:** RG-glasses (Rokid AR Lite, OEM model RV101)
+- **Android:** 12 (API 32)
+- **SoC:** Qualcomm ("neo" board), 4x Cortex-A55
+- **RAM:** 1.7 GB
+- **Storage:** 19 GB internal
+- **Display:** 480x640 @ 240dpi, JBD JBD4020 Micro-LED waveguide (right eye), up to 144 Hz
+- **Camera:** 1x front-facing, HAL v3.7, RAW + HDR support
+- **Microphones:** Built-in 8-channel mic (16 kHz, PCM 16-bit) + back mic (mono/stereo, 8k-48k)
+- **Sensors:** ICM-4x6xx IMU (accel + gyro), proximity sensor (UCS146E0, doubles as wear detection), ambient light sensor. No magnetometer.
+- **BT:** A2DP Sink, HFP HF -- glasses act as audio receiver from phone
+- **WiFi:** 802.11, WiFi Aware, WiFi Direct supported
 
-### Logcat / Screenshot
+### ADB Deploy (USB cable)
 
 ```bash
+# Build + direct install (keeps app data)
+/media/varingait/Lobotomite/Repository/AI/clients/glasses/gradlew -p /media/varingait/Lobotomite/Repository/AI/clients/glasses assembleDebug && adb install -r /media/varingait/Lobotomite/Repository/AI/clients/glasses/app/build/outputs/apk/debug/app-debug.apk
+```
+
+### ADB Logcat (USB cable)
+
+```bash
+# Direct logcat -- works only when connected via USB
 adb logcat -s "GlassesListener:*" --pid=$(adb shell pidof com.repository.glasses.listener)
+```
+
+### Screenshot
+
+```bash
 adb shell screencap -p /sdcard/test.png && adb pull /sdcard/test.png /tmp/glasses_screenshot.png
 ```
 
-## Logging -- External File + WiFi P2P Pull
+### LED Control
 
-On USB, direct ADB logcat works. Otherwise (BT-only) glasses logcat is invisible
-from the PC and the persistent file is the only path. All logs go to
-`LogCollector.writeExternal()` -> `/sdcard/Download/glasses-client.log`. Pull it
-from the phone over WiFi P2P (the glasses HTTP server is on port 8848); the phone
-repo's `test/adb/pull_glasses_log.sh` does this, BT-independent.
+RGB + White LEDs controlled via Rokid `lights_ctrl` service (`com.rokid.light.ILightsCtrl` AIDL).
 
-- **In ListenerService:** use `btLog(msg)` / `btErr(msg)` -- both write to the
-  external file only (no BT push).
-- **In other classes** (RokidServiceBridge, CameraCapturer, ReidController...):
-  accept a `remoteLog: ((String) -> Unit)?` and call it for ALL logging; the
-  service wires it as `{ btLog(it) }`.
-- **In MainActivity:** `LogCollector.i()` for UI-only logs (stay on logcat).
+**LED IDs** (bitwise flags): RED=1, GREEN=2, BLUE=4, WHITE=8, RGB_MASK=7
 
-There is no real-time stream. The BT log relay was removed for battery reasons:
-it pinned the RFCOMM connection awake during idle (~1.6 lines/s), preventing
-bt-manager's idle-teardown timer from releasing `hal_bluetooth_lock`.
+**Service call transaction codes:**
 
-## LED Control
+| Code | Method | Args |
+|---|---|---|
+| 1 | `setBrightness` | i32 lightId, f brightness (0.0-255.0) |
+| 2 | `setFlashing` | i32 lightId, i32 onMS, i32 offMS |
+| 3 | `pulse` | i32 lightId, i32 durationMS |
+| 4 | `turnOn` | i32 lightId |
+| 5 | `turnOnAll` | none |
+| 6 | `turnOff` | i32 lightId |
+| 7 | `turnOffAll` | none |
+| 8 | `sendEvent` | i32 eventType, i32 eventId |
+| 9 | `cancelEvent` | i32 eventType, i32 eventId |
 
-RGB + White LEDs. Two access paths:
+**Event types:** NORMAL=1, WARN=2, SPECIAL=3, BLUETOOTH=4, OTHER=5
 
-1. **Rokid `lights_ctrl` service** (`com.rokid.light.ILightsCtrl` AIDL). LED IDs
-   (bitwise): RED=1, GREEN=2, BLUE=4, WHITE=8. Transaction codes: 1 setBrightness,
-   2 setFlashing, 3 pulse, 4 turnOn, 5 turnOnAll, 6 turnOff, 7 turnOffAll, 8
-   sendEvent(eventType,eventId), 9 cancelEvent. Each stock `sendEvent` lights
-   exactly ONE channel, so it CANNOT show two colors at once; raw
-   `turnOn`/`setBrightness`/`turnOnAll` are no-ops on this firmware. eventType =
-   `floor(eventId/1000)`. Known-good: GREEN `sendEvent(1,1013)`, RED
-   `sendEvent(3,3016)`, BLUE `sendEvent(4,4011)`, WHITE `sendEvent(2,2014)`.
-   ```bash
-   adb shell "service call lights_ctrl 8 i32 3 i32 3021"   # AI wake
-   adb shell dumpsys lights_ctrl
-   ```
-2. **Direct sysfs (ROOT only)** `/sys/class/leds/{red,green,blue,white}/brightness`
-   (0..255). The four are separate emitters: writing red=255 + green=255 shows
-   both dots at once (NOT a blended amber). Direct sysfs is the ONLY way to show
-   two colors simultaneously.
-
-NEVER clear `dalvik-cache` on the glasses -- it crashes the OS immediately. Just
-reboot; caches regenerate.
-
-### Battery-charge indicator
-
-While charging AND sitting still off-head, the LED shows battery level (GREEN
->=45%, RED+GREEN 15-45%, RED <15%), re-asserted every 5s via direct sysfs.
-Ownership is split: only root can write `/sys/class/leds` and only the app can
-read the IMU. The `glasses-power-daemon` owns the LED (reads `capacity` +
-charger `online`, writes red/green). The listener owns the "should it be on"
-decision (`BatteryLedControl.kt`) and signals via flag file
-`/data/local/diy-overlay/glasses-led-battery-arm` (`1`=arm). The daemon
-inotify-watches the dir. The app arms only after charging AND the IMU reports
-STILL for >=60s continuous (`BatteryLedArmer.kt` + `StillnessSensor.kt`), so worn
-glasses (always micro-moving) never reach 60s-still and the LED never shows while
-worn (privacy). Charging detection uses charger `online` (cable present), NOT
-`status` (which flaps every ~1s during trickle). `StillnessSensor` uses the
-WAKE-UP sensor variant so motion detection survives Doze.
-
-## Wear Detection
-
-There are TWO proximity sensors; only one reflects the wearer:
-- **Sensortek UCS146E0** (`Sensor.TYPE_PROXIMITY`, I2C-2 @ 0x38) is physically
-  blind to the wearer (constant `values[0]=5.0`). Do not use.
-- **PSoC 4000R capacitive** (`/sys/.../i2c-1/1-0008/`) is the real wear sensor.
-
-Signal chain: PSoC -> kernel extcon uevent (DOCK=spread, JIG=wear) at
-`/sys/.../1-0008/extcon/extcon3/state` -> RokidSysConfig.apk / PsensorObserver ->
-broadcast `com.rokid.sprite.ACTION_TAKE_STATUS_CHANGED` (extra
-`glasses_take_state` = "1"/"0") -> property `vendor.rkd.glasses.is_take_on`. The
-listener's `WearSensor` subscribes to the broadcast and reads the property once
-at start(). No polling, no sysfs reads.
-
-**Fold authority is `vendor.rkd.glasses.is_spread`** (1=unfolded, 0=folded), NOT
-the raw hall sysfs (its polarity is inverted -- hall=1 is unfolded-worn). Using
-raw hall made the power daemon spuriously broadcast folded=true every ~3min ->
-A2DP teardown + volume reset.
-
-**The enforce-latch trap:** `.../1-0008/enforce_psensor` and `enforce_hall` pin
-the extcon state high forever when =1 (PsensorObserver never fires). Stock
-firmware ships them =1, which is why `is_take_on` appears stuck at 1 on fresh
-boot. `glasses-power-daemon` writes 0 to both at startup. Also
-`persist.rkd.enablePsensor` must not be explicitly `"false"`. The WearSensor path
-ONLY works if `glasses-power-daemon` has run since boot.
+**Common events:** AI_WAKE=3021, AI_LISTEN=3012, BT_CONNECT=4011, CAMERA_OPEN=2014, PHONE_RING=3017
 
 ```bash
-adb shell cat /sys/.../i2c-1/1-0008/enforce_psensor   # want 0
-adb shell cat /sys/.../i2c-1/1-0008/extcon/extcon3/state
+# Example: trigger AI wake LED pattern
+adb shell "service call lights_ctrl 8 i32 3 i32 3021"
+
+# Cancel it
+adb shell "service call lights_ctrl 9 i32 3 i32 3021"
+
+# Check current LED state
+adb shell dumpsys lights_ctrl
+```
+
+**Programmatic access (Kotlin):** Use `LightsCtrl` static wrapper from `com.rokid.light.LightsCtrl` (framework class). Service obtained via `ServiceManager.getServiceOrThrow("lights_ctrl")`.
+
+Decompiled source reference: `Recon/rokid-docs/yodaos/DECOMPILED-APPS/system/framework/jadx/framework/sources/com/rokid/light/`
+
+#### Direct sysfs channels (RGBW)
+
+The LED is physically four independent single-color emitters on the mp2724 charger PMIC, exposed as sysfs nodes (ROOT-only writable):
+
+| Node | Range |
+|---|---|
+| `/sys/class/leds/red/brightness` | 0..255 |
+| `/sys/class/leds/green/brightness` | 0..255 |
+| `/sys/class/leds/blue/brightness` | 0..255 |
+| `/sys/class/leds/white/brightness` | 0..255 |
+
+Writing multiple channels lights them **simultaneously** -- e.g. `red=255` + `green=255` shows both a red dot and a green dot at once. They are separate emitters, NOT a blended amber. Direct sysfs writes are the **only** way to show two colors at once.
+
+#### sendEvent vs sysfs
+
+- **`lights_ctrl sendEvent(eventType, eventId)`** (txn 8; cancel via txn 9) drives the LED through firmware EventFactoryV4. Each stock event lights exactly **one** channel (its internal `mLightId` is a single-bit mask), so `sendEvent` CANNOT show two colors at once.
+- The raw `turnOn` / `setBrightness` / `turnOnAll` transactions (4 / 1 / 5) are **no-ops** on this firmware -- they return success but do nothing.
+- eventType convention: `floor(eventId / 1000)`. A mismatched type/id hits the firmware default branch and produces no light.
+
+Known-working steady `sendEvent` colors:
+
+| Color | Call(s) |
+|---|---|
+| GREEN | `sendEvent(1,1013)` or `sendEvent(3,3018)` |
+| RED | `sendEvent(3,3016)` |
+| BLUE | `sendEvent(4,4011)` |
+| WHITE | `sendEvent(2,2014)` or `sendEvent(3,3021)` |
+| BREATHING GREEN | `sendEvent(3,3017)` (PHONE_RING) |
+
+Full event -> color -> animation table: `Recon/rokid-docs/LED-EVENT-TABLE.md`. The capture app's privacy light uses the WHITE channel via `lights_ctrl turnOn(id=8)`; the battery indicator deliberately avoids blue/white to not collide.
+
+#### Battery-charge indicator
+
+While charging and sitting still (off-head), the LED shows battery level by color, re-asserted every 5s via direct sysfs writes:
+
+| Battery level | Color (channels) |
+|---|---|
+| >= 45% | GREEN |
+| 15-45% | RED + GREEN (both dots) |
+| < 15% | RED |
+
+**Ownership split.** Only root can write `/sys/class/leds`, and only the app can read the IMU, so the work is split:
+
+- The native root `glasses-power-daemon` owns the LED. It reads battery `capacity` and charger `online` from `/sys/class/power_supply/` and writes the red/green channels directly (`led_*` + `read_battery_pct` / `read_is_charging` + `led_tick` in `glasses-power-daemon/src/main.c`).
+- The listener app owns the "should it be on" decision and signals via a flag file (`BatteryLedControl.kt`).
+
+**Flag-file IPC.** `/data/local/diy-overlay/glasses-led-battery-arm`, one char: `1` = arm, `0` or absent = disarm. The daemon `inotify`-watches the directory and reacts immediately (instant off on movement).
+
+**Arming rule.** The app arms only after charging AND the IMU reports STILL for >= 60s continuously (`BatteryLedArmer.kt` + `StillnessSensor.kt`). Any movement or unplug disarms instantly. Because worn glasses always micro-move, they never reach 60s-still, so the LED never shows while worn (privacy).
+
+**Gotcha: `online`, not `status`.** Charging detection uses the charger `online` node (cable present), NOT `status`. The mp2724 `status` string flaps between "Charging" / "Not charging" every ~1s during trickle at high SoC, which would strobe the LED; `online` stays `1` the whole time the cable is in.
+
+**Gotcha: wake-up IMU sensor.** The `StillnessSensor` uses the WAKE-UP sensor variant so motion detection survives screen-off Doze. (On USB the device never truly suspends, so only Doze applies.) The non-wakeup variant stops delivering during idle and would freeze the stillness verdict.
+
+Design/plan docs: `clients/glasses/docs/plans/2026-06-06-battery-charging-led-design.md` and `...-led.md`.
+
+### Wear Detection
+
+There are **two** proximity sensors on this hardware, and only one of them reflects the wearer:
+
+| Chip | Where | What we found |
+|---|---|---|
+| Sensortek UCS146E0 (IR) | Behind SLPI / `Sensor.TYPE_PROXIMITY`, I2C-2 @ 0x38 | **Physically blind to the wearer.** Emits the same `values[0]=5.0` constantly whether on-head or off. Aimed outward, not toward the face. Do not use. |
+| PSoC 4000R (capacitive) | `/sys/devices/platform/soc/a90000.i2c/i2c-1/1-0008/` | Detects contact with the head via the temple-side psensor channel. This is the real wear sensor. |
+
+#### Signal chain (canonical)
+
+```
+PSoC capacitive psensor
+  -> kernel extcon uevent (DOCK=spread, JIG=wear) at
+     /sys/devices/platform/soc/a90000.i2c/i2c-1/1-0008/extcon/extcon3/state
+  -> RokidSysConfig.apk / PsensorObserver
+  -> broadcast com.rokid.sprite.ACTION_TAKE_STATUS_CHANGED
+       extra glasses_take_state = "1" | "0"
+  -> property vendor.rkd.glasses.is_take_on
+```
+
+`com.repository.glasses.listener`'s `WearSensor` subscribes to the broadcast and reads the property once at start() for the initial state. No polling, no sysfs reads, no sensor HAL.
+
+#### The enforce-latch trap
+
+The PSoC driver exposes two sysfs knobs that pin the extcon state high and break the whole chain:
+
+| sysfs | Effect when = 1 |
+|---|---|
+| `.../1-0008/enforce_psensor` | Latches `JIG` / `psensor` bits high forever; PsensorObserver never fires |
+| `.../1-0008/enforce_hall` | Latches `DOCK` / `hall` bits high forever |
+
+On stock firmware these ship set to `1`, which is why `vendor.rkd.glasses.is_take_on` appears stuck at `1` on a fresh boot and why `is_take_on` never transitions even when the glasses are taken off and put back on. `glasses-power-daemon` writes `0` to both at startup so the extcon pipeline actually works.
+
+Also relevant:
+- `persist.rkd.enablePsensor` must not be explicitly `"false"`. The default is true; an empty value still loads PsensorObserver. When explicitly disabled, RokidSysConfig force-writes `is_take_on=1` and `is_spread=1`.
+- Rokid plays a distinctive earcon on wear transitions (sound effect 18 on put-on, 56 on take-off) and calls `PowerManager.wakeUp("psensor")`. If you hear those chimes, PsensorObserver is alive.
+
+#### Quick on-device checks
+
+```bash
+# Is the latch off (required)?
+adb shell cat /sys/devices/platform/soc/a90000.i2c/i2c-1/1-0008/enforce_psensor   # want: 0
+adb shell cat /sys/devices/platform/soc/a90000.i2c/i2c-1/1-0008/enforce_hall      # want: 0
+
+# Live extcon state
+adb shell cat /sys/devices/platform/soc/a90000.i2c/i2c-1/1-0008/extcon/extcon3/state
+# DOCK=1 JIG=1 when worn + unfolded; JIG=0 when taken off
+
+# Rokid-derived props
 adb shell getprop vendor.rkd.glasses.is_take_on
 adb shell getprop vendor.rkd.glasses.is_spread
 ```
 
-## Input Devices + Touchpad Daemon
+#### Hardware dependency on the power daemon
 
-- **ROKID,PSOC-TP-R** (`/dev/input/event1`) -- capacitive touch on right temple,
-  Cypress PSoC 4000R MCU on I2C-1 @ 0x08. Emits **discrete keycodes only** (no
-  raw coords): `KEY_UP/DOWN/LEFT/RIGHT/ENTER/BACK` (1-finger) and
-  `KEY_F13/F14/PROG1/PROG2/PROG3/DASHBOARD` (2-finger).
-- **qpnp_pon** (`/dev/input/event0`) -- power/functional button (`KEY_VOLUMEDOWN`,
-  `KEY_MENU`). No volume buttons exist on these glasses.
+The WearSensor broadcast path only works if `glasses-power-daemon` has run since boot -- it's the thing that unlatches the enforce flags. The daemon is registered as an init `service glasses-power-daemon` (class core) inside `diy-overlay.rc`, baked into super by `root-firmware.sh`, so init launches it automatically at boot and auto-respawns it if it dies. Binary location: `/system/bin/glasses-power-daemon`.
 
-`touchpad-daemon/` builds `rokid-touchpad-daemon` (`/system/bin/`), which:
-1. `EVIOCGRAB`s `/dev/input/event1` so Android never sees raw PSoC keycodes.
-2. Parses driver `pre_position`/`p_delta` from `/dev/kmsg` for finger position.
-3. Scales scroll-step by sample time-gap (velocity proxy; `--step-slow 40
-   --step-fast 7`).
-4. Emits synthetic keycodes on uinput `rokid-touchpad-virt`: `KEY_KP0`=scroll
-   forward, `KEY_KP1`=scroll backward, `KEY_KP2`=touch released; proxies
-   `KEY_DASHBOARD/ENTER/BACK/F13/F14/PROG1-3` unchanged.
-5. Defers `KEY_PROG1` (long-press -> Rokid AI) by 400 ms; drops it if motion
-   arrives in the grace window (slow drags no longer trigger AI).
+For development iteration without reflashing super, push the new build to `/data/local/diy-overlay/system/bin/glasses-power-daemon` and `adb reboot`; the `diy-overlay-walker` bind-mounts the tier-2 copy over the baked one at `post-fs-data`.
 
-App side (`MainActivity.onKeyDown`) maps `NUMPAD_0 -> DPAD_RIGHT`, `NUMPAD_1 ->
-DPAD_LEFT`, `NUMPAD_2` -> silent consume. The listener's `when()` blocks alias
-`DPAD_RIGHT|DOWN` and `DPAD_LEFT|UP`, so one horizontal remap covers tab
-switching, subtab nav, and scrolling. Smooth scroll routes through
-`ui/ScrollDrainer.kt` (accumulate pixels, drain ~25%/frame) -- calling
-`smoothScrollBy` directly cancels its prior animation and collapses bursts.
-`MainActivity.SCROLL_THROTTLE_MS` is pinned to 0 (the daemon already paces
-events). The PSoC firmware-patch pipeline + RE facts are in
-`touchpad-daemon/CLAUDE.md`.
+`deploy.sh run` inside `glasses-power-daemon/` is still useful for quick manual iterations without rebooting: it `pkill -9`'s the live instance and launches a fresh one from `/data/local/tmp/glasses-power-daemon`. The singleton flock on `/data/local/tmp/glasses-power-daemon.lock` prevents the runtime copy from racing with the init-managed one after reboot.
 
-## DIY Firmware Overlay (persistent root / app substitution)
+### Input Devices
 
-The rooted firmware + DIY overlay live in
-`Recon/rokid-docs/yodaos-root-full/` (reference: `OVERLAY-README.md` there). TL;DR:
+- **ROKID,PSOC-TP-R** (`/dev/input/event1`) -- capacitive touch sensor (swipe/tap on right temple). Driven by a Cypress PSoC 4000R MCU on I2C-1 addr `0x08`. Emits **discrete keycodes only** (no raw coordinates): `KEY_UP/DOWN/LEFT/RIGHT/ENTER/BACK` for 1-finger gestures and `KEY_F13/F14/PROG1/PROG2/PROG3/DASHBOARD` for 2-finger gestures (`two_finger_click_en`/`two_finger_flick_en` already `1` in firmware). Raw-coordinate access, sysfs tuning knobs, and brick-risk list documented in `docs/rokid-touchpad.md`.
 
-- `root-firmware.sh` builds a patched `super_4.img` + `rawprogram_dev.xml`. It
-  injects `diy-overlay.sh` + `diy-overlay.rc` (Magisk-style bind-mount overlay
-  walking `/data/local/diy-overlay/<abs-path>` at post-fs-data), `enter-edl`
-  (arms the EDL cookie, no test-points), the patched `psoc_ts_drv_right.ko`, and
-  `rokid-touchpad-daemon`.
-- `flash.sh` -> `sudo qdl --storage emmc xbl_s_devprg_ns.melf rawprogram_dev.xml
-  patch0.xml`. After flashing, `adb shell enter-edl` drops to EDL without
-  test-points.
+### Touchpad Daemon + App-Side Scroll
 
-IMPORTANT (root/recovery guardrails):
-- NEVER flash the active A/B boot slot -- always flash untested images to the
-  inactive slot first.
-- NEVER modify / flash `vbmeta` / `vbmeta_system` with modified contents (instant
-  brick); they stay stock. The flow REQUIRES `abl_old.elf` (1.17 abl) flashed
-  alongside the rooted super_4 -- the rooted super_4 bootloops on 1.18's strict
-  abl. NEVER flash full stock 1.18 without re-running root-firmware's super4
-  rawprogram afterwards.
-- NEVER manipulate USB state programmatically (no `usbreset`, unbind/bind,
-  `udevadm`). Report and ask the user to physically unplug/replug.
-- After any reflash/reboot, poll `getprop sys.boot_completed` (with a fastboot
-  check) before doing post-flash work; STOP and report if the device didn't boot.
+`touchpad-daemon/` builds a native arm64 C binary (`rokid-touchpad-daemon`) that sits in front of the PSoC chip. Installed to `/system/bin/rokid-touchpad-daemon` via the firmware builder (see below) and auto-started at post-fs-data.
 
-**Overlay first, reflash last.** For anything that changes between dev runs
-(daemon binaries, model files, config text), push into
-`/data/local/diy-overlay/<abs-path>` and `adb reboot`. Only reflash super_4 when:
-adding a new bind-mount rule to `diy-overlay.rc`, a new stub target file that
-didn't exist in `/system/`, a new `service` entry, or changing build.prop /
-SELinux / the `root-firmware.sh` patch set.
+What the daemon does:
+
+1. `EVIOCGRAB`s `/dev/input/event1`, so Android never sees the raw PSoC keycodes.
+2. Parses the driver's `pre_position` / `p_delta` messages from `/dev/kmsg` to get approximate finger position during motion.
+3. Measures the time-gap between kmsg samples as a velocity proxy; scales the effective scroll-step accordingly (`--step-slow 40 --step-fast 7` by default).
+4. Emits synthetic keycodes on a `uinput` virtual keyboard `rokid-touchpad-virt`:
+   - `KEY_KP0` (NUMPAD_0) = scroll step forward
+   - `KEY_KP1` (NUMPAD_1) = scroll step backward
+   - `KEY_KP2` (NUMPAD_2) = touch released
+   - Proxies `KEY_DASHBOARD`, `KEY_ENTER`, `KEY_BACK`, `KEY_F13/F14`, `KEY_PROG1-3` unchanged.
+5. Defers `KEY_PROG1` (long-press -> Rokid AI assistant) by 400 ms. If any motion arrives in the grace window, the event is dropped (slow drags no longer trigger AI). Otherwise the key is proxied through as a legitimate long-press.
+
+App side (`MainActivity.onKeyDown`) maps `NUMPAD_0 -> DPAD_RIGHT`, `NUMPAD_1 -> DPAD_LEFT`, `NUMPAD_2` -> silent consume. The glasses listener's existing `when()` blocks pair `DPAD_RIGHT|DOWN` and `DPAD_LEFT|UP` as aliases, so one horizontal remap covers tab switching, subtab nav, and content scrolling.
+
+For smooth scrolling under rapid daemon-emitted key bursts, every `smoothScrollBy` call routes through `ui/ScrollDrainer.kt` -- it accumulates pixels into a per-view buffer and drains ~25% per animation frame via `scrollBy`. Calling `smoothScrollBy` directly cancels its prior animation on each call, which collapses 15 rapid keystrokes into ~2 visible items of scroll; the drainer guarantees every pixel renders.
+
+`MainActivity.SCROLL_THROTTLE_MS` is pinned to `0`: the daemon already paces events based on finger velocity, so any app-side throttle just swallows legit events during fast swipes.
+
+### DIY Firmware Overlay (persistent root / app substitution)
+
+The rooted Rokid firmware + our DIY overlay mechanism live in `Recon/rokid-docs/yodaos-root-full/`. Reference: `OVERLAY-README.md` in that directory. TL;DR:
+
+- `root-firmware.sh` -- builds a patched `super_4.img` + `rawprogram_dev.xml`. Binary-patches build.prop for root/SELinux-permissive, regenerates the AVB hashtree, and (via `debugfs`) injects into `/system/`:
+  - `/system/bin/diy-overlay.sh` + `/system/etc/init/diy-overlay.rc` -- Magisk-style bind-mount overlay that walks `/data/local/diy-overlay/<abs-path>` at post-fs-data.
+  - `/system/bin/enter-edl` -- Android-side helper that arms the Qualcomm download cookie and reboots to 9008 (no test-points needed).
+  - `/system/lib/modules/psoc_ts_drv_right.ko` -- patched touchpad driver, bind-mounted over the stock `vendor_dlkm` one via an `on init` directive.
+  - `/system/bin/rokid-touchpad-daemon` -- bundled so it auto-launches at boot.
+- `flash.sh` -- `sudo qdl --storage emmc xbl_s_devprg_ns.melf rawprogram_dev.xml patch0.xml` to flash the output.
+
+Once installed, `adb shell enter-edl` drops to EDL without hardware test-points. Never modify vbmeta / vbmeta_system -- they stay stock. The metadata partition is reflashed by `rawprogram_dev.xml` to clear any sticky `disable-verity` state.
+
+#### Development workflow: overlay first, reflash last
+
+**Default to the DIY overlay for iteration.** Reflashing is expensive (EDL + ~1 min qdl + boot + state loss risk) so do it only once per shipped config. For anything that changes between dev runs -- daemon binaries, model files, stub libraries, config text -- push into `/data/local/diy-overlay/<abs-path>` and `adb reboot`. The `.rc` file baked into super does a root-NS `mount none SRC DST bind` so the bind propagates to every process including init-launched services.
+
+**Only reflash super_4.img when:**
+1. Adding a new bind-mount rule to `diy-overlay.rc` (init parses `.rc` only at boot).
+2. Adding a new stub target file that didn't previously exist in `/system/` (DIY overlay is file-over-file, can't create new inodes).
+3. Adding a new `service <name> /system/bin/...` entry (init registers services only at boot).
+4. Changing build.prop / SELinux / other items in the `root-firmware.sh` patch set.
+
+**For a new user-space binary** the pattern is:
+1. First time: bake a last-known-good copy at `/system/bin/<binary>` via `root-firmware.sh`, add `service` entry, add `mount none /data/local/diy-overlay/system/bin/<binary> /system/bin/<binary> bind` in `diy-overlay.rc` post-fs-data. Reflash once.
+2. Every subsequent iteration: `adb push new-build /data/local/diy-overlay/system/bin/<binary> && adb reboot`. No reflash.
+
+The `rokid-touchpad-daemon` setup is the canonical example of this hybrid pattern.
+
+- **qpnp_pon** (`/dev/input/event0`) -- power/functional button. Emits `KEY_VOLUMEDOWN`, `KEY_MENU`.
+
+### Rokid System Services
+
+```bash
+adb shell service list | grep rokid   # lights_ctrl (ILightsCtrl)
+adb shell getprop | grep rkd          # Rokid-specific properties
+```
+
+### Hardware Docs Reference
+
+Detailed hardware documentation: `Recon/rokid-docs/yodaos/docs/hardware/` (audio, display, sensors)
+
+## Logging -- External File + WiFi P2P Pull
+
+When connected via USB cable, direct ADB logcat is available. Otherwise (BT-only connection), glasses logcat is invisible from the PC and the persistent file is the only path.
+
+All logs go to `LogCollector.writeExternal()` -- a persistent file on glasses at `/sdcard/Download/glasses-client.log`. To read from PC, use the WiFi P2P pull script (`AI/clients/phone/test/adb/pull_glasses_log.sh`). The BT relay was removed for battery reasons (it pinned the RFCOMM connection awake during idle by emitting ~1.6 lines/s, preventing the bt-manager idle-teardown timer from ever expiring).
+
+**In ListenerService:** Use `btLog(msg)` / `btErr(msg)`. Both write to `LogCollector.writeExternal()` only (no BT push).
+
+**In all other classes (RokidServiceBridge, CameraCapturer, ReidController, etc.):** Accept a `remoteLog: ((String) -> Unit)?` property and call it for ALL logging. The service wires it as `{ btLog(it) }` after initialization, so all subsystem logs land in the same persistent file.
+
+**In MainActivity:** Uses `LogCollector.i()` for UI-only logs (these stay on glasses logcat, invisible from PC). This is acceptable since UI logs are low-priority diagnostics.
+
+## Perfetto Tracing (GT.* slices)
+
+App-side slices that land in Perfetto traces alongside kernel sched/freq/idle events, so you can see which Kotlin code path caused which CPU spike. Uses `androidx.tracing:tracing-ktx:1.2.0` under the hood (thin wrapper over `android.os.Trace` with API-level safety). Zero cost when a trace is not being recorded.
+
+### Helper
+
+`glasses-tracing/src/main/java/com/repository/glasses/tracing/GT.kt` -- shared module consumed by the listener app and the bt-manager / capture / filesync sibling APKs (depend on it via `implementation(project(":glasses-tracing"))`). All app code should go through this object rather than calling `android.os.Trace` directly. Every slice name is automatically prefixed with `gt.` so everything filters cleanly.
+
+```kotlin
+import com.repository.glasses.tracing.GT
+
+// Scoped -- preferred. inline fun, so plain `return value` inside works.
+fun encode(pcm: ByteArray): ByteArray? = GT.section("audio.opus.encode") {
+    // body; use return@section for early exits
+}
+
+// Explicit pair (when the lifetime doesn't fit one block).
+GT.begin("svc.long_op")
+try { ... } finally { GT.end() }
+
+// Async section (work that spans threads or is not strictly nested).
+val cookie = System.identityHashCode(req)
+GT.beginAsync("cap.audio_rec", cookie)
+// ... later, possibly on another thread:
+GT.endAsync("cap.audio_rec", cookie)
+
+// Counters (time-series, appear as counter tracks in Perfetto UI).
+GT.counter("bt.tx_bytes", totalTxBytes)
+GT.counter("tts.queue.depth", queue.size)
+```
+
+### Naming convention
+
+`gt.<subsystem>.<operation>`. Keep the `gt.` prefix so callers can select all app slices with `WHERE s.name LIKE 'gt.%'` in trace_processor.
+
+Subsystems currently in use:
+
+| prefix | where |
+|---|---|
+| `gt.svc.*` | `service/ListenerService`, `GlassesListenerApp` lifecycle + capture start/stop |
+| `gt.bt.*` | `bt/MessageRelay`, `bt/BtManagerBridge`, `bt/GlassesBtClient` -- send/recv per channel, bridge IPC, session async |
+| `gt.audio.*` | `audio/OpusEncoder`, `audio/TtsPlayer`, `audio/SpeexEchoCanceller`, `audio/WebRtcAecm` -- encode, AEC, TTS playback |
+| `gt.cap.*` | `capture/AudioRecorder`, `capture/CameraCapturer`, `capture/CaptureBridge` -- recording sessions, photo, bridge IPC + callbacks |
+| `gt.ui.*` | `MainActivity` lifecycle + `onKeyDown` |
+| `gt.input.*` | `input/FunctionButtonHandler`, `mouse/DpadInputHandler` -- key handlers |
+| `gt.head.*` | `mouse/HeadTracker` -- 50 Hz gyro callback, start/stop |
+| `gt.sync.*` | `sync/SyncChannelHandler` -- per-msgType receive |
+| `gt.tts.*` | `audio/TtsPlayer` -- enqueue, decode_opus, stream_chunk, interrupt |
+
+Counters emitted: `bt.tx_bytes`, `bt.rx_bytes`, `bt.chunk_bytes`, `tts.queue.depth`, `ui.keycode`.
+
+### Capturing and viewing traces
+
+The capture + analysis pipeline lives outside this repo at `/media/varingait/Lobotomite/Repository/glasses-profiling/`. One-shot capture + HTML report:
+
+```bash
+bash /media/varingait/Lobotomite/Repository/glasses-profiling/scripts/profile_once.sh iter-name 30
+```
+
+Outputs `reports/<ts>_iter-name.html`. The **App Traces** tab shows a Gantt timeline (rows per subsystem, segments per slice), a slice rate chart, and a filterable top-slices table. `grep -n 'GT\.' app/src/main/java/...` to find existing trace points when adding new ones.
+
+Raw `.pftrace` files can also be opened at `https://ui.perfetto.dev` (drag + drop) for full Perfetto UI features.
+
+### Config gotchas (do not "simplify" these)
+
+The Perfetto config at `glasses-profiling/perfetto-configs/baseline.pbtxt` has two rules learned the hard way on this device:
+
+1. **Both process names must be in `atrace_apps:`** -- this device treats `com.repository.glasses.listener` and `com.repository.glasses.listener:backend` as distinct atrace apps. If the `:backend` entry is removed, all ListenerService slices (the majority) silently vanish from traces. Any new `:process` suffix added to the manifest needs its own `atrace_apps:` line.
+
+2. **Keep `atrace_categories:` small** -- listing ~18+ standard atrace categories silently disables userspace atrace entirely on this Android 12 build, leaving only kernel-side ftrace events. The working baseline uses 5: `am`, `view`, `gfx`, `input`, `binder_driver`. Add more only with verification via `adb shell getprop debug.atrace.tags.enableflags` during a live trace (should be non-zero).
+
+### Adding instrumentation to other APKs
+
+The bt-manager, capture, and filesync APKs are separate packages. To get GT-style slices from them, each needs its own `androidx.tracing:tracing-ktx` dependency + helper + `atrace_apps:` entry in the Perfetto config. Not wired up yet -- they only emit binder transactions today.
+
+## Debugging Glasses Client
+
+When not connected via USB cable, there is no direct ADB access. The only non-USB path is:
+
+**Pull persistent log via WiFi P2P:**
+```bash
+bash AI/clients/phone/test/adb/pull_glasses_log.sh
+```
+Downloads `/sdcard/Download/glasses-client.log` from the glasses HTTP server (port 8848) via WiFi P2P. Works independently of BT. The glasses app writes all `btLog()`/`btErr()` lines to this file.
+
+There is no real-time stream. The BT log relay was removed because it kept ~1.6 lines/s flowing during idle, which prevented bt-manager's idle-teardown timer from releasing `hal_bluetooth_lock`.
+
+## Copilot overlay e2e
+
+`CopilotCardOverlayInstrumentedTest` (`app/src/androidTest/.../ui/`) is the
+glasses-side e2e for the Copilot (formerly "assistant") fact-check card overlay.
+It mocks cards and PROGRAMMATICALLY asserts each one actually rendered on the
+waveguide using **framebuffer pixel counting**, NOT UiAutomator accessibility:
+`CopilotCardOverlay` draws into a `TYPE_APPLICATION_OVERLAY` window
+(`FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCHABLE`) that the a11y tree cannot see, so the
+test captures the screen via `UiAutomation.takeScreenshot()` and counts
+green-on-black pixels across show/stack/dismiss/show/hideAll steps (deltas vs an
+evidence-based baseline captured before any card). ~2.5-3s holds between steps
+let an external `screenrecord` capture each state.
+
+Run safely (explicit user confirmation; install ONLY the `.test` APK; app must be
+deployed via the priv-app overlay slot (`scripts/deploy-to-glasses.sh`), never
+`adb install`) and the recording
+flow (screenrecord, no SIGINT, tg-upload) are in `docs/copilot-card-overlay-e2e.md`.
+The orchestrator live-AI WS drivers that feed this end-to-end are in
+`AI/orchestrator/test/copilot-e2e/README.md`; the phone-side injection hook
+(`copilot_inject`) and the Chat Logs e2e are in the phone CLAUDE.md.
+
+## Common Commands
+
+```bash
+# Native build only
+/media/varingait/Lobotomite/Repository/AI/clients/glasses/gradlew -p /media/varingait/Lobotomite/Repository/AI/clients/glasses assembleDebug
+
+# Clean
+/media/varingait/Lobotomite/Repository/AI/clients/glasses/gradlew -p /media/varingait/Lobotomite/Repository/AI/clients/glasses clean
+```
+
+## Dependencies
+
+- `com.rokid.cxr:cxr-service-bridge` -- CXR-S SDK for glasses-side BT communication
+- `com.google.mlkit:face-detection` -- On-device face detection for ReID
+- AndroidX: core-ktx, appcompat, constraintlayout, lifecycle-service, recyclerview
+- AIDL: `IAssistServer`, `IAssistClient` for Rokid MasterAssistService binding
 
 ## Rokid Waveguide Display Rules
 
-Monochrome green micro-LED waveguide. Black (#000000) = pixels OFF =
-transparent/see-through; any non-black pixel = green light. Luminance hierarchy
-in `Lum.kt` (GLOW > BRIGHT > MID > DIM > SOFT > GHOST > TRACE > off).
+The Rokid AR Lite uses a monochrome green micro-LED waveguide. Black (#000000) = pixels OFF = transparent/see-through. Any non-black pixel = green light emitted. Luminance hierarchy is defined in `Lum.kt` (GLOW > BRIGHT > MID > DIM > SOFT > GHOST > TRACE > black/off).
 
-Required attributes for any scrollable/focusable View:
+**Required attributes for any scrollable/focusable View (RecyclerView, ScrollView, etc.):**
 ```xml
 android:focusable="false"
 android:focusableInTouchMode="false"
@@ -415,119 +566,58 @@ android:defaultFocusHighlightEnabled="false"
 android:overScrollMode="never"
 android:scrollbars="none"
 ```
-Theme must force all accent/highlight colors to black (`colorPrimary`,
-`colorPrimaryDark`, `colorAccent`, `android:colorEdgeEffect` ->
-`@android:color/black`). Every View needs explicit `android:background="#000000"`.
-Never use transparency/alpha -- the hardware handles see-through naturally when
-pixels are black. Key/scroll events go through `Activity.onKeyDown()`, so
-`focusable="false"` on RecyclerView does not break navigation.
 
-Glasses JPEGs must be physically pixel-rotated 90 CCW before JPEG encode -- never
-rely on EXIF orientation alone.
+**Theme must force all accent/highlight colors to black:**
+```xml
+<item name="colorPrimary">@android:color/black</item>
+<item name="colorPrimaryDark">@android:color/black</item>
+<item name="colorAccent">@android:color/black</item>
+<item name="android:colorEdgeEffect">@android:color/black</item>
+```
+
+**General rules:**
+- Every View must have explicit `android:background="#000000"` or `setBackgroundColor(0xFF000000.toInt())`
+- Never use transparency or alpha blending -- the hardware handles see-through naturally when pixels are black
+- Key/scroll events are handled by `Activity.onKeyDown()`, so `focusable="false"` on RecyclerView does not break navigation
 
 ## Input Handling
 
-Override `Activity.onKeyDown()`; return `true` to consume. Mapping is
-context-dependent on `FocusState`: TAB_NAV (DPAD_RIGHT/LEFT switch tabs,
-DPAD_CENTER enters focused mode); CHAT_FOCUSED (scroll); TELEPROMPTER_FOCUSED
-(toggle pause / speed); per-tab focused states; BACK is layered (cancel session >
-unfocus > hide app); double-tap DPAD_CENTER during LISTENING/RESPONDING cancels
-the session. Always verify input mappings in the existing `onKeyDown` handler
-before assuming a mapping.
+### Hardware Inputs
 
-Touchpad gesture -> keycode mapping (raw, before the daemon remaps): tap=NUMPAD_2,
-hold(500ms)=NUMPAD_3 (then NUMPAD_2 on release), scroll=NUMPAD_0/1. No sustained
-DPAD_CENTER. Hold(NUMPAD_3) opens AI chat; intercept it conditionally for new
-hold gestures.
+Two physical inputs on the Rokid AR Lite. No volume buttons exist on these glasses.
 
-Unregistering inputs: Rokid OS binding -- `RokidServiceBridge` binds
-`MasterAssistService` via AIDL, auto-reconnects on disconnect (3s) unless
-explicitly unbound (`unRegisterClient` + `unbindService`). Broadcast receivers --
-register in `onStart`/`onResume`, unregister in `onStop`/`onPause`.
+**Touch sensor** -- capacitive touchpad on right temple. Swipe gestures translate to DPAD keycodes:
+- Swipe forward: `KEYCODE_DPAD_RIGHT` (22)
+- Swipe back: `KEYCODE_DPAD_LEFT` (21)
+- Tap: `KEYCODE_DPAD_CENTER` (23) / `KEYCODE_ENTER`
 
-## Perfetto Tracing (GT.* slices)
+**Functional button** -- physical button on the glasses frame. Generates `KEYCODE_CAMERA` (27). Currently passed through to Rokid OS (not consumed by the app).
 
-`glasses-tracing/.../GT.kt` is the shared helper consumed by app, bt-manager,
-capture, filesync (`implementation(project(":glasses-tracing"))`). Use
-`GT.section("subsystem.op") { ... }` (inline), `GT.begin/end`,
-`GT.beginAsync/endAsync(name, cookie)`, `GT.counter(name, value)`. Every slice is
-prefixed `gt.`; select all app slices with `WHERE s.name LIKE 'gt.%'`.
-Subsystems: `gt.svc.*`, `gt.bt.*`, `gt.audio.*`, `gt.cap.*`, `gt.ui.*`,
-`gt.input.*`, `gt.head.*`, `gt.sync.*`, `gt.tts.*`.
+### Key Input Mapping
 
-Config gotchas (do NOT "simplify"): both process names
-(`com.repository.glasses.listener` AND `...listener:backend`) must be in the
-Perfetto `atrace_apps:` list -- dropping `:backend` silently vanishes all
-ListenerService slices. Keep `atrace_categories:` SMALL (working baseline: `am`,
-`view`, `gfx`, `input`, `binder_driver`); ~18+ categories silently disable
-userspace atrace entirely on this Android 12 build.
+Override `Activity.onKeyDown()`. Return `true` to consume the event. The mapping is context-dependent based on `FocusState`:
+
+- **TAB_NAV:** DPAD_RIGHT/LEFT = switch tabs, DPAD_CENTER = enter focused mode for current tab
+- **CHAT_FOCUSED:** DPAD_RIGHT = scroll down, DPAD_LEFT = scroll up
+- **TELEPROMPTER_FOCUSED:** DPAD_CENTER = toggle pause, DPAD_RIGHT = speed up, DPAD_LEFT = speed down
+- **REID_FOCUSED / TODO_FOCUSED / NIGHTVISION_FOCUSED / TRANSLATE_FOCUSED / LIST_FOCUSED / MAP_FOCUSED:** Tab-specific navigation
+- **BACK:** Cancel active session > unfocus > hide app (layered)
+- **Double-tap DPAD_CENTER** during LISTENING/RESPONDING: cancel session
+
+### Interrupting / Unregistering Inputs
+
+1. **Key events** -- handled at Activity level, active only while Activity is in foreground. To conditionally ignore: use `focusState` guards. To stop consuming: return `false` or `super.onKeyDown()`.
+
+2. **Rokid OS service binding** -- `RokidServiceBridge` binds to `MasterAssistService` via AIDL. To disconnect: call `unRegisterClient(packageName)` then `unbindService(connection)`. Auto-reconnects on disconnect (3s delay) unless explicitly unbound. Ref: `RokidServiceBridge.kt`, `docs/rokid-service-binding.md`
+
+3. **CXR-S message subscriptions** -- `GlassesBtClient` wraps `CXRServiceBridge` and subscribes to BT channels (response, command, command_response, device_command, tts_audio). No explicit unsubscribe API in CXR-S SDK; subscriptions live for bridge instance lifetime. To stop processing: set a flag in the callback or destroy the bridge.
+
+4. **Broadcast receivers** -- service-to-UI communication. Register in `onStart()`/`onResume()`, unregister in `onStop()`/`onPause()`. Always pair registration with unregistration to prevent leaks.
 
 ## Idle Power Floor
 
-`AGMIPC@1.0-service`, `audio.service_64`, `audioserver` keep ~36 s CPU per 15 min
-idle even after correct `AudioRecord.stop()`+`release()`. Cause: Qualcomm AGM
-keeps the audio graph's clock domain powered for fast restart; no public API
-forces HAL power-collapse and the vendor PAL `Pal_StreamClose` is internal-only.
-This is an irreducible floor on this device. Do NOT add reflection workarounds
-(they fail silently). App-side wear-gating / demand-mic
-(`ListenerService.reconcileMicStream`) is the actionable lever.
+### Audio HAL idle floor (~36 s CPU per 15 min idle)
 
-## Audio / BT gotchas
+`AGMIPC@1.0-service`, `audio.service_64`, and `audioserver` keep ~36 s of CPU per 15 min of idle wall-time even after `ListenerService.stopMicStream()` calls `AudioRecord.stop()` + `release()` correctly. Cause: Qualcomm AGM (Audio Graph Manager) keeps the audio graph's clock domain powered for fast input-stream restart. There is no public Android API to force HAL power-collapse; the vendor PAL `Pal_StreamClose` is internal-only and not reachable from the app.
 
-- WiFi P2P requires Location Services. Android 10+ P2P fails with reason=0 when
-  Location is off -- check first.
-- The companion phone advertises over BT as **"iPhone 14 Pro"** (it is the POCO
-  M7 Pro). It IS the companion phone -- never reject it.
-- NEVER disable BT on the glasses (`svc bluetooth disable` / adapter cycling) --
-  it kills pairing, connections, and audio profiles.
-- AI responses are always English; only user prompts are Russian.
-- Audio ducking: local STREAM_MUSIC duck (50%) + `AudioTrack.setVolume(2.0)`
-  compensation; AVRCP syncs phone volume to glasses (cross-device ducking
-  disabled). The BT APK is platform-signed and can't be patched.
-
-## Dependencies
-
-- `com.google.mlkit:face-detection` -- on-device ReID face detection.
-- AndroidX: core-ktx, appcompat, constraintlayout, lifecycle-service, recyclerview.
-- AIDL: `IBtManager`, `ICapture`, `IAssistServer`/`IAssistClient` (Rokid
-  MasterAssistService).
-
-## Firmware / rooting / flashing (firmware/)
-
-The rooting + flashing tooling lives in `firmware/` in this repo. The large OS images
-are NOT committed; they are fetched on demand into a gitignored cache.
-
-- `firmware/fetch-os.sh` -- downloads + extracts a stock OTA build into
-  `firmware/os-cache/<version>/` (symlinked as `os-cache/current`). Run this first.
-- `firmware/root-firmware.sh` -- builds the rooted `super_4.img` from the cached stock
-  images (reads `STOCK_DIR=firmware/os-cache/current`); `--post-flash` deploys the
-  Tier-2 priv-app APKs.
-- `firmware/scripts/` -- stock flash helpers + `firmware/scripts/CLAUDE.md`, which has
-  per-script descriptions, the **non-interactive enter-edl + QDL** flashing procedure,
-  and all the firmware hard rules (never flash modified vbmeta, never flash the active
-  A/B slot, the 1.17 vs 1.18 abl bootloop rule, never touch USB state, always poll
-  `sys.boot_completed` after a reflash, Tier-2 overlay vs reflash). READ THAT before
-  touching a device.
-
-### Where to get OS builds
-- Aliyun OTA (pinned in fetch-os.sh, version 1.18.100-20260426-150101):
-  `https://rokid-glass-ota.oss-cn-hangzhou.aliyuncs.com/dailybuild/glass15/<version>/RVE01-<version>.zip`
-- Community firmware index / mirror (use to find other OS versions):
-  `https://rokid.andersmadsen.dk/firmware`
-
-### Disabled Rokid system apps (persist via pm hide)
-`assistserver`, `launcher`, `live`, `com.rokid.glass.ota`, `screenstream` are hidden so
-we have full control with no artificial limits. KEEP enabled: `com.rokid.cxrservice`
-(CXR-S bridge -- required for the phone<->glasses BT relay) and `com.rokid.sysconfig`.
-
-### Wake-word model
-The `wake-word-training/` folder in this repo trains the "sireneviy" wake word and
-produces the ONNX models the app ships. The on-device SVA/SoundTrigger path is blocked
-by a baked-in custom HAL -- see wake-word-training and the firmware notes if revisiting.
-
-### Never (firmware/device)
-- Never `rm -rf /data/dalvik-cache/*` or `/data/system/package_cache/*` on the glasses
-  (crashes the OS immediately; just reboot -- caches regenerate).
-- Never sideload the listener priv-app with plain `adb install` -- it won't get
-  `BLUETOOTH_PRIVILEGED` (setScanMode throws SecurityException). Deploy via
-  `scripts/deploy-to-glasses.sh` (Tier-2 priv-app overlay + reboot).
+Implication: this is an irreducible idle-CPU floor on this device until Rokid / Qualcomm exposes a HAL-suspend hook. Don't add reflection workarounds -- they fail silently and create false hope. App-side work (wear-gating, demand-mic in `ListenerService.reconcileMicStream`) already minimizes when the mic is even started, which is the actionable lever.

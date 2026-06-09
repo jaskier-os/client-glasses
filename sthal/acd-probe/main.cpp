@@ -16,7 +16,7 @@
 // Deploy: adb push build/acd-probe /data/local/tmp/ && adb shell chmod
 //   +x /data/local/tmp/acd-probe && adb shell /data/local/tmp/acd-probe
 //
-// Acoustic activity-detection (ACD) probe utility for the wake-word pipeline.
+// Task 3 of /home/varingait/.claude/plans/you-are-an-orchestrator-temporal-lightning.md
 // (Option 3 / Gate 4 — DSP-side VAD via PAL ACD).
 
 #include "pal/PalDefs.h"

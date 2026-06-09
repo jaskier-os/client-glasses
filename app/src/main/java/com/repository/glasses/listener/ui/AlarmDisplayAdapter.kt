@@ -4,14 +4,16 @@ import android.animation.ValueAnimator
 import android.content.res.Resources
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
+import com.repository.glasses.listener.R
 
 class AlarmDisplayAdapter : RecyclerView.Adapter<AlarmDisplayAdapter.AlarmViewHolder>(), SelectableAdapter {
 
@@ -33,34 +35,85 @@ class AlarmDisplayAdapter : RecyclerView.Adapter<AlarmDisplayAdapter.AlarmViewHo
 
     class AlarmViewHolder(
         val container: LinearLayout,
+        val iconView: ImageView,
         val timeView: TextView,
-        val titleView: TextView,
-        val statusView: TextView
+        val labelView: TextView,
+        val repeatView: TextView,
+        val indicatorView: View,
+        val indicatorDrawable: GradientDrawable
     ) : RecyclerView.ViewHolder(container) {
         var borderAnimator: ValueAnimator? = null
         var currentDrawable: GradientDrawable? = null
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): AlarmViewHolder {
+        // Leading alarm icon ~16dp, tinted by on/off.
+        val iconView = ImageView(parent.context).apply {
+            setImageResource(R.drawable.ic_alarm)
+            setBackgroundColor(Lum.VOID)
+        }
+
+        // Time: primary body size, on?BRIGHT:DIM.
         val timeView = TextView(parent.context).apply {
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Typeface.DEFAULT
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            setTextColor(Lum.BRIGHT)
             setBackgroundColor(Lum.VOID)
         }
 
-        val titleView = TextView(parent.context).apply {
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(Lum.MID)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
+        // Label: DIM, primary body size.
+        val labelView = TextView(parent.context).apply {
+            typeface = Typeface.DEFAULT
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            setTextColor(Lum.DIM)
             setBackgroundColor(Lum.VOID)
         }
 
-        val statusView = TextView(parent.context).apply {
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        // Baseline row: time + label.
+        val baselineRow = LinearLayout(parent.context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM
             setBackgroundColor(Lum.VOID)
+            addView(timeView, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginEnd = 8.dpToPx()
+            })
+            addView(labelView, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
+        }
+
+        // Repeat line: GHOST, meta size, uppercase, letterSpacing 0.16em.
+        val repeatView = TextView(parent.context).apply {
+            typeface = Typeface.DEFAULT
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 6f)
+            setTextColor(Lum.GHOST)
+            letterSpacing = 0.16f
+            setBackgroundColor(Lum.VOID)
+        }
+
+        val middleColumn = LinearLayout(parent.context).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Lum.VOID)
+            addView(baselineRow, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
+            addView(repeatView, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
+        }
+
+        // Trailing 11dp on/off indicator (ring vs filled dot with inset look).
+        val indicatorDrawable = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+        }
+        val indicatorView = View(parent.context).apply {
+            background = indicatorDrawable
         }
 
         val container = LinearLayout(parent.context).apply {
@@ -70,44 +123,59 @@ class AlarmDisplayAdapter : RecyclerView.Adapter<AlarmDisplayAdapter.AlarmViewHo
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                bottomMargin = 4.dpToPx()
+                bottomMargin = 6.dpToPx()
             }
-            setPadding(8.dpToPx(), 6.dpToPx(), 8.dpToPx(), 6.dpToPx())
+            setPadding(6.dpToPx(), 4.dpToPx(), 6.dpToPx(), 4.dpToPx())
             setBackgroundColor(Lum.VOID)
-            addView(timeView, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            addView(iconView, LinearLayout.LayoutParams(
+                16.dpToPx(),
+                16.dpToPx()
             ).apply {
-                marginEnd = 8.dpToPx()
+                marginEnd = 10.dpToPx()
             })
-            addView(titleView, LinearLayout.LayoutParams(
+            addView(middleColumn, LinearLayout.LayoutParams(
                 0,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             ).apply {
-                marginEnd = 8.dpToPx()
+                marginEnd = 10.dpToPx()
             })
-            addView(statusView, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            addView(indicatorView, LinearLayout.LayoutParams(
+                11.dpToPx(),
+                11.dpToPx()
             ))
         }
 
-        return AlarmViewHolder(container, timeView, titleView, statusView)
+        return AlarmViewHolder(
+            container, iconView, timeView, labelView, repeatView, indicatorView, indicatorDrawable
+        )
     }
 
     override fun onBindViewHolder(holder: AlarmViewHolder, position: Int) {
         val item = items[position]
+        val on = item.enabled
 
-        val timeStr = String.format("%02d:%02d", item.hour, item.minute)
-        holder.timeView.text = timeStr
-        holder.timeView.setTextColor(if (item.enabled) Lum.GLOW else Lum.GHOST)
+        holder.iconView.setColorFilter(if (on) Lum.GLOW else Lum.GHOST)
 
-        holder.titleView.text = item.title.ifEmpty { "Alarm" }
-        holder.titleView.setTextColor(Lum.MID)
+        holder.timeView.text = String.format("%02d:%02d", item.hour, item.minute)
+        holder.timeView.setTextColor(if (on) Lum.BRIGHT else Lum.DIM)
 
-        holder.statusView.text = if (item.enabled) "ON" else "OFF"
-        holder.statusView.setTextColor(if (item.enabled) Lum.GLOW else Lum.GHOST)
+        holder.labelView.text = item.title.ifEmpty { "Alarm" }
+
+        // No repeat schedule in the data model; hide the line rather than invent one.
+        holder.repeatView.visibility = View.GONE
+
+        // On/off indicator: filled GLOW with 2dp black inset ring when ON; hollow GHOST ring when OFF.
+        holder.indicatorDrawable.apply {
+            if (on) {
+                setColor(Lum.GLOW)
+                setStroke(2.dpToPx(), Lum.VOID)
+            } else {
+                setColor(Lum.VOID)
+                setStroke(1.dpToPx(), Lum.GHOST)
+            }
+        }
+        holder.indicatorView.invalidate()
 
         holder.borderAnimator?.cancel()
 
@@ -128,7 +196,7 @@ class AlarmDisplayAdapter : RecyclerView.Adapter<AlarmDisplayAdapter.AlarmViewHo
     ) {
         val drawable = GradientDrawable().apply {
             setColor(Lum.VOID)
-            cornerRadius = 8f.dpToPx()
+            cornerRadius = 6f.dpToPx()
             setStroke(0, Lum.GHOST)
         }
         container.background = drawable

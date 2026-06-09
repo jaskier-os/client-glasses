@@ -51,7 +51,7 @@ import java.io.FileOutputStream
  * steps so every rendered state persists on screen long enough for an external
  * screen recording to capture it.
  *
- * SAFE on-device run procedure: see ASSISTANT_OVERLAY_TEST.md next to this file.
+ * SAFE on-device run procedure: see docs/copilot-card-overlay-e2e.md.
  */
 @RunWith(AndroidJUnit4::class)
 class CopilotCardOverlayInstrumentedTest {

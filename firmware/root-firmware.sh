@@ -101,7 +101,7 @@ BTMANAGER_PRIVPERM_XML="${BTMANAGER_PRIVPERM_XML:-$GLASSES_CLIENT/bt-manager/pri
 # this overlay; bash root-firmware.sh --post-flash applies it.
 LISTENER_APK="${LISTENER_APK:-$GLASSES_CLIENT/app/build/outputs/apk/debug/app-debug.apk}"
 FILESYNC_APK="${FILESYNC_APK:-$GLASSES_CLIENT/filesync/build/outputs/apk/debug/filesync-debug.apk}"
-ADB_SERIAL="${ADB_SERIAL:-1901092544026001}"
+ADB_SERIAL="${ADB_SERIAL:-}"
 
 SYS_PREFIX=""   # "/system" or "" depending on super's internal layout
 

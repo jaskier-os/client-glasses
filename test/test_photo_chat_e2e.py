@@ -10,13 +10,14 @@ Flow:
 6. Re-enter chat focus and scroll up to verify USER message thumbnail
 
 Requires:
-- Glasses connected via USB (serial 1901092534009177)
-- Phone connected via USB (serial 65TKQWDIEIL7W8LF)
+- Glasses connected via USB (set GLASSES_SERIAL or connect one device)
+- Phone connected via USB (set PHONE_SERIAL or connect one device)
 - Orchestrator running
 - BT connection between phone and glasses
 - At least one DCIM photo on glasses
 """
 import json
+import os
 import subprocess
 import time
 
@@ -27,7 +28,23 @@ from conftest import (
     KEY_CENTER, KEY_LEFT, KEY_RIGHT, KEY_BACK, StepReporter,
 )
 
-PHONE_SERIAL = "65TKQWDIEIL7W8LF"
+def _first_adb_device():
+    try:
+        out = subprocess.run(
+            ["adb", "devices"], capture_output=True, text=True, check=False
+        ).stdout
+    except Exception:
+        return ""
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            return parts[0]
+    return ""
+
+
+# Phone ADB serial. Override with PHONE_SERIAL env var; otherwise fall back to
+# the first attached adb device.
+PHONE_SERIAL = os.environ.get("PHONE_SERIAL") or _first_adb_device()
 PHONE_APP_ID = "com.repository.listener"
 ADB_ACTION = "com.repository.listener.ADB_COMMAND"
 CHAT_TIMEOUT = 120

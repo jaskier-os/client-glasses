@@ -21,7 +21,7 @@
 
 Device serials: glasses `<GLASSES_SERIAL>`, phone `<PHONE_SERIAL>`.
 
-WiFi ADB helper (USB drops when testing): `bash <workspace>/AI/scripts/enable-glasses-wifi-adb.sh '5G-Vaccination-SlimyBirb' 'SlimyBirb'`.
+WiFi ADB helper (USB drops when testing): `bash /media/varingait/Lobotomite/Repository/AI/scripts/enable-glasses-wifi-adb.sh '5G-Vaccination-SlimyBirb' 'SlimyBirb'`.
 
 ---
 

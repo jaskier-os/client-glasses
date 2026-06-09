@@ -473,30 +473,65 @@ class BtManagerService : Service() {
     }
 
     private val callbackLock = Any()
+    // Reentrancy state, guarded by callbackLock. A broadcast dispatches each callback
+    // via a binder call into the listener app; the app may synchronously call back
+    // (e.g. writeRfcommSocket during onRfcommData), and on a write failure that path
+    // re-enters broadcastCallbacks to emit onRfcommError. Binder reuses the SAME
+    // thread for that nested call, so `synchronized` re-enters instead of blocking and
+    // we would call RemoteCallbackList.beginBroadcast() while one is already open --
+    // which throws "beginBroadcast() called while already in a broadcast" and drops
+    // the write. We instead defer nested broadcasts onto a queue drained by the
+    // outer call, preserving delivery + ordering with no nested beginBroadcast().
+    private var broadcasting = false
+    private val deferredBroadcasts = ArrayDeque<(IBtManagerCallback) -> Unit>()
 
     private fun broadcastCallbacks(action: (IBtManagerCallback) -> Unit) {
-        // RemoteCallbackList.beginBroadcast() is not thread-safe; serialize calls so
-        // multiple RfcommManager worker threads don't call it concurrently.
         val tStart = SystemClock.elapsedRealtime()
         val tLock: Long
         synchronized(callbackLock) {
             tLock = SystemClock.elapsedRealtime() - tStart
-            val n = callbacks.beginBroadcast()
-            var failures = 0
+            if (broadcasting) {
+                // Reentrant call on the same (binder-reused) thread, inside an open
+                // broadcast. Queue it; the outer call drains it after its dispatch.
+                deferredBroadcasts.addLast(action)
+                Log.v(TAG_CALLBACKS, "event=broadcast.deferred depth=${deferredBroadcasts.size}")
+                return
+            }
+            broadcasting = true
             try {
-                for (i in 0 until n) {
-                    try {
-                        action(callbacks.getBroadcastItem(i))
-                    } catch (e: Exception) {
-                        failures++
-                        Log.w(TAG_CALLBACKS, "event=broadcast.item.fail i=$i err=${e.message}")
-                    }
+                dispatchBroadcast(action, tStart, tLock)
+                // Drain any broadcasts queued reentrantly during dispatch, in order.
+                while (deferredBroadcasts.isNotEmpty()) {
+                    dispatchBroadcast(deferredBroadcasts.removeFirst(), SystemClock.elapsedRealtime(), 0L)
                 }
             } finally {
-                callbacks.finishBroadcast()
+                broadcasting = false
             }
-            val dt = SystemClock.elapsedRealtime() - tStart
-            Log.v(TAG_CALLBACKS, "event=broadcast.done count=$n failures=$failures lock_ms=$tLock total_ms=$dt")
         }
+    }
+
+    /** Single begin/finishBroadcast cycle. Must be called with callbackLock held and
+     *  `broadcasting == true` so it can never nest. */
+    private fun dispatchBroadcast(
+        action: (IBtManagerCallback) -> Unit,
+        tStart: Long,
+        tLock: Long,
+    ) {
+        val n = callbacks.beginBroadcast()
+        var failures = 0
+        try {
+            for (i in 0 until n) {
+                try {
+                    action(callbacks.getBroadcastItem(i))
+                } catch (e: Exception) {
+                    failures++
+                    Log.w(TAG_CALLBACKS, "event=broadcast.item.fail i=$i err=${e.message}")
+                }
+            }
+        } finally {
+            callbacks.finishBroadcast()
+        }
+        val dt = SystemClock.elapsedRealtime() - tStart
+        Log.v(TAG_CALLBACKS, "event=broadcast.done count=$n failures=$failures lock_ms=$tLock total_ms=$dt")
     }
 }

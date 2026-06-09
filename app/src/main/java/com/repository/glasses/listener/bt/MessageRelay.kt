@@ -29,20 +29,35 @@ import java.nio.ByteBuffer
  * Frame length = channel header + all args. Unlimited message size (bounded only by RFCOMM MTU
  * fragmentation, handled transparently by the kernel).
  */
-class MessageRelay(private val bridge: BtManagerBridge, private val context: Context) {
+class MessageRelay(
+    private val bridge: BtManagerBridge,
+    private val context: Context,
+    private val uuid: String = MESSAGE_UUID,
+    private val serviceName: String = SERVICE_NAME,
+) {
 
     companion object {
         private const val TAG = "App:BtRelay"
         /** UUID for the glasses <-> phone message channel (RFCOMM SPP). */
         const val MESSAGE_UUID = "b2c3d4e5-f6a7-8901-bcde-f12345678901"
         const val SERVICE_NAME = "GlassesMessages"
+        /** Dedicated RFCOMM SPP channel for the binary map base-frame stream. */
+        const val MAP_UUID = "c3d4e5f6-a7b8-9012-cdef-234567890abc"
+        const val MAP_SERVICE_NAME = "GlassesMap"
         private const val MAX_FRAME_BYTES = 8 * 1024 * 1024  // 8MB sanity cap
     }
+
+    /**
+     * Channels whose single arg is raw binary (e.g. WEBP image bytes) and must be
+     * delivered without any UTF-8 decode, via [Listener.onBinaryMessage].
+     */
+    private val binaryChannels = setOf(BtProtocol.CH_MAP_BITMAP_BIN)
 
     interface Listener {
         fun onConnected()
         fun onDisconnected()
         fun onMessage(channel: String, args: List<String>)
+        fun onBinaryMessage(channel: String, payload: ByteArray) {}
     }
 
     var listener: Listener? = null
@@ -246,7 +261,7 @@ class MessageRelay(private val bridge: BtManagerBridge, private val context: Con
             socketId = null
             isConnected = false
         }
-        val sid = bridge.listenRfcommInbound(SERVICE_NAME, MESSAGE_UUID)
+        val sid = bridge.listenRfcommInbound(serviceName, uuid)
         if (sid != null) {
             socketId = sid
             remoteLog?.invoke("MessageRelay: listening (socketId=$sid${if (old != null) ", was=$old" else ""})")
@@ -359,6 +374,21 @@ class MessageRelay(private val bridge: BtManagerBridge, private val context: Con
         val chanLen = buf[p].toInt() and 0xFF; p++
         require(p + chanLen <= end) { "channel bytes overflow" }
         val channel = String(buf, p, chanLen, Charsets.UTF_8); p += chanLen
+
+        if (channel in binaryChannels) {
+            // Binary fast-path: single arg = raw bytes, no UTF-8 decode. Used for the
+            // map base frame (WEBP image) so it renders without base64 overhead.
+            val argCount = buf[p].toInt() and 0xFF; p++
+            require(argCount == 1) { "binary channel $channel expects argCount=1, got $argCount" }
+            require(p + 4 <= end) { "binary arg length overflow" }
+            val argLen = ByteBuffer.wrap(buf, p, 4).int; p += 4
+            require(argLen >= 0 && p + argLen <= end) { "binary arg bytes overflow: len=$argLen" }
+            val payload = buf.copyOfRange(p, p + argLen)
+            GT.section("bt.dispatch.$channel") {
+                listener?.onBinaryMessage(channel, payload)
+            }
+            return
+        }
 
         val argCount = buf[p].toInt() and 0xFF; p++
         val args = ArrayList<String>(argCount)

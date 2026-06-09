@@ -54,6 +54,8 @@ import com.repository.glasses.listener.ui.ChatListAdapter
 import com.repository.glasses.listener.ui.ChatMessage
 import com.repository.glasses.listener.ui.ChatSummaryItem
 import com.repository.glasses.listener.ui.Lum
+import com.repository.glasses.listener.ui.TabHighlightView
+import com.repository.glasses.listener.ui.VerticalHighlightView
 import com.repository.glasses.listener.ui.MessageItemAnimator
 import com.repository.glasses.listener.ui.TabLoaderController
 import com.repository.glasses.listener.ui.TeleprompterController
@@ -97,10 +99,10 @@ class MainActivity : AppCompatActivity() {
         private const val SCROLL_THROTTLE_MS = 0L
         private const val TAB_ICON_SCALE_SELECTED = 1.3f
         private const val TAB_ICON_SCALE_DEFAULT = 1.0f
-        const val TAB_SLOT_DP = 38
+        const val TAB_SLOT_DP = 29
         const val TAB_ICON_DP = 13
-        const val TAB_BAR_COMPACT_DP = 22
-        const val TAB_BAR_EXPANDED_DP = 36
+        const val TAB_BAR_COMPACT_DP = 30
+        const val TAB_BAR_EXPANDED_DP = 50
         // The "expanded" layout keeps the tab pill pinned to the top of the
         // tab bar and moves status widgets to the bottom so they never
         // overlap. Keep it enabled unconditionally so the pill position is
@@ -478,6 +480,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var mapBaseFadeView: ImageView
     private lateinit var mapArrowView: ImageView
     private var lastBaseBitmap: Bitmap? = null
+    // Rate-limit for the steady-state map decode log (see processLatestMapFrame).
+    private var lastMapDebugMs: Long = 0L
 
     // Off-UI-thread minimap frame processing. Heavy work (Base64 decode, JPEG/WEBP
     // decode, per-pixel monochrome-green pass) runs on this single worker so it can
@@ -486,7 +490,7 @@ class MainActivity : AppCompatActivity() {
     // can't build a backlog that lags the map behind reality.
     private var mapWorkerThread: android.os.HandlerThread? = null
     private var mapWorkerHandler: android.os.Handler? = null
-    private val pendingMapFrame = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    private val pendingMapFrame = java.util.concurrent.atomic.AtomicReference<ByteArray?>(null)
 
     private data class ArrowSample(val t: Long, val x: Float, val y: Float, val heading: Float)
     private val arrowSamples = ArrayDeque<ArrowSample>()
@@ -616,23 +620,33 @@ class MainActivity : AppCompatActivity() {
     private lateinit var todoJobAdapter: JobDisplayAdapter
     private lateinit var todoSavedAdapter: TelegramSavedAdapter
     private var todoChecklistRecycler: RecyclerView? = null
+    // Overlay "cursor" dot for the TASKS list -- jumps vertically to the selected row's dot,
+    // squeezing horizontally while it travels (vertical analog of the tab pill highlight).
+    private var todoChecklistCursor: VerticalHighlightView? = null
+    private var todoChecklistCursorSpring: androidx.dynamicanimation.animation.SpringAnimation? = null
     private var todoAlarmRecycler: RecyclerView? = null
     private var todoJobRecycler: RecyclerView? = null
     private var todoSavedRecycler: RecyclerView? = null
+    // Saved sub-tab uses the paginated telegram_messages path against the "Saved Messages"
+    // chat (chatId="me"). These flags mirror the chat-browser pagination model.
+    private val SAVED_CHAT_ID = "me"
+    private val SAVED_PAGE_SIZE = 20
+    private var savedRequestInFlight = false        // a page (first or older) is being awaited
+    private var savedLoadingOlder = false           // the in-flight page is an older page (append)
+    private var savedNoMoreOlder = false            // last older page returned < SAVED_PAGE_SIZE
     private enum class TodoSubTab(val label: String, val iconRes: Int, val requestAction: String) {
         TASKS("Tasks", R.drawable.ic_checklist, ListenerService.ACTION_REQUEST_TODO_LIST),
-        SAVED("Saved", R.drawable.ic_bookmark, ListenerService.ACTION_REQUEST_TELEGRAM_SAVED),
+        SAVED("Saved", R.drawable.ic_bookmark, ListenerService.ACTION_REQUEST_TG_MESSAGES),
         JOBS("Jobs", R.drawable.ic_schedule, ListenerService.ACTION_REQUEST_JOB_LIST),
         ALARMS("Alarms", R.drawable.ic_alarm, ListenerService.ACTION_REQUEST_ALARM_LIST);
     }
     private var todoSubTab: TodoSubTab = TodoSubTab.TASKS
     private val todoSubTabLabels = arrayOfNulls<ImageView>(TodoSubTab.entries.size)
     private var todoSubTabPill: LinearLayout? = null
-    private var todoSubTabCapsule: View? = null
-    private var todoSubTabPillDrawable: GradientDrawable? = null
-    private var todoSubTabCapsuleDrawable: GradientDrawable? = null
-    private var todoSubTabPillBorderAnimator: ValueAnimator? = null
-    private var todoSubTabCapsuleBorderAnimator: ValueAnimator? = null
+    private var todoSubTabCapsule: TabHighlightView? = null
+    // Tracks the last-applied sub-tab-circle visibility so we only fire the
+    // fade-in/out (and the snap-to-rest on appear) on an actual transition.
+    private var subtabCapsuleShown: Boolean = false
     private var todoEmptyText: TextView? = null
     private var todoHasError: Boolean = false
     private var todoMessageOverlay: FrameLayout? = null
@@ -1381,11 +1395,11 @@ class MainActivity : AppCompatActivity() {
 
     private val mapBitmapReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val base64 = intent.getStringExtra(ListenerService.EXTRA_MAP_BITMAP) ?: return
+            val bytes = intent.getByteArrayExtra(ListenerService.EXTRA_MAP_BITMAP_BYTES) ?: return
             // Frame-drop coalescing: keep only the newest frame. If a task is already
             // queued/running it will pick up whatever is latest when it reaches the
             // swap, so older frames are discarded rather than queued.
-            pendingMapFrame.set(base64)
+            pendingMapFrame.set(bytes)
             mapWorkerHandler?.post { processLatestMapFrame() }
         }
     }
@@ -1394,21 +1408,20 @@ class MainActivity : AppCompatActivity() {
     // ones), does all heavy decode + monochrome work here, then hops to the UI
     // thread only for view mutations + the crossfade animation.
     private fun processLatestMapFrame() = GT.section("ui.map.process") {
-        val base64 = pendingMapFrame.getAndSet(null) ?: return@section
+        val bytes = pendingMapFrame.getAndSet(null) ?: return@section
         try {
-            val bytes = Base64.decode(base64, Base64.NO_WRAP)
             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: run {
                 dbg("mapBitmap: decode failed, ${bytes.size} bytes")
                 return@section
             }
-            val bw = bitmap.width
-            val bh = bitmap.height
-            // Sample pixels from raw bitmap to detect black frames
-            val cx = bw / 2; val cy = bh / 2
-            val rawSamples = "center=${Integer.toHexString(bitmap.getPixel(cx, cy))}" +
-                " tl=${Integer.toHexString(bitmap.getPixel(bw / 4, bh / 4))}" +
-                " br=${Integer.toHexString(bitmap.getPixel(bw * 3 / 4, bh * 3 / 4))}"
-            dbg("mapBitmap: ${bw}x${bh} ${bytes.size}B $rawSamples")
+            // Steady-state is silent: at 10-15 FPS a per-frame log (plus the 3 getPixel
+            // readbacks it used to do) would flood the persistent glasses log and stall
+            // the decode. Emit a lightweight size line at most once per second; no getPixel.
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastMapDebugMs >= 1000L) {
+                lastMapDebugMs = now
+                dbg("mapBitmap: ${bitmap.width}x${bitmap.height} ${bytes.size}B")
+            }
             val green = BitmapUtils.toMonochromeGreen(bitmap)
             bitmap.recycle()
             // Build the minimap copy off-thread too; only setImageBitmap touches the UI.
@@ -1440,79 +1453,39 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setMapBaseBitmap(bmp: Bitmap) {
-        val processed = applyMapPostProcess(bmp)
-        bmp.recycle()
-        mapBaseFadeView.setImageBitmap(processed)
+        // The map bitmap is shown flat and north-up; both the perspective keystone
+        // and the screen-aligned edge-fade vignette are applied frame-fixed at draw
+        // time by KeystoneFrame so they DON'T rotate with the map (which previously
+        // baked the fade into the bitmap, making it spin with the heading -- the
+        // "fog of war" look). So no per-bitmap processing remains here.
+        // Direct swap, no crossfade: at 10-15 FPS a 250ms fade would perpetually thrash
+        // and never settle. Cancel any in-flight fade and drop the fade view so only the
+        // persistent content view drives the map. Rotation on mapContentView is owned by
+        // applyArrow and is untouched here.
+        mapBaseFadeView.animate().cancel()
         mapBaseFadeView.alpha = 0f
-        mapBaseFadeView.animate().alpha(1f).setDuration(250L).withEndAction {
-            mapContentView.setImageBitmap(processed)
-            mapBaseFadeView.alpha = 0f
-            lastBaseBitmap?.recycle()
-            lastBaseBitmap = processed
-        }.start()
+        // Defer the previous bitmap's recycle by one frame: the render thread may still
+        // be drawing it while we swap in the new one at 15 FPS, so an immediate
+        // synchronous recycle here can trip "trying to use a recycled bitmap". post()
+        // runs after the current frame's draw, so the old bitmap is safe to free then.
+        val prev = lastBaseBitmap
+        mapContentView.setImageBitmap(bmp)
+        lastBaseBitmap = bmp
+        if (prev != null) {
+            mapContentView.post {
+                if (!prev.isRecycled) prev.recycle()
+            }
+        }
     }
 
-    private fun applyMapPostProcess(src: Bitmap): Bitmap {
-        val w = src.width
-        val h = src.height
-
-        // Step 1: copy src and apply 4-edge gradient fade in source space so the
-        // fade follows the trapezoid edges after the perspective warp below.
-        val faded = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val fc = android.graphics.Canvas(faded)
-        fc.drawBitmap(src, 0f, 0f, null)
-        val band = (kotlin.math.min(w, h) * 0.18f).toInt().coerceAtLeast(1)
-        val fadePaint = android.graphics.Paint().apply {
-            xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_OUT)
-        }
-        fadePaint.shader = android.graphics.LinearGradient(
-            0f, 0f, 0f, band.toFloat(),
-            android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
-            android.graphics.Shader.TileMode.CLAMP
-        )
-        fc.drawRect(0f, 0f, w.toFloat(), band.toFloat(), fadePaint)
-        fadePaint.shader = android.graphics.LinearGradient(
-            0f, h.toFloat(), 0f, (h - band).toFloat(),
-            android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
-            android.graphics.Shader.TileMode.CLAMP
-        )
-        fc.drawRect(0f, (h - band).toFloat(), w.toFloat(), h.toFloat(), fadePaint)
-        fadePaint.shader = android.graphics.LinearGradient(
-            0f, 0f, band.toFloat(), 0f,
-            android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
-            android.graphics.Shader.TileMode.CLAMP
-        )
-        fc.drawRect(0f, 0f, band.toFloat(), h.toFloat(), fadePaint)
-        fadePaint.shader = android.graphics.LinearGradient(
-            w.toFloat(), 0f, (w - band).toFloat(), 0f,
-            android.graphics.Color.WHITE, android.graphics.Color.TRANSPARENT,
-            android.graphics.Shader.TileMode.CLAMP
-        )
-        fc.drawRect((w - band).toFloat(), 0f, w.toFloat(), h.toFloat(), fadePaint)
-
-        // Step 2: trapezoid perspective warp -- top corners pulled inward.
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val oc = android.graphics.Canvas(out)
-        val inset = w * 0.18f
-        val srcPts = floatArrayOf(
-            0f, 0f,
-            w.toFloat(), 0f,
-            w.toFloat(), h.toFloat(),
-            0f, h.toFloat()
-        )
-        val dstPts = floatArrayOf(
-            inset, 0f,
-            w - inset, 0f,
-            w.toFloat(), h.toFloat(),
-            0f, h.toFloat()
-        )
-        val matrix = android.graphics.Matrix()
-        matrix.setPolyToPoly(srcPts, 0, dstPts, 0, 4)
-        val drawPaint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
-        oc.drawBitmap(faded, matrix, drawPaint)
-        faded.recycle()
-
-        return out
+    // Clear the minimap overlay and free the bitmap it was holding. minimapView is fed
+    // independent green.copy() bitmaps (see processLatestMapFrame), so the view owns its
+    // bitmap and it is safe to recycle once on every minimap-off / map-tab-replace path.
+    // Exactly-once: setImageBitmap(null) drops the drawable so a second call finds none.
+    private fun recycleMinimapBitmap() {
+        val old = (minimapView.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap
+        minimapView.setImageBitmap(null)
+        if (old != null && !old.isRecycled) old.recycle()
     }
 
     private fun onArrowSample(x: Float, y: Float, h: Float) {
@@ -1571,9 +1544,13 @@ class MainActivity : AppCompatActivity() {
         val w = mapContentView.width
         val h = mapContentView.height
         if (w <= 0 || h <= 0) return
-        mapArrowView.translationX = x * w - mapArrowView.width / 2f
-        mapArrowView.translationY = y * h - mapArrowView.height / 2f
-        mapArrowView.rotation = headingDeg
+        // Heading-up minimap: the arrow stays pinned dead-center pointing up
+        // (it is centered via layout_gravity, so no translation), and the flat
+        // map rotates underneath it by -heading. The interpolated x/y are unused
+        // for placement -- only the smoothed heading drives the map rotation.
+        mapArrowView.rotation = 0f
+        mapContentView.rotation = -headingDeg
+        mapBaseFadeView.rotation = -headingDeg
     }
 
     private fun catmullRom(p0: Double, p1: Double, p2: Double, p3: Double, t: Double): Double {
@@ -1610,6 +1587,9 @@ class MainActivity : AppCompatActivity() {
         arrowFrameCallback = null
         arrowSamples.clear()
         mapArrowView.visibility = View.GONE
+        // Reset heading-up rotation so a stale angle doesn't persist on re-show.
+        mapContentView.rotation = 0f
+        mapBaseFadeView.rotation = 0f
     }
 
     private val toolThumbnailReceiver = object : BroadcastReceiver() {
@@ -1664,7 +1644,7 @@ class MainActivity : AppCompatActivity() {
                     minimapActive = false
                     hideMapTab()
                     Anim.fadeOut(minimapView, 150L) {
-                        minimapView.setImageBitmap(null)
+                        recycleMinimapBitmap()
                     }
                 }
             }
@@ -1764,13 +1744,6 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             val json = intent.getStringExtra(ListenerService.EXTRA_TODO_JSON) ?: return
             runOnUiThread { parseTodoListAndDisplay(json) }
-        }
-    }
-
-    private val telegramSavedReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            val json = intent.getStringExtra(ListenerService.EXTRA_TELEGRAM_JSON) ?: return
-            runOnUiThread { parseTelegramSavedAndDisplay(json) }
         }
     }
 
@@ -2524,7 +2497,9 @@ class MainActivity : AppCompatActivity() {
 
         // Hide minimap overlay (map tab replaces it entirely)
         if (minimapView.visibility == View.VISIBLE) {
-            Anim.fadeOut(minimapView, 150L)
+            Anim.fadeOut(minimapView, 150L) {
+                recycleMinimapBitmap()
+            }
         }
         // Post focus visual refresh after pill has been laid out at new size
         pillContainer.post {
@@ -3148,6 +3123,16 @@ class MainActivity : AppCompatActivity() {
         val isUnderground = step.optBoolean("isUnderground", false)
         val builder = android.text.SpannableStringBuilder()
         val S = android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        // Turn-by-turn driving/walking instructions carry their guidance in "text"
+        // (e.g. "Continue straight", "Take exit right") and have no transit line
+        // fields. The transit branches below build from lineName/board/alight and
+        // would leave such a row as a bare bullet, so render the text directly.
+        val instructionText = step.optString("text", "").trim()
+        if (instructionText.isNotEmpty() && !step.has("lineName") && !step.has("lineShortName")) {
+            builder.append("\u226B ").append(instructionText)
+            row.text = builder
+            return
+        }
         if (type == "WALK") {
             val dist = step.optString("distanceFormatted", "").trim()
             val dur = step.optString("durationFormatted", "").trim()
@@ -3911,7 +3896,6 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(reidPersonResponseReceiver, IntentFilter(ListenerService.ACTION_REID_PERSON_RESPONSE))
             registerReceiver(reidBestThumbReceiver, IntentFilter(ListenerService.ACTION_REID_BEST_THUMB))
             registerReceiver(todoListReceiver, IntentFilter(ListenerService.ACTION_TODO_LIST_LOADED))
-            registerReceiver(telegramSavedReceiver, IntentFilter(ListenerService.ACTION_TELEGRAM_SAVED_LOADED))
             registerReceiver(alarmListReceiver, IntentFilter(ListenerService.ACTION_ALARM_LIST_LOADED))
             registerReceiver(jobListReceiver, IntentFilter(ListenerService.ACTION_JOB_LIST_LOADED))
             // Notification overlay now managed by ListenerService via WindowManager
@@ -4169,12 +4153,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---- TODO sub-tab capsule drag -----------------------------------------
-    // Same pattern as the bottom tab pill but the moving view is the TODO
-    // sub-tab capsule and the slot count is TodoSubTab.entries.size. The
-    // capsule's leftMargin stays anchored to the active sub-tab's slot;
-    // we drive translationX via a SpringAnimation. On release the visual
-    // position is folded back into leftMargin and updateTodoSubTabLabels
-    // animates the rest (with skipIconAnims so hover state isn't blinked).
+    // Same model as the bottom tab pill, applied to the TODO sub-tab capsule
+    // (slot count = TodoSubTab.entries.size). The capsule's leftMargin is
+    // ALWAYS 0 and its width is exactly one slot; position is driven purely
+    // by translationX via a SpringAnimation. On release we snap translationX
+    // to nearestIdx * slotW with a bouncy spring -- leftMargin/width are never
+    // touched, so the capsule never jumps.
 
     private fun onTodoSubAbsTouch(down: Boolean) {
         val capsule = todoSubTabCapsule ?: return
@@ -4215,30 +4199,25 @@ class MainActivity : AppCompatActivity() {
                 todoAbsSpring?.cancel(); todoAbsSpring = null
                 return
             }
-            // Compute nearest slot from the live (spring-driven) center.
-            val lp = capsule.layoutParams as android.widget.FrameLayout.LayoutParams
-            val visualLeft = lp.leftMargin + capsule.translationX
-            val visualCenter = visualLeft + capsule.width / 2f
+            // Compute nearest slot from the live (spring-driven) translationX.
+            // leftMargin is always 0, so the capsule's center is purely
+            // translationX + width/2 -- same model as the bottom pill.
             val slotW = pillW / tabCount
-            val nearestIdx = (visualCenter / slotW).toInt().coerceIn(0, tabCount - 1)
-            uiLog("NAV: TODO-SUB-ABS release; visualX=$visualLeft -> sub $nearestIdx")
+            val curX = capsule.translationX
+            val nearestIdx = ((curX + slotW / 2f) / slotW).toInt().coerceIn(0, tabCount - 1)
+            uiLog("NAV: TODO-SUB-ABS release; snap capsuleX=$curX -> sub $nearestIdx")
+            // Cancel the live drag spring so the bouncy snap spring isn't
+            // fighting it.
             todoAbsSpring?.cancel(); todoAbsSpring = null
-            // Snap layoutParams to the final slot so the capsule's
-            // resting position is correct, then offset translationX so
-            // it visually starts at the user's release position. A bouncy
-            // spring then animates translationX -> 0, overshooting a
-            // touch before settling. Same pattern as the bottom pill.
-            val finalLeft = (nearestIdx * slotW).toInt()
-            val finalWidth = slotW.toInt()
-            lp.leftMargin = finalLeft
-            lp.width = finalWidth
-            capsule.layoutParams = lp
-            capsule.translationX = visualLeft - finalLeft
+            // Bouncy snap: spring translationX to the slot's rest position.
+            // leftMargin/width are NEVER touched -- only translationX moves,
+            // exactly like the bottom pill, so the capsule never jumps.
+            val finalX = nearestIdx * slotW
             (capsule.getTag(R.id.spring_translate_x) as? androidx.dynamicanimation.animation.SpringAnimation)?.cancel()
             androidx.dynamicanimation.animation.SpringAnimation(
-                capsule, androidx.dynamicanimation.animation.DynamicAnimation.TRANSLATION_X, 0f
+                capsule, androidx.dynamicanimation.animation.DynamicAnimation.TRANSLATION_X, finalX
             ).apply {
-                spring = androidx.dynamicanimation.animation.SpringForce(0f)
+                spring = androidx.dynamicanimation.animation.SpringForce(finalX)
                     .setStiffness(androidx.dynamicanimation.animation.SpringForce.STIFFNESS_MEDIUM)
                     .setDampingRatio(androidx.dynamicanimation.animation.SpringForce.DAMPING_RATIO_LOW_BOUNCY)
                 capsule.setTag(R.id.spring_translate_x, this)
@@ -4272,11 +4251,10 @@ class MainActivity : AppCompatActivity() {
         val pillW = pill.width.toFloat()
         if (pillW <= 0f) return
         val deltaPx = delta * (pillW / 100f)
-        // Clamp so the capsule's visual left stays within the pill.
-        val lp = capsule.layoutParams as android.widget.FrameLayout.LayoutParams
-        val maxTx = (pillW - capsule.width - lp.leftMargin).coerceAtLeast(0f)
-        val minTx = (-lp.leftMargin).toFloat()
-        val newTarget = (todoAbsAnchorTx + deltaPx).coerceIn(minTx, maxTx)
+        // leftMargin is always 0; translationX alone positions the capsule.
+        // Clamp so the capsule stays within the pill: [0, pillW - capsuleW].
+        val maxTx = (pillW - capsule.width).coerceAtLeast(0f)
+        val newTarget = (todoAbsAnchorTx + deltaPx).coerceIn(0f, maxTx)
         if (newTarget == todoAbsTargetTx) return
         todoAbsTargetTx = newTarget
         todoAbsSpring?.animateToFinalPosition(newTarget)
@@ -4298,8 +4276,8 @@ class MainActivity : AppCompatActivity() {
             val tabCount = TodoSubTab.entries.size
             val pillW = pill.width.toFloat()
             if (tabCount > 0 && pillW > 0f) {
-                val lp = capsule.layoutParams as android.widget.FrameLayout.LayoutParams
-                val visualCenter = lp.leftMargin + capsule.translationX + capsule.width / 2f
+                // leftMargin is always 0; center is translationX + width/2.
+                val visualCenter = capsule.translationX + capsule.width / 2f
                 val slotW = pillW / tabCount
                 val rawIdx = (visualCenter / slotW).toInt().coerceIn(0, tabCount - 1)
                 val cur = todoAbsHoverIdx
@@ -4314,11 +4292,11 @@ class MainActivity : AppCompatActivity() {
                     animateTodoSubHover(cur, newHover)
                 }
             }
-            // Self-terminate once the bouncy snap spring has settled to
-            // 0 (capsule resting at its slot's leftMargin) AND the user
-            // is no longer touching the pad.
+            // Self-terminate once the bouncy snap spring has settled (the
+            // capsule now rests at nearestIdx * slotW via translationX, NOT
+            // at 0) AND the user is no longer touching the pad.
             val spring = capsule.getTag(R.id.spring_translate_x) as? androidx.dynamicanimation.animation.SpringAnimation
-            val settled = spring?.isRunning != true && kotlin.math.abs(capsule.translationX) < 0.5f
+            val settled = spring?.isRunning != true
             if (!todoAbsActive && settled) return
             android.view.Choreographer.getInstance().postFrameCallback(this)
         }
@@ -4484,7 +4462,7 @@ class MainActivity : AppCompatActivity() {
         if (prevView != null) {
             val pillContainer = findViewById<View>(R.id.pillContainer)
             if (prevView === pillContainer) {
-                prevView.setBackgroundResource(R.drawable.pill_tab_bg)
+                prevView.setBackgroundColor(Lum.VOID)
             } else if (prevView === reidStartStopContainer || prevView === translationStartStopContainer) {
                 prevView.setBackgroundColor(Lum.VOID)
             } else {
@@ -4508,26 +4486,14 @@ class MainActivity : AppCompatActivity() {
         val thickStroke = (2f * density + 0.5f).toInt()
 
         if (state == FocusState.TAB_NAV) {
-            // Pill focus: animate stroke width from thin to thick
-            val bg = GradientDrawable().apply {
-                setColor(Lum.VOID)
-                cornerRadius = 16f * density
-                setStroke(thinStroke, Lum.GLOW)
-            }
-            pillContainer.background = bg
-            previousFocusedView = pillContainer
-            focusedDrawable = bg
-            focusBorderAnimator = ValueAnimator.ofInt(thinStroke, thickStroke).apply {
-                duration = 150L
-                interpolator = android.view.animation.DecelerateInterpolator()
-                addUpdateListener {
-                    bg.setStroke(it.animatedValue as Int, Lum.GLOW)
-                }
-                start()
-            }
+            // No outline -- the moving circular highlight is the only focus cue.
+            // Transparent (not VOID/opaque-black) so the pill never occludes the
+            // weather/clock status row it overlaps; on the waveguide both read as
+            // pixels-off, but transparent lets the sibling green show through.
+            pillContainer.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         } else {
-            // Reset pill to default thin stroke
-            pillContainer.setBackgroundResource(R.drawable.pill_tab_bg)
+            // No pill outline in any state.
+            pillContainer.setBackgroundColor(android.graphics.Color.TRANSPARENT)
 
             // MAP_FOCUSED: focus the active button by mapFocusedIndex
             // (0=steps, 1=stop, 2=zoom-slider, 3=pin)
@@ -5902,27 +5868,23 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Lum.VOID)
         }
 
-        // Sub-tab pill container (FrameLayout to allow capsule overlay behind labels)
-        val pillWidthDp = TodoSubTab.entries.size * 38
+        // Sub-tab container (FrameLayout to allow capsule overlay behind labels).
+        // No outline -- the moving circular highlight is the only selection cue,
+        // matching the bottom tab bar. clipChildren=false lets a fast move
+        // stretch the blob past its slot into a streak.
+        val pillWidthDp = TodoSubTab.entries.size * 27
         val pillWrapper = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 pillWidthDp.dpToPx(),
-                18.dpToPx()
+                22.dpToPx()
             ).apply {
-                topMargin = 3.dpToPx()
-                bottomMargin = 3.dpToPx()
+                topMargin = 2.dpToPx()
+                bottomMargin = 2.dpToPx()
                 gravity = android.view.Gravity.CENTER_HORIZONTAL
             }
+            clipChildren = false
             setBackgroundColor(Lum.VOID)
         }
-
-        // Pill background drawable
-        val pillBg = GradientDrawable().apply {
-            setColor(android.graphics.Color.TRANSPARENT)
-            cornerRadius = 13f * density
-            setStroke((0.4f * density + 0.5f).toInt(), Lum.GLOW)
-        }
-        todoSubTabPillDrawable = pillBg
 
         val pill = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -5930,25 +5892,25 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            background = pillBg
+            // Transparent: the icon row sits ON TOP of the highlight circle, so
+            // an opaque background would hide the moving blob behind it.
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            clipChildren = false
             setPadding(0, 0, 0, 0)
         }
         todoSubTabPill = pill
 
-        // Sliding highlight capsule (solid GHOST fill, matching bottom pill highlight)
-        val capsuleBg = GradientDrawable().apply {
-            setColor(Lum.GHOST)
-            cornerRadius = 10f * density
-        }
-        todoSubTabCapsuleDrawable = capsuleBg
-
-        val capsuleInsetPx = (3 * density + 0.5f).toInt()
-        val capsule = View(this).apply {
+        // Moving circular selection highlight (flattens with speed). Hidden
+        // until the sub-tab row becomes the active nav target -- it is the
+        // counterpart to the bottom bar's circle, never lit at the same time.
+        val capsule = TabHighlightView(this).apply {
             layoutParams = FrameLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT)
-            background = android.graphics.drawable.InsetDrawable(capsuleBg, 0, capsuleInsetPx, 0, capsuleInsetPx)
-            // capsule always visible
+            setBackgroundColor(Lum.VOID)
+            visibility = View.INVISIBLE
         }
         todoSubTabCapsule = capsule
+        // leftMargin is ALWAYS 0; position is driven purely by translationX,
+        // exactly like the bottom tab pill (pillHighlight).
 
         for (i in TodoSubTab.entries.indices) {
             val slot = FrameLayout(this).apply {
@@ -5959,7 +5921,10 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = FrameLayout.LayoutParams(13.dpToPx(), 13.dpToPx()).apply {
                     gravity = android.view.Gravity.CENTER
                 }
-                setColorFilter(if (i == todoSubTab.ordinal) Lum.GLOW else Lum.GHOST, android.graphics.PorterDuff.Mode.SRC_IN)
+                // Initial/idle tint: uniform GHOST for every icon. The selected icon only
+                // brightens to GLOW once the sub-tab row is the active nav target
+                // (updateTodoSubTabLabels handles that). No phantom selection at rest.
+                setColorFilter(Lum.GHOST, android.graphics.PorterDuff.Mode.SRC_IN)
                 setBackgroundColor(android.graphics.Color.TRANSPARENT)
             }
             todoSubTabLabels[i] = icon
@@ -5971,14 +5936,17 @@ class MainActivity : AppCompatActivity() {
         pillWrapper.addView(capsule)
         pillWrapper.addView(pill)
 
-        // Position capsule after layout (width matches slot, full height - InsetDrawable handles visual inset)
+        // Position capsule after layout: width = one slot, leftMargin = 0,
+        // position via translationX = ordinal * slotW (mirrors pillHighlight).
         pillWrapper.post {
-            val icon = todoSubTabLabels[todoSubTab.ordinal] ?: return@post
-            val slot = icon.parent as View
+            val tabCount = TodoSubTab.entries.size
+            val slotW = pill.width.toFloat() / tabCount
+            if (slotW <= 0f) return@post
             (capsule.layoutParams as FrameLayout.LayoutParams).apply {
-                width = slot.width
-                leftMargin = slot.left
+                width = slotW.toInt()
+                leftMargin = 0
             }
+            capsule.translationX = todoSubTab.ordinal * slotW
             capsule.requestLayout()
         }
 
@@ -6009,7 +5977,18 @@ class MainActivity : AppCompatActivity() {
         todoChecklistAdapter = TodoChecklistAdapter()
         checklistRecycler.layoutManager = LinearLayoutManager(this)
         checklistRecycler.adapter = todoChecklistAdapter
-        checklistRecycler.itemAnimator = null
+        // Animate move/remove so a completed task slides to the end (drag-drop style,
+        // other rows shifting to react) and the list collapses smoothly on removal.
+        // Change + add animations are disabled: the strike rebind and the new-data
+        // reload must NOT cross-fade (would flicker on the waveguide). Only move and
+        // remove are animated, which is exactly the completion choreography.
+        checklistRecycler.itemAnimator = androidx.recyclerview.widget.DefaultItemAnimator().apply {
+            supportsChangeAnimations = false
+            moveDuration = 320L
+            removeDuration = 220L
+            addDuration = 0L
+            changeDuration = 0L
+        }
         todoChecklistRecycler = checklistRecycler
         contentArea.addView(checklistRecycler)
 
@@ -6095,6 +6074,34 @@ class MainActivity : AppCompatActivity() {
         }
         todoEmptyText = emptyText
         contentArea.addView(emptyText)
+
+        // Overlay cursor for the TASKS list -- a single bright circle that springs vertically
+        // to the selected row's dot with a bouncy/fluid snap, squeezing horizontally while it
+        // travels (vertical analog of the bottom tab pill). Added last so it draws on top. No
+        // solid background: it self-draws only the oval, so it never paints a black box over text.
+        // The view is WIDE/TALL enough to give the squeeze room without clipping; the resting
+        // blob is rest-scaled down to a small dot inside it.
+        // +30% over the previous 8dp dot column width -> larger resting circle (8 * 1.3 ~ 10).
+        val cursorWidthPx = 10.dpToPx()   // resting dot diameter ~ min(w,h)*restScale
+        val cursorHeightPx = 32.dpToPx()  // vertical headroom for the elongation streak
+        val cursorBlob = VerticalHighlightView(this).apply {
+            visibility = View.INVISIBLE
+            // Dot column center X = row paddingLeft(6dp) + dotWidth/2(2dp) = 8dp from recycler left.
+            translationX = 8.dpToPx().toFloat() - cursorWidthPx / 2f
+        }
+        contentArea.addView(cursorBlob, FrameLayout.LayoutParams(cursorWidthPx, cursorHeightPx))
+        todoChecklistCursor = cursorBlob
+
+        // Keep the cursor glued to the selected row's dot while the list scrolls.
+        checklistRecycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                updateTodoChecklistCursor(animate = false)
+            }
+        })
+        // Reposition on any selection change (covers code paths that don't call it explicitly).
+        todoChecklistAdapter.onSelectionChanged = {
+            checklistRecycler.post { updateTodoChecklistCursor(animate = true) }
+        }
 
         root.addView(contentArea)
 
@@ -6190,8 +6197,110 @@ class MainActivity : AppCompatActivity() {
         TodoSubTab.ALARMS -> todoAlarmRecycler
     }
 
+    /**
+     * Reposition the TASKS overlay cursor so it sits on the selected row's dot.
+     * Only visible for the TASKS sub-tab while content is focused (level 1).
+     */
+    private fun updateTodoChecklistCursor(animate: Boolean) {
+        val cursor = todoChecklistCursor ?: return
+        val recycler = todoChecklistRecycler ?: run {
+            cursor.visibility = View.INVISIBLE
+            return
+        }
+        val sel = todoChecklistAdapter.selectedPosition
+        val show = todoSubTab == TodoSubTab.TASKS &&
+            focusState == FocusState.TODO_FOCUSED &&
+            todoFocusLevel == 1 &&
+            sel >= 0
+        if (!show) {
+            cursor.visibility = View.INVISIBLE
+            return
+        }
+
+        val vh = recycler.findViewHolderForAdapterPosition(sel)
+        if (vh == null) {
+            // Row not laid out yet (off-screen). The scroll listener will reposition once
+            // the layout pass settles it.
+            cursor.visibility = View.INVISIBLE
+            return
+        }
+
+        val cursorHeight = cursor.height.toFloat().takeIf { it > 0f } ?: 28.dpToPx().toFloat()
+        // Row is gravity CENTER_VERTICAL with a vertically-centered dot, so the row's
+        // vertical center == the dot center. The oval is centered in the (tall) cursor
+        // view, so center the view on the dot.
+        val dotCenterY = vh.itemView.top + vh.itemView.height / 2f
+        val targetY = dotCenterY - cursorHeight / 2f
+
+        val wasVisible = cursor.visibility == View.VISIBLE
+        cursor.visibility = View.VISIBLE
+        if (animate && wasVisible) {
+            // Bouncy/fluid snap matching the bottom tab pill's drag-release spring:
+            // MEDIUM stiffness + LOW_BOUNCY damping. The view squeezes horizontally as it
+            // travels (driven by its own translationY sampling) and relaxes on settle.
+            todoChecklistCursorSpring?.cancel()
+            todoChecklistCursorSpring = androidx.dynamicanimation.animation.SpringAnimation(
+                cursor,
+                androidx.dynamicanimation.animation.DynamicAnimation.TRANSLATION_Y,
+                targetY
+            ).apply {
+                spring = androidx.dynamicanimation.animation.SpringForce(targetY).apply {
+                    stiffness = androidx.dynamicanimation.animation.SpringForce.STIFFNESS_MEDIUM
+                    dampingRatio = androidx.dynamicanimation.animation.SpringForce.DAMPING_RATIO_LOW_BOUNCY
+                }
+                start()
+            }
+        } else {
+            // First appear (or scroll-follow): teleport without registering false speed.
+            todoChecklistCursorSpring?.cancel()
+            cursor.translationY = targetY
+            cursor.snapToRest()
+        }
+    }
+
     private fun requestTodoData() {
+        if (todoSubTab == TodoSubTab.SAVED) {
+            requestSavedFirstPage()
+            return
+        }
         sendBroadcast(Intent(todoSubTab.requestAction).apply { setPackage(packageName) })
+    }
+
+    /**
+     * Saved sub-tab first-page load via the paginated telegram_messages path: chatId="me",
+     * limit=20, offsetId=0. Resets pagination state and shows the loader spinner.
+     */
+    private fun requestSavedFirstPage() {
+        savedLoadingOlder = false
+        savedNoMoreOlder = false
+        savedRequestInFlight = true
+        loaderCtl.show(TabId.TODO)
+        sendBroadcast(Intent(ListenerService.ACTION_REQUEST_TG_MESSAGES).apply {
+            setPackage(packageName)
+            putExtra(ListenerService.EXTRA_TG_CHAT_ID, SAVED_CHAT_ID)
+            putExtra(ListenerService.EXTRA_TG_LIMIT, SAVED_PAGE_SIZE)
+            putExtra(ListenerService.EXTRA_TG_OFFSET_ID, 0)
+        })
+    }
+
+    /**
+     * Saved sub-tab next-page load (older messages). offsetId = oldest loaded id; Telegram
+     * returns messages with id < offsetId. Guards against duplicate in-flight requests and
+     * end-of-list. Shows the spinner while the older page is awaited.
+     */
+    private fun requestSavedOlderPage() {
+        if (savedRequestInFlight || savedNoMoreOlder) return
+        val oldestId = todoSavedAdapter.getOldestMessageId()
+        if (oldestId <= 0) return
+        savedLoadingOlder = true
+        savedRequestInFlight = true
+        loaderCtl.show(TabId.TODO)
+        sendBroadcast(Intent(ListenerService.ACTION_REQUEST_TG_MESSAGES).apply {
+            setPackage(packageName)
+            putExtra(ListenerService.EXTRA_TG_CHAT_ID, SAVED_CHAT_ID)
+            putExtra(ListenerService.EXTRA_TG_LIMIT, SAVED_PAGE_SIZE)
+            putExtra(ListenerService.EXTRA_TG_OFFSET_ID, oldestId)
+        })
     }
 
     private fun startTodoPollIfNeeded() {
@@ -6205,14 +6314,82 @@ class MainActivity : AppCompatActivity() {
         mainHandler.removeCallbacks(todoPollRunnable)
     }
 
-    private fun updateTodoSubTabLabels(skipIconAnims: Boolean = false, skipCapsuleAnim: Boolean = false) {
-        val focused = todoFocusLevel == 0 && focusState == FocusState.TODO_FOCUSED
+    // --- Tab-highlight circle fade in/out (cross-fades the active cursor
+    //     between the bottom bar and the TODO sub-tab row) ---
+    private fun fadeInHighlight(view: View) {
+        view.animate().cancel()
+        if (view.visibility != View.VISIBLE) view.alpha = 0f
+        view.visibility = View.VISIBLE
+        view.animate().alpha(1f).setDuration(150L)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .start()
+    }
 
-        // Active icon: GLOW, inactive: GHOST. Animate unless caller already
-        // left the icons in their target visual state (drag-release path).
+    private fun fadeOutHighlight(view: View) {
+        view.animate().cancel()
+        view.animate().alpha(0f).setDuration(150L)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .withEndAction { view.visibility = View.INVISIBLE }
+            .start()
+    }
+
+    // Place the sub-tab capsule directly under the active sub-tab -- width is
+    // one slot, leftMargin is 0, and position is driven by translationX, exactly
+    // like the bottom pill. The clean rest position used the moment before it
+    // fades in.
+    private fun seatSubtabCapsule(cap: View) {
+        val pill = todoSubTabPill ?: return
+        val tabCount = TodoSubTab.entries.size
+        val slotW = pill.width.toFloat() / tabCount
+        if (slotW <= 0f) return
+        (cap.layoutParams as FrameLayout.LayoutParams).apply {
+            width = slotW.toInt()
+            leftMargin = 0
+        }
+        cap.translationX = todoSubTab.ordinal * slotW
+        cap.requestLayout()
+    }
+
+    private fun updateTodoSubTabLabels(skipIconAnims: Boolean = false, skipCapsuleAnim: Boolean = false) {
+        // "Sub-tabs selected" == the sub-tab row is the active nav target.
+        val subtabsActive = todoFocusLevel == 0 && focusState == FocusState.TODO_FOCUSED
+
+        // The sub-tab highlight circle is the focus cursor for this row, so it
+        // appears exactly when the main bottom-bar circle is hidden, and vice
+        // versa -- only one circle is ever the active cursor. Both cross-fade
+        // on the transition instead of hard-cutting.
+        if (subtabsActive != subtabCapsuleShown) {
+            subtabCapsuleShown = subtabsActive
+            if (subtabsActive) {
+                // Main bar circle out, sub-tab circle in.
+                fadeOutHighlight(pillHighlight)
+                todoSubTabCapsule?.let { cap ->
+                    // Re-seat the capsule under the active sub-tab BEFORE it
+                    // becomes visible, and clear motion state, so its first
+                    // visible frames don't read the re-appear jump as speed.
+                    seatSubtabCapsule(cap)
+                    cap.snapToRest()
+                    fadeInHighlight(cap)
+                }
+            } else {
+                // Sub-tab circle out, main bar circle back in.
+                todoSubTabCapsule?.let { fadeOutHighlight(it) }
+                fadeInHighlight(pillHighlight)
+            }
+        }
+
+        // Tones:
+        //  - Row IS the active nav target: selected icon GLOWs, the rest sit at GHOST.
+        //  - Row is NOT the target (deselected to TAB_NAV, or drilled into content):
+        //    ALL icons return to the uniform default GHOST -- no phantom per-tab
+        //    highlight, and nothing drops to the near-invisible TRACE.
         if (!skipIconAnims) {
             for (i in todoSubTabLabels.indices) {
-                val targetColor = if (i == todoSubTab.ordinal) Lum.GLOW else Lum.GHOST
+                val targetColor = if (subtabsActive) {
+                    if (i == todoSubTab.ordinal) Lum.GLOW else Lum.GHOST
+                } else {
+                    Lum.GHOST
+                }
                 todoSubTabLabels[i]?.let { icon ->
                     ValueAnimator.ofArgb(icon.imageTintList?.defaultColor ?: Lum.GHOST, targetColor).apply {
                         duration = 200L
@@ -6224,53 +6401,19 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        val density = resources.displayMetrics.density
-
-        // Animate pill border: thin when unfocused, thick when focused
-        val thinStroke = (0.4f * density + 0.5f).toInt()
-        val thickStroke = (1.5f * density + 0.5f).toInt()
-        todoSubTabPillBorderAnimator?.cancel()
-        todoSubTabPillDrawable?.let { drawable ->
-            val targetStroke = if (focused) thickStroke else thinStroke
-            val currentStroke = if (focused) thinStroke else thickStroke
-            todoSubTabPillBorderAnimator = ValueAnimator.ofInt(currentStroke, targetStroke).apply {
-                duration = 150L
-                interpolator = android.view.animation.DecelerateInterpolator()
-                addUpdateListener {
-                    drawable.setStroke(it.animatedValue as Int, Lum.GLOW)
-                }
-                start()
-            }
-        }
-
-        // Animate capsule slide to active slot position (200ms ease-out).
-        // Skipped when the caller (drag-release) is running its own
-        // bouncy spring on translationX.
+        // Slide capsule to the active slot via translationX only (mirrors the
+        // bottom pill's applyPillAndTints): width is one slot, leftMargin stays
+        // 0, position = ordinal * slotW. Skipped when the caller (drag-release)
+        // is running its own bouncy spring on translationX.
         if (!skipCapsuleAnim) {
-            val targetIcon = todoSubTabLabels[todoSubTab.ordinal]
-            targetIcon?.let { icon ->
-                val slot = icon.parent as View
+            todoSubTabPill?.let { pill ->
                 todoSubTabCapsule?.let { capsule ->
-                    val targetLeft = slot.left
-                    val targetWidth = slot.width
-                    val params = capsule.layoutParams as FrameLayout.LayoutParams
-                    val startLeft = params.leftMargin.toFloat()
-                    val startWidth = params.width.toFloat()
-
-                    ValueAnimator.ofFloat(0f, 1f).apply {
-                        duration = 200L
-                        interpolator = android.view.animation.DecelerateInterpolator()
-                        addUpdateListener { anim ->
-                            val fraction = anim.animatedValue as Float
-                            val currentLeft = startLeft + (targetLeft - startLeft) * fraction
-                            val currentWidth = startWidth + (targetWidth - startWidth) * fraction
-                            (capsule.layoutParams as FrameLayout.LayoutParams).apply {
-                                leftMargin = currentLeft.toInt()
-                                width = currentWidth.toInt()
-                            }
-                            capsule.requestLayout()
-                        }
-                        start()
+                    val tabCount = TodoSubTab.entries.size
+                    val slotW = pill.width.toFloat() / tabCount
+                    if (slotW > 0f) {
+                        capsule.layoutParams.width = slotW.toInt()
+                        capsule.requestLayout()
+                        Anim.translateX(capsule, todoSubTab.ordinal * slotW)
                     }
                 }
             }
@@ -6357,7 +6500,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun parseTelegramSavedAndDisplay(json: String) {
+    /**
+     * Parse a telegram_messages page for the Saved sub-tab and render it. First page replaces
+     * (submitList); older pages append + de-dupe (appendOlder). Keeps newest-first ordering and
+     * hides the loader spinner. Per-message shape: {id, sender, text, date}.
+     */
+    private fun parseSavedMessagesAndDisplay(json: String) {
+        val wasOlder = savedLoadingOlder
+        savedRequestInFlight = false
+        savedLoadingOlder = false
+        loaderCtl.hide(TabId.TODO)
         try {
             // Check if the response is an error object
             val trimmed = json.trim()
@@ -6366,15 +6518,17 @@ class MainActivity : AppCompatActivity() {
                 if (obj.has("error")) {
                     val errorMsg = obj.getString("error")
                     activityLog("Telegram saved error: $errorMsg")
-                    todoSavedAdapter.submitList(emptyList())
-                    todoHasError = true
-                    if (todoSubTab == TodoSubTab.SAVED) {
-                        todoEmptyText?.let { tv ->
-                            tv.text = errorMsg
-                            if (tv.visibility != View.VISIBLE) {
-                                tv.visibility = View.VISIBLE
-                                tv.alpha = 0f
-                                Anim.fadeIn(tv, 200L)
+                    if (!wasOlder) {
+                        todoSavedAdapter.submitList(emptyList())
+                        todoHasError = true
+                        if (todoSubTab == TodoSubTab.SAVED) {
+                            todoEmptyText?.let { tv ->
+                                tv.text = errorMsg
+                                if (tv.visibility != View.VISIBLE) {
+                                    tv.visibility = View.VISIBLE
+                                    tv.alpha = 0f
+                                    Anim.fadeIn(tv, 200L)
+                                }
                             }
                         }
                     }
@@ -6383,9 +6537,32 @@ class MainActivity : AppCompatActivity() {
             }
 
             val arr = JSONArray(json)
-            if (arr.length() == 0) {
+            val messages = mutableListOf<TelegramMessage>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                messages.add(TelegramMessage(
+                    id = obj.optInt("id", 0),
+                    sender = obj.optString("sender", ""),
+                    text = obj.optString("text", ""),
+                    date = obj.optString("date", "")
+                ))
+            }
+            // The agent returns oldest-first; show newest at the top (descending by date)
+            // since the list reads top-down.
+            messages.sortByDescending { it.date }
+
+            if (wasOlder) {
+                // Older page: append at the bottom, de-duped. A short page means end-of-list.
+                if (messages.size < SAVED_PAGE_SIZE) savedNoMoreOlder = true
+                todoSavedAdapter.appendOlder(messages)
+                return
+            }
+
+            // First page.
+            if (messages.isEmpty()) {
                 todoSavedAdapter.submitList(emptyList())
                 todoHasError = false
+                savedNoMoreOlder = true
                 if (todoSubTab == TodoSubTab.SAVED) {
                     todoEmptyText?.let { tv ->
                         tv.text = "No saved messages"
@@ -6408,29 +6585,21 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-
-            val messages = mutableListOf<TelegramMessage>()
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                messages.add(TelegramMessage(
-                    id = obj.optInt("id", 0),
-                    sender = obj.optString("sender", ""),
-                    text = obj.getString("text"),
-                    date = obj.optString("date", "")
-                ))
-            }
+            if (messages.size < SAVED_PAGE_SIZE) savedNoMoreOlder = true
             todoSavedAdapter.submitList(messages)
             todoSavedHasData = true
             stopTodoPoll()
         } catch (e: Exception) {
-            activityLog("parseTelegramSavedAndDisplay failed: ${e.message}")
-            todoHasError = true
-            todoEmptyText?.let { tv ->
-                tv.text = "Failed to parse messages"
-                if (tv.visibility != View.VISIBLE) {
-                    tv.visibility = View.VISIBLE
-                    tv.alpha = 0f
-                    Anim.fadeIn(tv, 200L)
+            activityLog("parseSavedMessagesAndDisplay failed: ${e.message}")
+            if (!wasOlder) {
+                todoHasError = true
+                todoEmptyText?.let { tv ->
+                    tv.text = "Failed to parse messages"
+                    if (tv.visibility != View.VISIBLE) {
+                        tv.visibility = View.VISIBLE
+                        tv.alpha = 0f
+                        Anim.fadeIn(tv, 200L)
+                    }
                 }
             }
         }
@@ -7606,6 +7775,9 @@ class MainActivity : AppCompatActivity() {
                                         updateTodoSubTabLabels()
                                         adapter.setFocused(true)
                                         if (adapter.selectedPosition < 0) adapter.selectPosition(0)
+                                        if (todoSubTab == TodoSubTab.TASKS) {
+                                            todoChecklistRecycler?.post { updateTodoChecklistCursor(animate = false) }
+                                        }
                                     }
                                     TodoSubTab.SAVED -> {
                                         if (todoSavedAdapter.itemCount == 0 && !todoHasError) return true
@@ -7615,9 +7787,7 @@ class MainActivity : AppCompatActivity() {
                                         if (wasError) {
                                             todoEmptyText?.let { Anim.fadeOut(it, 150L) }
                                             todoHasError = false
-                                            sendBroadcast(Intent(ListenerService.ACTION_REQUEST_TELEGRAM_SAVED).apply {
-                                                setPackage(packageName)
-                                            })
+                                            requestSavedFirstPage()
                                         }
                                         adapter.setFocused(true)
                                         if (adapter.selectedPosition < 0) adapter.selectPosition(0)
@@ -7635,30 +7805,56 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     // Level 1: Content focused (items with selection)
-                    // UP/DOWN scrolls, tap acts on item, double-tap -> level 0
+                    // The touchpad only emits horizontal swipes (mapped to
+                    // DPAD_LEFT/RIGHT), so pair them with UP/DOWN as aliases:
+                    // back-swipe (LEFT/UP) = previous item, forward-swipe
+                    // (RIGHT/DOWN) = next item. Tap acts on item, double-tap -> level 0.
                     1 -> when (keyCode) {
-                        KeyEvent.KEYCODE_DPAD_UP -> {
+                        KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_LEFT -> {
                             val adapter = getActiveTodoAdapter()
                             adapter.moveSelectionUp()
                             getActiveTodoRecycler()?.scrollToPosition(adapter.selectedPosition)
+                            if (todoSubTab == TodoSubTab.TASKS) {
+                                todoChecklistRecycler?.post { updateTodoChecklistCursor(animate = true) }
+                            }
                             return true
                         }
-                        KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT -> {
                             val adapter = getActiveTodoAdapter()
                             adapter.moveSelectionDown()
                             getActiveTodoRecycler()?.scrollToPosition(adapter.selectedPosition)
+                            if (todoSubTab == TodoSubTab.TASKS) {
+                                todoChecklistRecycler?.post { updateTodoChecklistCursor(animate = true) }
+                            }
+                            // Saved: when selection nears the bottom, fetch the next (older) page.
+                            if (todoSubTab == TodoSubTab.SAVED &&
+                                adapter.selectedPosition >= adapter.adapterItemCount - 3) {
+                                requestSavedOlderPage()
+                            }
                             return true
                         }
                         KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                             if (isDoubleTap()) {
                                 todoFocusLevel = 0
                                 getActiveTodoAdapter().setFocused(false)
+                                updateTodoChecklistCursor(animate = false)
                                 updateTodoSubTabLabels()
                                 lastCenterPressTime = 0L
                             } else when (todoSubTab) {
                                 TodoSubTab.TASKS -> {
                                     val item = todoChecklistAdapter.getSelectedItem()
                                     if (item != null) {
+                                        // Tapping a still-struck (not yet fading) item un-marks it:
+                                        // cancel the completion choreography and toggle it back. Each
+                                        // tap (mark or un-mark) sends the same backend toggle so the
+                                        // server stays in sync with the optimistic local state.
+                                        if (todoChecklistAdapter.isUndoable(item.id)) {
+                                            todoChecklistAdapter.toggleUndoIfPending(item.id)
+                                        } else if (!item.completed) {
+                                            // Optimistically strike + run the animation now so it
+                                            // plays even if the backend echo is slow/absent.
+                                            todoChecklistAdapter.markCompletedLocally(item.id)
+                                        }
                                         sendBroadcast(Intent(ListenerService.ACTION_TODO_TOGGLE).apply {
                                             setPackage(packageName)
                                             putExtra(ListenerService.EXTRA_TODO_ID, item.id)
@@ -7693,20 +7889,20 @@ class MainActivity : AppCompatActivity() {
                         KeyEvent.KEYCODE_BACK -> {
                             todoFocusLevel = 0
                             getActiveTodoAdapter().setFocused(false)
+                            updateTodoChecklistCursor(animate = false)
                             updateTodoSubTabLabels()
                             return true
                         }
-                        KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> return true
                     }
 
                     // Level 2: Message detail (full-view overlay)
-                    // UP/DOWN scrolls text, tap/double-tap -> level 1
+                    // Horizontal swipes (LEFT/RIGHT) alias UP/DOWN to scroll text.
                     2 -> when (keyCode) {
-                        KeyEvent.KEYCODE_DPAD_UP -> {
+                        KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_LEFT -> {
                             todoMessageScrollView?.let { ScrollDrainer.enqueueY(it, -80) }
                             return true
                         }
-                        KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_RIGHT -> {
                             todoMessageScrollView?.let { ScrollDrainer.enqueueY(it, 80) }
                             return true
                         }
@@ -7715,7 +7911,6 @@ class MainActivity : AppCompatActivity() {
                             hideMessageDetail()
                             return true
                         }
-                        KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> return true
                     }
                 }
             }
@@ -8339,6 +8534,15 @@ class MainActivity : AppCompatActivity() {
                 }
                 ?: return
             android.util.Log.d("TG_DEBUG", "Messages response received: ${json.take(200)}")
+            // The Saved sub-tab shares this telegram_messages channel. Route by the chatId the
+            // response actually answers -- chatId="me" is the Saved sub-tab, anything else is the
+            // Telegram chat browser. This is reliable regardless of timing (no dependence on a
+            // transient in-flight flag, which dropped Saved responses when it had already cleared).
+            val respChatId = intent?.getStringExtra(ListenerService.EXTRA_TG_CHAT_ID) ?: ""
+            if (respChatId == SAVED_CHAT_ID) {
+                runOnUiThread { parseSavedMessagesAndDisplay(json) }
+                return
+            }
             val chatType = telegramOpenChatType
             runOnUiThread {
                 try {
@@ -8950,7 +9154,7 @@ class MainActivity : AppCompatActivity() {
             translationResultReceiver, translationConfigReceiver,
             translationStateReceiver, reidFacesReceiver, reidStatsReceiver,
             reidStatusReceiver, reidPersonResponseReceiver, reidBestThumbReceiver, cameraPermRequestReceiver,
-            todoListReceiver, telegramSavedReceiver, alarmListReceiver, jobListReceiver,
+            todoListReceiver, alarmListReceiver, jobListReceiver,
             batteryReceiver, timeTickReceiver, bottomPaddingReceiver, chatFontSizeReceiver,
             mediaStateReceiver, mediaProgressReceiver, a2dpSinkStateReceiver, uiRecordReceiver,
             tgChatListResponseReceiver, tgMessagesResponseReceiver,

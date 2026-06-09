@@ -35,7 +35,6 @@ class GlassesBtClient(private val relay: MessageRelay) {
         fun onDismissSession()
         fun onRokidCommand(action: String, paramsJson: String)
         fun onPhoneActivate()
-        fun onMapBitmap(bitmapBase64: String)
         fun onMapArrow(normX: Float, normY: Float, headingDeg: Float) {}
         fun onChatListResponse(chatsJson: String)
         fun onChatHistory(conversationId: String, turnsJson: String)
@@ -46,7 +45,6 @@ class GlassesBtClient(private val relay: MessageRelay) {
         fun onReidResult(trackingId: String, recognized: Boolean, personUid: String, displayName: String, score: Float)
         fun onOrchestratorStatus(connected: Boolean)
         fun onTodoListResponse(json: String)
-        fun onTelegramSavedResponse(json: String)
         fun onAlarmListResponse(json: String) {}
         fun onJobListResponse(json: String) {}
         fun onNotification(notifId: String, sender: String, text: String, chat: String, repliable: Boolean) {}
@@ -57,7 +55,7 @@ class GlassesBtClient(private val relay: MessageRelay) {
         fun onReidBestThumb(personUid: String, imageBase64: String) {}
         fun onReidPersonResponse(personUid: String, personJson: String) {}
         fun onTgChatListResponse(json: String) {}
-        fun onTgMessagesResponse(json: String) {}
+        fun onTgMessagesResponse(chatId: String, json: String) {}
         fun onTgSendResult(json: String) {}
         fun onTgNewMessage(json: String) {}
         fun onTgTopicsResponse(chatId: String, json: String) {}
@@ -168,10 +166,6 @@ class GlassesBtClient(private val relay: MessageRelay) {
                     remoteLog?.invoke("Phone activate command received")
                     listener?.onPhoneActivate()
                 }
-                BtProtocol.CH_MAP_BITMAP -> {
-                    val bitmapBase64 = args.getOrElse(0) { "" }
-                    listener?.onMapBitmap(bitmapBase64)
-                }
                 BtProtocol.CH_MAP_ARROW -> {
                     val normX = args.getOrElse(0) { "0" }.toFloatOrNull() ?: 0f
                     val normY = args.getOrElse(1) { "0" }.toFloatOrNull() ?: 0f
@@ -248,12 +242,6 @@ class GlassesBtClient(private val relay: MessageRelay) {
                         listener?.onTodoListResponse(json)
                     }
                 }
-                BtProtocol.CH_TELEGRAM_SAVED_RESP -> {
-                    handleChunkedJson(BtProtocol.CH_TELEGRAM_SAVED_RESP, args) { _, json ->
-                        remoteLog?.invoke("Telegram saved response received: ${json.length} chars")
-                        listener?.onTelegramSavedResponse(json)
-                    }
-                }
                 BtProtocol.CH_ALARM_LIST_RESP -> {
                     handleChunkedJson(BtProtocol.CH_ALARM_LIST_RESP, args) { _, json ->
                         remoteLog?.invoke("Alarm list response received: ${json.length} chars")
@@ -310,7 +298,7 @@ class GlassesBtClient(private val relay: MessageRelay) {
                 BtProtocol.CH_TG_MESSAGES_RESP -> {
                     handleChunkedJson(BtProtocol.CH_TG_MESSAGES_RESP, args, prefixIndex = 0) { chatId, json ->
                         remoteLog?.invoke("TG messages response: chatId=$chatId ${json.length} chars")
-                        listener?.onTgMessagesResponse(json)
+                        listener?.onTgMessagesResponse(chatId ?: "", json)
                     }
                 }
                 BtProtocol.CH_TG_SEND_RESP -> {
@@ -551,10 +539,6 @@ class GlassesBtClient(private val relay: MessageRelay) {
 
     fun sendTodoRemove(id: String) {
         relay.publish(BtProtocol.CH_TODO_REMOVE, id)
-    }
-
-    fun sendTelegramSavedRequest() {
-        relay.publish(BtProtocol.CH_TELEGRAM_SAVED_REQ, "list")
     }
 
     fun sendAlarmListRequest() {

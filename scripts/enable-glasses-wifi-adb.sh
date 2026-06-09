@@ -4,7 +4,7 @@
 #
 # Flow:
 #   1. Require the glasses to be present on USB (serial GLASSES_SERIAL,
-#      default 1901092544026001). If they're not attached, bail.
+#      defaults to the first attached adb device). If they're not attached, bail.
 #   2. If WiFi isn't already associated and credentials are supplied,
 #      issue `cmd wifi connect-network <SSID> wpa2 <PSK>`.
 #   3. Wait until wlan0 has an IPv4 address.
@@ -26,7 +26,8 @@
 # Glasses typically land at 192.168.0.100:5555 on this network.
 set -euo pipefail
 
-SERIAL="${GLASSES_SERIAL:-1901092544026001}"
+SERIAL="${GLASSES_SERIAL:-}"
+if [ -z "$SERIAL" ]; then SERIAL="$(adb devices 2>/dev/null | awk 'NR>1 && $2=="device" {print $1}' | head -1)"; fi
 PORT="${ADB_WIFI_PORT:-5555}"
 WAIT_IP_S="${WAIT_IP_S:-45}"
 SSID="${1:-${SSID:-}}"

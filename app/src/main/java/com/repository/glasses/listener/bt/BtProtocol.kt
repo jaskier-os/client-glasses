@@ -25,8 +25,10 @@ object BtProtocol {
     // Phone -> glasses device tool commands (dedicated channel to avoid CXR-S subscription bugs)
     const val CH_DEVICE_COMMAND = "listener_device_command"
 
-    // Phone -> glasses map bitmap (navigation minimap)
-    const val CH_MAP_BITMAP = "listener_map_bitmap"
+    // Phone -> glasses map base frame (navigation minimap). Raw WEBP bytes delivered
+    // as a single binary arg over the dedicated map RFCOMM socket (MAP_UUID). NOT base64,
+    // NOT UTF-8 decoded. See MessageRelay binaryChannels + onBinaryMessage.
+    const val CH_MAP_BITMAP_BIN = "listener_map_bitmap_bin"
 
     // Phone -> glasses arrow position+heading samples for the minimap.
     // Args: [normX: String(Float), normY: String(Float), headingDeg: String(Float)]
@@ -96,10 +98,6 @@ object BtProtocol {
     // Job list (glasses <-> phone, plus proactive push)
     const val CH_JOB_LIST_REQ = "listener_job_list_req"
     const val CH_JOB_LIST_RESP = "listener_job_list_resp"
-
-    // Telegram saved messages (glasses -> phone -> glasses)
-    const val CH_TELEGRAM_SAVED_REQ = "listener_tg_saved_req"
-    const val CH_TELEGRAM_SAVED_RESP = "listener_tg_saved_resp"
 
     // Telegram chat (glasses <-> phone)
     const val CH_TG_CHAT_LIST_REQ = "listener_tg_chat_list_req"
