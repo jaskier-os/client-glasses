@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -7,7 +9,11 @@ plugins {
 //   1. environment variables (CI-friendly)
 //   2. local.properties (gitignored, see local.properties.example)
 //   3. safe placeholder defaults supplied at call sites
-val localProps = java.util.Properties().apply {
+// NOTE: `Properties` is imported explicitly above rather than referenced as
+// `java.util.Properties`. AGP puts a `util` member in the build-script scope
+// that shadows the `java.util` package in a fully-qualified reference, which
+// makes the Kotlin DSL script fail to compile with "Unresolved reference: util".
+val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
