@@ -883,21 +883,36 @@ static int suspend_loop(void) {
         int frozen_s = do_freeze();
 
         // A real freeze lasts at least a few seconds (RTC alarm minimum).
-        // If we returned in < 2s, the kernel aborted suspend (typically
-        // DWC3 EBUSY when USB cable is connected). After 3 consecutive
-        // failures, bail out and restore system_suspend to avoid leaving
-        // the HAL dead -- which crashes system_server on the next display
-        // state change.
+        // If we returned in < 2s, the kernel aborted suspend (EBUSY). The two
+        // causes here are: (a) a USB cable got plugged mid-loop, or (b) an
+        // active kernel wakeup source (hal_bluetooth_lock while BT audio/HFP is
+        // connected) is still held. We do NOT abort: the device stays awake and
+        // drains to a battery shutdown if we give up. Instead keep retrying for
+        // the whole fold window -- the wakelock releases once BT goes idle (or
+        // bt-manager drops A2DP/HFP on fold), and the next freeze succeeds.
+        // Re-run suspend_prepare() each retry to re-release transient wakelocks.
         if (frozen_s < 2) {
             consecutive_failures++;
-            if (consecutive_failures >= 3) {
-                log_line("suspend: %d consecutive freeze failures, aborting suspend loop",
+            // A USB cable plugged mid-loop makes freeze impossible (DWC3 blocks
+            // LPM). Bail cleanly -- matches the entry guard.
+            if (usb_cable_connected()) {
+                log_line("suspend: USB connected mid-loop after %d freeze failures, aborting",
                          consecutive_failures);
                 suspend_teardown();
                 return 0;
             }
-            // Brief backoff before retry so we don't spin.
-            usleep(2000000);
+            // Escalating backoff (2s, 4s, 6s ... capped at 30s) so we don't spin
+            // hot while a wakelock is held, but still retry often enough to catch
+            // the moment it releases.
+            int backoff_s = consecutive_failures * 2;
+            if (backoff_s > 30) backoff_s = 30;
+            if ((consecutive_failures % 5) == 1) {
+                log_line("suspend: freeze EBUSY x%d (wakelock held); retrying, backoff=%ds",
+                         consecutive_failures, backoff_s);
+            }
+            usleep((useconds_t)backoff_s * 1000000);
+            // Re-release wakelocks that may have appeared since the last attempt.
+            suspend_prepare();
         } else {
             consecutive_failures = 0;
         }

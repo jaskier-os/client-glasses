@@ -16,13 +16,13 @@ import java.util.concurrent.ConcurrentHashMap
  * Brings up HFP-HF (HEADSET_CLIENT) and A2DP Sink on every bonded device whenever:
  *   - the BluetoothAdapter turns ON,
  *   - a device finishes bonding,
- *   - the wearer puts the glasses on,
+ *   - the glasses are unfolded,
  *   - or a periodic safety tick fires (60s) and a profile is still down.
  *
- * Skips when the glasses are off-head -- nothing to listen on.
- * Never disconnects on take-off; an in-flight call/audio stream stays up until
- * the AG drops it. Reconnect happens automatically when the wearer puts them
- * back on, via the wear listener.
+ * Fold-gated: while folded, the sweep reconnects nothing and onFold() actively
+ * tears down both A2DP and HFP, so the BT stack releases its kernel wakelock
+ * (hal_bluetooth_lock) and glasses-power-daemon can freeze. Both profiles
+ * reconnect automatically on unfold.
  */
 @SuppressLint("MissingPermission")
 class ProfileAutoConnector(
@@ -30,7 +30,7 @@ class ProfileAutoConnector(
     private val adapter: BluetoothAdapter?,
     private val hfp: HfpClientController,
     private val a2dp: A2dpSinkController,
-    private val wearGate: WearGate,
+    private val foldGate: FoldGate,
     private val log: (String) -> Unit = {},
 ) {
     private val appCtx = ctx.applicationContext
@@ -163,17 +163,51 @@ class ProfileAutoConnector(
             log("ProfileAutoConnector receiver register failed: ${e.message}")
         }
 
-        // WearGate is started by BtManagerService; ProfileAutoConnector only
-        // reads wearGate.worn to skip A2DP when folded. It does NOT drive
-        // auto-connect on wear change -- that's the listener-side
-        // AudioRoutingController's job.
+        // FoldGate is started by BtManagerService; ProfileAutoConnector reads
+        // foldGate.folded to gate the sweep and drives onFold() teardown via
+        // the fold listener wired in BtManagerService.
 
         // First sweep after profile proxies have time to bind.
         schedule("init", INIT_DELAY_MS)
         // Periodic safety net: cheap, only acts when something is missing.
         handler.postDelayed(periodicTick, PERIODIC_MS)
 
-        log("ProfileAutoConnector started (wear-decoupled)")
+        log("ProfileAutoConnector started (fold-gated)")
+    }
+
+    /**
+     * Drive profile state from a fold transition. On fold: tear down A2DP + HFP
+     * on every bonded device so the BT stack releases hal_bluetooth_lock and the
+     * power daemon can freeze. On unfold: kick a sweep to reconnect both.
+     * Reconnect-while-folded is separately blocked in tryConnect().
+     */
+    fun onFold(folded: Boolean) {
+        handler.post {
+            try {
+                if (folded) {
+                    val a = adapter ?: return@post
+                    val bonded = try { a.bondedDevices } catch (e: Throwable) {
+                        log("onFold: bondedDevices threw: ${e.message}"); return@post
+                    } ?: emptySet()
+                    var droppedHfp = 0; var droppedA2dp = 0
+                    for (dev in bonded) {
+                        val addr = dev.address ?: continue
+                        if (a2dp.isConnected(addr)) {
+                            a2dp.disconnect(addr); droppedA2dp++
+                        }
+                        if (hfp.isConnected(addr)) {
+                            hfp.disconnect(addr); droppedHfp++
+                        }
+                    }
+                    log("onFold(folded) dropped hfp=$droppedHfp a2dp=$droppedA2dp")
+                } else {
+                    log("onFold(unfolded) scheduling reconnect sweep")
+                    schedule("unfold", BONDED_DELAY_MS)
+                }
+            } catch (e: Throwable) {
+                log("onFold($folded) threw: ${e.message}")
+            }
+        }
     }
 
     fun stop() {
@@ -209,7 +243,7 @@ class ProfileAutoConnector(
             log("autoconnect($reason): adapter off, skip")
             return@section
         }
-        val folded = !wearGate.worn
+        val folded = foldGate.folded
         val bonded = try { a.bondedDevices } catch (e: Throwable) {
             log("autoconnect($reason): bondedDevices threw: ${e.message}")
             return@section
@@ -238,7 +272,12 @@ class ProfileAutoConnector(
             } else {
                 disconnectedSweeps[addr] = 0
             }
-            val needsWork = !hfpUp || (!a2dpUp && !folded)
+            // Folded = off-head, not in use. Reconnect NOTHING while folded:
+            // both A2DP and HFP must stay down so the BT stack releases its
+            // kernel wakelock (hal_bluetooth_lock) and glasses-power-daemon can
+            // freeze. onFold() actively tears both down; this just prevents the
+            // sweep from bringing them back. Unfold reconnects both.
+            val needsWork = !folded && (!hfpUp || !a2dpUp)
             if (!needsWork) continue
             log("autoconnect($reason) addr=$addr name=${dev.name} hfp=$hfpUp a2dp=$a2dpUp folded=$folded sweeps=${disconnectedSweeps[addr] ?: 0}")
             if (!hfpUp) {
@@ -246,9 +285,7 @@ class ProfileAutoConnector(
                 val ok = hfp.connect(addr)
                 if (!ok) log("autoconnect($reason) hfp.connect FAILED addr=$addr")
             }
-            // Skip A2DP when folded -- glasses shouldn't hijack audio while off-head.
-            // HFP is still attempted so incoming calls can ring.
-            if (!a2dpUp && !folded) {
+            if (!a2dpUp) {
                 needA2dp++
                 val ok = a2dp.connect(addr)
                 if (!ok) log("autoconnect($reason) a2dp.connect FAILED addr=$addr")

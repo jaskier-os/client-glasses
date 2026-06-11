@@ -74,8 +74,13 @@ class HfpClientController(
 
         // BluetoothProfile.CONNECTION_POLICY_ALLOWED (Android 12+)
         private const val CONNECTION_POLICY_ALLOWED = 100
+        // BluetoothProfile.CONNECTION_POLICY_FORBIDDEN -- blocks both our own
+        // reconnect and any AG-initiated (phone) reconnect while set.
+        private const val CONNECTION_POLICY_FORBIDDEN = 0
         // Pre-12 fallback: BluetoothProfile.PRIORITY_AUTO_CONNECT.
         private const val PRIORITY_AUTO_CONNECT = 1000
+        // Pre-12 fallback: BluetoothProfile.PRIORITY_OFF.
+        private const val PRIORITY_OFF = 0
 
         fun connectionStateLabel(state: Int): String = when (state) {
             BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED($state)"
@@ -287,6 +292,65 @@ class HfpClientController(
         } catch (e: Throwable) {
             log("HfpClient.connect.error addr=$deviceAddress err=${e.message}")
             false
+        }
+    }
+
+    /**
+     * Tear down HFP-HF to [deviceAddress] and forbid the connection policy so
+     * neither our own sweep nor the AG (phone) re-establishes it. Used on fold:
+     * a folded device must drop HFP entirely so the BT stack releases its kernel
+     * wakelock (hal_bluetooth_lock) and the power daemon can freeze. connect()
+     * re-allows the policy on unfold.
+     */
+    fun disconnect(deviceAddress: String): Boolean = GT.section("bt.hfp.disconnect") {
+        val p = proxy ?: run {
+            log("HfpClient.disconnect: proxy null addr=$deviceAddress")
+            return@section false
+        }
+        val dev = resolveDevice(deviceAddress) ?: return@section false
+        setConnectionPolicyForbidden(dev)
+        try {
+            val m = p.javaClass.methods.firstOrNull {
+                it.name == "disconnect" &&
+                    it.parameterTypes.size == 1 &&
+                    it.parameterTypes[0] == BluetoothDevice::class.java
+            }
+            if (m == null) {
+                log("HfpClient.disconnect: no method addr=$deviceAddress")
+                return@section false
+            }
+            m.isAccessible = true
+            val ok = (m.invoke(p, dev) as? Boolean) ?: false
+            log("event=hfp.disconnect addr=${dev.address} name=${dev.name} result=$ok")
+            ok
+        } catch (e: Throwable) {
+            log("HfpClient.disconnect.error addr=$deviceAddress err=${e.message}")
+            false
+        }
+    }
+
+    private fun setConnectionPolicyForbidden(dev: BluetoothDevice) {
+        val p = proxy ?: return
+        try {
+            val m = p.javaClass.methods.firstOrNull {
+                it.name == "setConnectionPolicy" && it.parameterTypes.size == 2
+            }
+            if (m != null) {
+                m.isAccessible = true
+                val ok = m.invoke(p, dev, CONNECTION_POLICY_FORBIDDEN)
+                log("HfpClient.setConnectionPolicy(${dev.address}, FORBIDDEN) -> $ok")
+                return
+            }
+            val mPri = p.javaClass.methods.firstOrNull {
+                it.name == "setPriority" && it.parameterTypes.size == 2
+            }
+            if (mPri != null) {
+                mPri.isAccessible = true
+                val ok = mPri.invoke(p, dev, PRIORITY_OFF)
+                log("HfpClient.setPriority(${dev.address}, OFF) -> $ok")
+            }
+        } catch (e: Throwable) {
+            log("HfpClient.setConnectionPolicy(FORBIDDEN) failed: ${e.message}")
         }
     }
 
