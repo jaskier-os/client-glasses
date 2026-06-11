@@ -1,5 +1,7 @@
 # client-glasses
 
+> **Docs & wiki:** [github.com/jaskier-os/docs/wiki](https://github.com/jaskier-os/docs/wiki)
+
 Listener app for Rokid AR glasses (YodaOS / Android 12, arm64). Runs as a
 privileged on-device service: captures mic audio, does on-device wake-word and
 voice-activity detection, takes photos, draws an on-glasses overlay, and relays
