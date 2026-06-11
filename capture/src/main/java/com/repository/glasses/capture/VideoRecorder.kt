@@ -2,13 +2,8 @@ package com.repository.glasses.capture
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
-import android.hardware.camera2.CaptureRequest
-import android.hardware.camera2.params.OutputConfiguration
-import android.hardware.camera2.params.SessionConfiguration
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
@@ -17,16 +12,22 @@ import android.os.SystemClock
 import android.util.Log
 import com.repository.glasses.tracing.GT
 import java.io.File
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 /**
- * Camera2 + MediaRecorder video recorder with pause/resume.
- * One session per recording.  stop() closes everything.
+ * MediaRecorder video recorder with pause/resume.
+ *
+ * Does NOT own the camera. The shared [CameraSession] owns the single
+ * CameraDevice + capture session; VideoRecorder only manages the MediaRecorder
+ * lifecycle and hands its input Surface to the session as a recording output.
+ * The frame-stall watchdog lives in CameraSession (it owns the repeating
+ * request); a stall calls back into [stop].
  */
 @SuppressLint("MissingPermission")
-class VideoRecorder(private val context: Context) {
+class VideoRecorder(
+    private val context: Context,
+    private val cameraSession: CameraSession,
+) {
 
     companion object {
         private const val TAG = "Cap:Video"
@@ -38,26 +39,17 @@ class VideoRecorder(private val context: Context) {
         private const val VIDEO_BITRATE = 7_000_000
         private const val AUDIO_BITRATE = 32_000
         private const val FRAME_RATE = 30
-        // Force-stop the recording if no camera frame arrived in this window.
-        // 2s is ~120 frames at 60fps; far above any plausible jitter.
-        private const val FRAME_STALL_MS = 2000L
-        private const val STALL_CHECK_MS = 1000L
     }
 
     private val handlerThread = HandlerThread("VideoRec").apply { start() }
     private val handler = Handler(handlerThread.looper)
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "VideoRec-exec") }
-    private val cbExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "VideoRec-cb") }
 
-    @Volatile private var camera: CameraDevice? = null
-    @Volatile private var session: CameraCaptureSession? = null
     @Volatile private var recorder: MediaRecorder? = null
     @Volatile private var file: File? = null
     @Volatile private var startedAtMs: Long = 0
     @Volatile private var recording = false
     @Volatile private var paused = false
-    @Volatile private var lastFrameAtMs: Long = 0
-    private var stallWatchdog: Runnable? = null
 
     fun isRecording(): Boolean = recording
     fun isPaused(): Boolean = paused
@@ -69,9 +61,8 @@ class VideoRecorder(private val context: Context) {
             onResult(file, null)
             return@section
         }
-        // doStart blocks on CountDownLatch.await() for openCamera/sessionConfig. Camera2
-        // callbacks arrive on `handler`; running doStart on `executor` keeps the two threads
-        // separate and prevents the same deadlock PhotoCapturer had.
+        // doStart blocks on CameraSession.setRecorderSurface (which configures
+        // the shared session). Run on executor so it doesn't block the caller.
         executor.execute {
             val t0 = SystemClock.elapsedRealtime()
             try {
@@ -133,16 +124,23 @@ class VideoRecorder(private val context: Context) {
                         Log.w(TAG, "recorder.resume before stop failed: ${e.message}")
                     }
                 }
-                try { session?.stopRepeating() } catch (e: Exception) { Log.w(TAG, "session.stopRepeating: ${e.message}") }
-                try { session?.abortCaptures() } catch (e: Exception) { Log.w(TAG, "session.abortCaptures: ${e.message}") }
-                try { session?.close() } catch (e: Exception) { Log.w(TAG, "session.close: ${e.message}") }
+                // Stop the camera feeding the recorder surface BEFORE stopping
+                // the recorder, so no frames arrive at a torn-down encoder.
+                // clearRecorderSurface() returns false if the detach did not
+                // complete (op timed out) -- in that case the surface may still
+                // be attached, so frames can hit the encoder during stop(). We
+                // still stop (the recording must end) but log a WARN.
+                val cleared = cameraSession.clearRecorderSurface()
+                if (!cleared) {
+                    Log.w(TAG, "clearRecorderSurface did not confirm detach; frames may have hit the encoder during stop")
+                }
                 try { recorder?.stop() } catch (e: Exception) { Log.w(TAG, "recorder.stop: ${e.message}") }
-                cleanupQuietly()
+                cleanupRecorder()
                 val size = if (f.exists()) f.length() else 0L
                 Log.i(TAG, "stopped: ${f.absolutePath} duration=${duration}ms size=$size")
                 onResult(f, duration, size, null)
             } catch (e: Throwable) {
-                cleanupQuietly()
+                cleanupRecorder()
                 onResult(f, duration, f.length(), e)
             }
         }
@@ -152,8 +150,8 @@ class VideoRecorder(private val context: Context) {
         val out = FileNamer.videoFile()
         file = out
 
-        // Probe the camera first so we can derive the orientation hint from
-        // SENSOR_ORIENTATION instead of hardcoding the device's current value.
+        // Derive the orientation hint from SENSOR_ORIENTATION instead of
+        // hardcoding the device's current value.
         //
         // Capture's MediaRecorder pipeline encodes setOrientationHint into a
         // different displaymatrix than the listener-side ArVideoRecorder for
@@ -198,113 +196,20 @@ class VideoRecorder(private val context: Context) {
         rec.prepare()
         recorder = rec
 
-        val openLatch = CountDownLatch(1)
-        val openedErr = arrayOfNulls<Throwable>(1)
-        val opened = arrayOfNulls<CameraDevice>(1)
-        val tOpen = SystemClock.elapsedRealtime()
-        Log.i(TAG, "openCamera request cameraId=$cameraId")
-        manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
-            override fun onOpened(device: CameraDevice) {
-                Log.i(TAG, "camera onOpened cb durMs=${SystemClock.elapsedRealtime() - tOpen}")
-                opened[0] = device; openLatch.countDown()
-            }
-            override fun onDisconnected(device: CameraDevice) {
-                Log.w(TAG, "camera onDisconnected cb")
-                openedErr[0] = IllegalStateException("camera disconnected")
-                device.close(); openLatch.countDown()
-            }
-            override fun onError(device: CameraDevice, error: Int) {
-                Log.e(TAG, "camera onError cb error=$error")
-                openedErr[0] = IllegalStateException("camera open error $error")
-                device.close(); openLatch.countDown()
-            }
-        }, handler)
-        if (!openLatch.await(3, TimeUnit.SECONDS))
-            throw IllegalStateException("camera open timeout")
-        openedErr[0]?.let { throw it }
-        camera = opened[0] ?: throw IllegalStateException("camera null")
-
-        val recSurface = rec.surface
-
-        val sessionLatch = CountDownLatch(1)
-        val sessionErr = arrayOfNulls<Throwable>(1)
-        val createdSession = arrayOfNulls<CameraCaptureSession>(1)
-        val tSess = SystemClock.elapsedRealtime()
-        val stateCb = object : CameraCaptureSession.StateCallback() {
-            override fun onConfigured(s: CameraCaptureSession) {
-                Log.i(TAG, "session onConfigured cb durMs=${SystemClock.elapsedRealtime() - tSess}")
-                createdSession[0] = s; sessionLatch.countDown()
-            }
-            override fun onConfigureFailed(s: CameraCaptureSession) {
-                Log.e(TAG, "session onConfigureFailed cb")
-                sessionErr[0] = IllegalStateException("session configure failed"); sessionLatch.countDown()
-            }
+        // Hand the recorder input Surface to the shared camera session. This
+        // opens the camera if needed (first holder) or rebuilds the session to
+        // include the recorder output (e.g. when a frame stream is already up).
+        // The camera's repeating request + frame-stall watchdog live in
+        // CameraSession; a stall calls back into stop() via this lambda.
+        val configured = cameraSession.setRecorderSurface(rec.surface) {
+            Log.e(TAG, "camera stall while recording - stopping")
+            stop { _, _, _, _ -> }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            camera!!.createCaptureSession(
-                SessionConfiguration(
-                    SessionConfiguration.SESSION_REGULAR,
-                    listOf(OutputConfiguration(recSurface)),
-                    cbExecutor,
-                    stateCb
-                )
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            camera!!.createCaptureSession(listOf(recSurface), stateCb, handler)
+        if (!configured) {
+            throw IllegalStateException("camera session did not accept recorder surface")
         }
-        if (!sessionLatch.await(3, TimeUnit.SECONDS))
-            throw IllegalStateException("session configure timeout")
-        sessionErr[0]?.let { throw it }
-        session = createdSession[0]
 
-        val reqBuilder = camera!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-            addTarget(recSurface)
-            set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-            // Fixed-focus AR camera; continuous AF wastes ~5% of camera HAL CPU
-            // refocusing a lens that doesn't move. Lock to infinity.
-            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-            set(CaptureRequest.LENS_FOCUS_DISTANCE, 0f)
-            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(FRAME_RATE, FRAME_RATE))
-            // Standard EIS adds ~10-15% camera HAL CPU. Head-mounted POV
-            // doesn't benefit from in-camera stabilization the same way
-            // hand-held footage does -- viewers expect to see head motion.
-            set(
-                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
-                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
-            )
-        }
-        val req = reqBuilder.build()
-        val frameCounter = java.util.concurrent.atomic.AtomicLong(0L)
-        val lastLogAt = java.util.concurrent.atomic.AtomicLong(SystemClock.elapsedRealtime())
-        val frameCb = object : CameraCaptureSession.CaptureCallback() {
-            override fun onCaptureCompleted(
-                s: CameraCaptureSession,
-                req: CaptureRequest,
-                result: android.hardware.camera2.TotalCaptureResult
-            ) {
-                lastFrameAtMs = SystemClock.elapsedRealtime()
-                val n = frameCounter.incrementAndGet()
-                if (n % 300L == 0L) {
-                    val now = lastFrameAtMs
-                    val prev = lastLogAt.getAndSet(now)
-                    val windowMs = now - prev
-                    val fps = if (windowMs > 0) 300.0 * 1000.0 / windowMs else 0.0
-                    val expected = (windowMs * FRAME_RATE / 1000L).coerceAtLeast(1)
-                    val dropped = (expected - 300).coerceAtLeast(0)
-                    GT.counter("cap.video.fps", fps.toLong())
-                    GT.counter("cap.video.dropped", dropped)
-                    Log.i(TAG, "frameStream n=$n windowMs=$windowMs fps=${"%.2f".format(fps)} dropped=$dropped paused=$paused")
-                }
-            }
-        }
-        lastFrameAtMs = SystemClock.elapsedRealtime()
-        startStallWatchdog()
-        Log.i(TAG, "setRepeatingRequest ${FRAME_RATE}fps (frame-stream logs every 300 frames)")
-        session!!.setRepeatingRequest(req, frameCb, handler)
-
-        Log.i(TAG, "MediaRecorder.start (H264 ${WIDTH}x${HEIGHT} ${FRAME_RATE}fps vBr=$VIDEO_BITRATE aBr=$AUDIO_BITRATE)")
+        Log.i(TAG, "MediaRecorder.start (HEVC ${WIDTH}x${HEIGHT} ${FRAME_RATE}fps vBr=$VIDEO_BITRATE aBr=$AUDIO_BITRATE)")
         val tRec = SystemClock.elapsedRealtime()
         rec.start()
         startedAtMs = SystemClock.elapsedRealtime()
@@ -313,62 +218,28 @@ class VideoRecorder(private val context: Context) {
         Log.i(TAG, "started: ${out.absolutePath} recStartMs=${startedAtMs - tRec}")
     }
 
-    /**
-     * Force-stop on camera frame stall. Without this, MediaRecorder silently
-     * lets the AAC track run past the last H264 frame, producing an mp4 with
-     * audio longer than video that decodes wrong on every player.
-     */
-    private fun startStallWatchdog() {
-        cancelStallWatchdog()
-        val w = object : Runnable {
-            override fun run() {
-                if (!recording) return
-                if (!paused) {
-                    val gap = SystemClock.elapsedRealtime() - lastFrameAtMs
-                    if (gap > FRAME_STALL_MS) {
-                        Log.e(TAG, "frameStall: no frames for ${gap}ms - force stopping")
-                        GT.counter("cap.video.stall", 1)
-                        try { session?.stopRepeating() } catch (_: Exception) {}
-                        try { session?.abortCaptures() } catch (_: Exception) {}
-                        try { recorder?.stop() } catch (_: Exception) {}
-                        cleanupQuietly()
-                        return
-                    }
-                }
-                handler.postDelayed(this, STALL_CHECK_MS)
-            }
-        }
-        stallWatchdog = w
-        handler.postDelayed(w, STALL_CHECK_MS)
-    }
-
-    private fun cancelStallWatchdog() {
-        stallWatchdog?.let { handler.removeCallbacks(it) }
-        stallWatchdog = null
-    }
-
-    private fun cleanupQuietly() {
-        Log.i(TAG, "cleanupQuietly entry")
-        val t0 = SystemClock.elapsedRealtime()
-        cancelStallWatchdog()
-        try { session?.stopRepeating() } catch (_: Exception) {}
-        try { session?.abortCaptures() } catch (_: Exception) {}
-        try { session?.close() } catch (_: Exception) {}
+    /** Release the MediaRecorder. The camera/session is owned by CameraSession
+     *  and is detached separately via clearRecorderSurface(). */
+    private fun cleanupRecorder() {
         try { recorder?.reset() } catch (_: Exception) {}
         try { recorder?.release() } catch (_: Exception) {}
-        try { camera?.close() } catch (_: Exception) {}
-        session = null
-        camera = null
         recorder = null
         recording = false
         paused = false
-        Log.i(TAG, "cleanupQuietly exit durMs=${SystemClock.elapsedRealtime() - t0}")
+    }
+
+    private fun cleanupQuietly() {
+        Log.i(TAG, "cleanupQuietly entry recording=$recording")
+        if (recording) {
+            try { cameraSession.clearRecorderSurface() } catch (_: Exception) {}
+            try { recorder?.stop() } catch (_: Exception) {}
+        }
+        cleanupRecorder()
     }
 
     fun shutdown() {
         handler.post { cleanupQuietly() }
         handlerThread.quitSafely()
         executor.shutdown()
-        cbExecutor.shutdown()
     }
 }

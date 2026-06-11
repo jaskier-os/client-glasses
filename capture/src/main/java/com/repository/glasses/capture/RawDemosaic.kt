@@ -173,6 +173,109 @@ object RawDemosaic {
     }
 
     /**
+     * Speed-optimized COLOR demosaic for the ReID still path. Same color
+     * character as [binToBitmap] (WB gains + the identical CCM + saturation)
+     * so the look matches the photo path, but two optimizations bring it from
+     * ~16s to well under 2s on this SoC:
+     *
+     *   (a) Heavier downsample. [downsample] is the source-pixel stride (must
+     *       be even so the sampled RGGB quad stays aligned): each output pixel
+     *       samples one full RGGB quad anchored at (downsample*x, downsample*y)
+     *       in source space, so the output is width/downsample x
+     *       height/downsample. For a 4032x3024 sensor, downsample=4 ->
+     *       1008x756 (~1008px long edge), 6 -> 672x504. ReID / ML Kit does not
+     *       need full spatial resolution.
+     *
+     *   (b) sRGB encode via a precomputed LUT instead of a per-channel
+     *       Math.pow per pixel. The gamma curve is sampled into a 4096-entry
+     *       byte table once; the hot loop quantizes the clamped linear value to
+     *       a LUT index and reads the encoded 0..255 byte. This removes the
+     *       ~3 pow() calls per pixel (millions total) that dominated runtime.
+     *
+     * Output is ARGB_8888, upright handling left to the caller (it bakes the
+     * -90 rotation as for the photo path).
+     */
+    fun binToBitmapFast(
+        raw: ShortArray,
+        width: Int, height: Int,
+        blackLevel: Float, whiteLevel: Float,
+        wbR: Float, wbG: Float, wbB: Float,
+        downsample: Int,
+    ): Bitmap {
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        require(raw.size >= width * height)
+        require(downsample >= 2)
+        // Each output pixel samples a full RGGB quad (x, x+1, y, y+1), so the
+        // stride must be even to keep the quad on RGGB phase. Force even >= 2.
+        val step = (downsample and 1.inv()).coerceAtLeast(2)
+        val outW = width / step
+        val outH = height / step
+        val range = whiteLevel - blackLevel
+        val rGain = wbR / range
+        val gGain = wbG / range * 0.5f  // x0.5 because we average G1+G2
+        val bGain = wbB / range
+        val bl = blackLevel
+
+        // CCM + saturation: identical constants to binToBitmap so the ReID
+        // still has the same color/look as the photo path.
+        val m00 = 1.65f; val m01 = -0.50f; val m02 = -0.15f
+        val m10 = -0.25f; val m11 = 1.55f; val m12 = -0.30f
+        val m20 = -0.15f; val m21 = -0.40f; val m22 = 1.55f
+        val sat = 1.45f
+
+        // sRGB gamma LUT: index = clamped linear [0..1] quantized to LUT_N-1,
+        // value = sRGB-encoded 0..255. Built once, replaces Math.pow per pixel.
+        val lutN = 4096
+        val gammaLut = IntArray(lutN)
+        run {
+            val inv = 1f / (lutN - 1)
+            for (i in 0 until lutN) {
+                val lin = i * inv
+                val enc = if (lin <= 0.0031308f) 12.92f * lin
+                else 1.055f * Math.pow(lin.toDouble(), 1.0 / 2.4).toFloat() - 0.055f
+                gammaLut[i] = (enc * 255f + 0.5f).toInt().coerceIn(0, 255)
+            }
+        }
+        val lutScale = (lutN - 1).toFloat()
+
+        val outPx = IntArray(outW * outH)
+        for (y in 0 until outH) {
+            val sy0 = (y * step) * width
+            val sy1 = (y * step + 1) * width
+            val dstRow = y * outW
+            for (x in 0 until outW) {
+                val sx0 = x * step
+                val sx1 = sx0 + 1
+                val rv = ((raw[sy0 + sx0].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
+                val g1v = ((raw[sy0 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
+                val g2v = ((raw[sy1 + sx0].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
+                val bv = ((raw[sy1 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
+                val rl = rv * rGain
+                val gl = (g1v + g2v) * gGain
+                val bl2 = bv * bGain
+                var rc = m00 * rl + m01 * gl + m02 * bl2
+                var gc = m10 * rl + m11 * gl + m12 * bl2
+                var bc = m20 * rl + m21 * gl + m22 * bl2
+                val luma = 0.299f * rc + 0.587f * gc + 0.114f * bc
+                rc = luma + sat * (rc - luma)
+                gc = luma + sat * (gc - luma)
+                bc = luma + sat * (bc - luma)
+                if (rc < 0f) rc = 0f else if (rc > 1f) rc = 1f
+                if (gc < 0f) gc = 0f else if (gc > 1f) gc = 1f
+                if (bc < 0f) bc = 0f else if (bc > 1f) bc = 1f
+                val ri = gammaLut[(rc * lutScale + 0.5f).toInt()]
+                val gi = gammaLut[(gc * lutScale + 0.5f).toInt()]
+                val bi = gammaLut[(bc * lutScale + 0.5f).toInt()]
+                outPx[dstRow + x] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+            }
+        }
+
+        val bmp = Bitmap.createBitmap(outPx, outW, outH, Bitmap.Config.ARGB_8888)
+        Log.i(TAG, "binFast ${width}x${height}->${outW}x${outH} ds=$downsample ccm+sat+lut durMs=${android.os.SystemClock.elapsedRealtime() - t0}")
+        return bmp
+    }
+
+    /**
      * @param raw RAW_SENSOR buffer, width*height uint16 (stored in Short).
      *   CFA pattern assumed RGGB (verified on Rokid sensor via rawpy:
      *   raw_pattern = [[0,1],[3,2]]).

@@ -27,4 +27,13 @@ interface ICapture {
 
     boolean isRecording();
     boolean isPaused();
+
+    /** Capture ONE correctly-exposed still for ReID using the known-good RAW
+     *  burst -> demosaic recipe (RawStillCapturer), then deliver the upright
+     *  JPEG to [cb] via onFrame(jpeg, w, h, rotationDeg=0, frameId). Rotation is
+     *  baked into the pixels, so rotationDeg is always 0 (consumers must NOT
+     *  rotate again). On failure, [cb].onCaptureError is invoked. The listener
+     *  drives this PERIODICALLY; the capture serializes through CameraSession's
+     *  exclusive device borrow so it never races video/photo. */
+    void captureReidFrame(in ICaptureCallback cb);
 }

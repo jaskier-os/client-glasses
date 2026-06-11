@@ -24,10 +24,18 @@ import java.nio.channels.FileChannel
  * within the 16-px margin which the deep U-Net's receptive field covers.
  */
 class SplitterDenoiser private constructor(
-    private val interpreters: List<Interpreter>,
-    private val delegateTag: String,
+    private val model: MappedByteBuffer,
 ) {
 
+    /**
+     * Denoise [src]. The TFLite interpreter (and its ~300MB tensor arena) is
+     * created HERE and CLOSED in the finally below, so the arena is resident
+     * ONLY for the duration of this call -- never while idle or during ReID
+     * scanning (which does no denoising). On this 1.8GB device a permanently
+     * held arena was the dominant cost that tipped the capture FGS over the
+     * lowmemorykiller threshold. Re-creating the interpreter costs ~130ms,
+     * negligible against the ~60s denoise and the ~300MB it would otherwise pin.
+     */
     fun denoise(src: Bitmap): Bitmap {
         val t0 = android.os.SystemClock.elapsedRealtime()
         val w0 = src.width
@@ -38,6 +46,22 @@ class SplitterDenoiser private constructor(
             Log.w(TAG, "input too small for splitter ${w0}x${h0}, returning raw")
             return src
         }
+        // Create the interpreter(s) for THIS denoise only; closed in finally.
+        val interpreters = createInterpreters()
+        val delegateTag = "CPU${interpreters.size}x$CPU_INTRAOP_THREADS"
+        try {
+            return runDenoise(src, w0, h0, w, h, interpreters, delegateTag, t0)
+        } finally {
+            for (interp in interpreters) {
+                try { interp.close() } catch (e: Exception) { Log.w(TAG, "interpreter close failed: ${e.message}") }
+            }
+        }
+    }
+
+    private fun runDenoise(
+        src: Bitmap, w0: Int, h0: Int, w: Int, h: Int,
+        interpreters: List<Interpreter>, delegateTag: String, t0: Long,
+    ): Bitmap {
         val base = if (w == w0 && h == h0) src else Bitmap.createBitmap(src, 0, 0, w, h)
         if (base !== src) src.recycle()
 
@@ -121,68 +145,61 @@ class SplitterDenoiser private constructor(
         return out
     }
 
+    /** Build the interpreter(s) for a single denoise. Prefers the GPU delegate
+     *  (one interpreter, internal parallelism); otherwise one CPU interpreter
+     *  with [CPU_INTRAOP_THREADS] threads. Closed by [denoise] after the run. */
+    private fun createInterpreters(): List<Interpreter> {
+        runCatching {
+            val compat = CompatibilityList()
+            if (compat.isDelegateSupportedOnThisDevice) {
+                val opts = Interpreter.Options().apply { addDelegate(GpuDelegate()) }
+                val it = Interpreter(model, opts)
+                Log.i(TAG, "interpreter init: GPU delegate (1 worker)")
+                return listOf(it)
+            }
+            Log.w(TAG, "GPU delegate not supported, falling back to CPU")
+        }.onFailure { e ->
+            Log.w(TAG, "GPU delegate init failed: ${e.message}, falling back to CPU")
+        }
+        val interpreters = (0 until CPU_INTERPRETERS).map {
+            val opts = Interpreter.Options().apply { setNumThreads(CPU_INTRAOP_THREADS) }
+            Interpreter(model, opts)
+        }
+        Log.i(TAG, "interpreter init: CPU ${CPU_INTERPRETERS}x interpreters x ${CPU_INTRAOP_THREADS}-thread")
+        return interpreters
+    }
+
     companion object {
         private const val TAG = "Cap:Splitter"
         private const val ASSET = "ml/splitternet.tflite"
         private const val TILE = 256
         private const val OVERLAP = 16
 
-        /** Pool size for parallel tile denoise on the CPU path. Glasses SoC is
-         *  4x Cortex-A55. Measured configs:
-         *    - 1x4 (original): ~67 s
-         *    - 2x2: ~29 s  <-- sweet spot, chosen here
-         *    - 4x1: slower than 2x2 under load (model is intra-op friendly,
-         *      too-small intra-op splits serialize on the single dispatcher). */
-        // 2x2 is the wall-clock sweet spot on this A55 quad-core (~29s
-        // vs 1x4 at ~3+ minutes -- TFLite intra-op parallelism plateaus
-        // hard past 2 threads). To stay under the LMK threshold the
-        // camera warm pool is explicitly closed by PhotoCapturer's denoise
-        // executor before this runs, freeing the YUV reader buffers and
-        // camera session memory.
-        private const val CPU_INTERPRETERS = 2
-        private const val CPU_INTRAOP_THREADS = 2
+        /** ONE CPU interpreter with 4 intra-op threads. Glasses SoC is 4x
+         *  Cortex-A55 with only ~1.8GB RAM. Each interpreter allocates its own
+         *  ~300MB tensor arena, so the previous 2-interpreter config doubled the
+         *  native footprint and was the dominant cause of the capture-process
+         *  OOM (permanent ~472MB native floor -> lowmemorykiller). Going to 1
+         *  interpreter ~halves the arena; combined with closing it after each
+         *  denoise (see denoise()), the arena is no longer a permanent floor.
+         *  Cost: 1x4 is slower than 2x2 (~67s vs ~29s) but the denoise runs in
+         *  the background and never blocks the camera, so wall-clock here is not
+         *  user-facing. Memory stability beats denoise speed on this device. */
+        private const val CPU_INTERPRETERS = 1
+        private const val CPU_INTRAOP_THREADS = 4
 
+        // Only the model (a ~3MB MappedByteBuffer) is cached as a singleton; the
+        // expensive interpreter arenas are created+closed per denoise() call.
         @Volatile private var instance: SplitterDenoiser? = null
 
         fun get(context: Context): SplitterDenoiser {
             instance?.let { return it }
             synchronized(this) {
                 instance?.let { return it }
-                val created = create(context.applicationContext)
+                val created = SplitterDenoiser(loadModel(context.applicationContext))
                 instance = created
                 return created
             }
-        }
-
-        private fun create(context: Context): SplitterDenoiser {
-            val model = loadModel(context)
-            runCatching {
-                val compat = CompatibilityList()
-                if (compat.isDelegateSupportedOnThisDevice) {
-                    // GPU delegate isn't thread-safe; stick to a single
-                    // interpreter. The GPU does its own internal parallelism.
-                    val opts = Interpreter.Options().apply { addDelegate(GpuDelegate()) }
-                    val it = Interpreter(model, opts)
-                    Log.i(TAG, "interpreter init: GPU delegate (1 worker)")
-                    return SplitterDenoiser(listOf(it), "GPU")
-                }
-                Log.w(TAG, "GPU delegate not supported, falling back to CPU")
-            }.onFailure { e ->
-                Log.w(TAG, "GPU delegate init failed: ${e.message}, falling back to CPU")
-            }
-            // CPU path: 2 interpreters x 2 intra-op threads = 4 total cores used
-            // (same CPU budget as the single 4-thread interpreter, but two tiles
-            // can run concurrently, roughly halving wall-clock for the tile loop).
-            // A55-quad on this device cannot sustainably run 4 interpreters at
-            // once -- intra-op thread contention wipes out the benefit past 2.
-            val cpuInterpretersCount = CPU_INTERPRETERS
-            val cpuIntraOpThreads = CPU_INTRAOP_THREADS
-            val interpreters = (0 until cpuInterpretersCount).map {
-                val opts = Interpreter.Options().apply { setNumThreads(cpuIntraOpThreads) }
-                Interpreter(model, opts)
-            }
-            Log.i(TAG, "interpreter init: CPU ${cpuInterpretersCount}x interpreters x ${cpuIntraOpThreads}-thread")
-            return SplitterDenoiser(interpreters, "CPU${cpuInterpretersCount}x${cpuIntraOpThreads}")
         }
 
         private fun loadModel(context: Context): MappedByteBuffer {

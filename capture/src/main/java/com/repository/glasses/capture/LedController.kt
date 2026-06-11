@@ -55,6 +55,31 @@ object LedController {
     /** Cancel the Rokid CAMERA_OPEN event (priority 8000) that keeps the LED lit. */
     fun cancelCameraOpenEvent() { eventCall(TXN_CANCEL_EVENT, EVENT_TYPE_WARN, EVENT_WARN_ID_CAMERA_OPEN) }
 
+    /**
+     * Gate the firmware camera privacy LED at its SOURCE. Rokid's cameraserver
+     * reads the system property `vendor.rkd.camera.led.enable` and, when it is
+     * "0", does NOT fire the CAMERA_OPEN(2014) event at all on camera open -- so
+     * the white LED never lights (verified on-device: with the prop 0, no
+     * `send event 2,2014` is emitted and `/sys/class/leds/white/brightness`
+     * stays 0 through a full capture). Set false around a silent capture (ReID),
+     * restore true afterwards. This is the clean gate; it avoids racing the
+     * cameraserver-fired event with cancels.
+     */
+    fun setCameraLedEnabled(enabled: Boolean) {
+        setProp(CAMERA_LED_ENABLE_PROP, if (enabled) "1" else "0")
+    }
+
+    private const val CAMERA_LED_ENABLE_PROP = "vendor.rkd.camera.led.enable"
+
+    private fun setProp(key: String, value: String) {
+        try {
+            val sp = Class.forName("android.os.SystemProperties")
+            sp.getMethod("set", String::class.java, String::class.java).invoke(null, key, value)
+        } catch (e: Exception) {
+            Log.w(TAG, "setProp $key=$value failed: ${e.message}")
+        }
+    }
+
     private fun eventCall(txn: Int, eventType: Int, eventId: Int) {
         val b = getBinder() ?: return
         val data = Parcel.obtain(); val reply = Parcel.obtain()

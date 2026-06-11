@@ -14,6 +14,11 @@ class ReidController {
         private const val PENDING_TIMEOUT_MS = 600_000L
         private const val STALE_FRAME_THRESHOLD = 20
         private const val MAX_VERIFIED_FACES = 50
+        /** Minimum gap between the END of one ReID still's delivery and the START of
+         *  the next capture. The capture itself takes ~1-2s (AE warmup + RAW frame +
+         *  demosaic), so the effective cadence is capture-time + this floor. Keeps the
+         *  camera from being hammered while ReID frames are flowing. */
+        private const val CAPTURE_MIN_INTERVAL_MS = 1500L
     }
 
     data class PendingFace(
@@ -48,18 +53,67 @@ class ReidController {
     var btSender: BtSender? = null
     var uiCallback: UiCallback? = null
     var remoteLog: ((String) -> Unit)? = null
-    /** Forwarded to ReidCameraCapturer so the camera-open lifecycle holds a
-     *  bt-manager active session ("reid_streaming"). */
+    /** Bridge to the capture process. ReID subscribes to AIDL-delivered JPEG frames through
+     *  this instead of opening Camera2 itself. Set by ListenerService before start(). */
+    var captureBridge: com.repository.glasses.listener.capture.CaptureBridge? = null
+    /** Wired by the owner so the streaming lifecycle holds a bt-manager active session
+     *  ("reid_streaming"), preventing the RFCOMM idle watchdog from tearing the connection down
+     *  while ReID frames are flowing. */
     var onActiveSessionEnter: (() -> Unit)? = null
     var onActiveSessionExit: (() -> Unit)? = null
+    @Volatile private var sessionHeld = false
 
     private val pendingFaces = mutableListOf<PendingFace>()
     private val verifiedFaces = mutableListOf<VerifiedFace>()
     // Merges that arrived before the face was added (source -> target)
     private val pendingMerges = mutableMapOf<String, String>()
-    private var cameraCapturer: ReidCameraCapturer? = null
+    private var frameConsumer: ReidFrameConsumer? = null
     @Volatile var isRunning = false
         private set
+
+    // Periodic capture driver. ReID no longer subscribes to a continuous stream;
+    // it requests one exposed still at a time and fires the next only AFTER the
+    // previous one's detection completes (self-throttling -- no pile-up).
+    private var captureThread: android.os.HandlerThread? = null
+    private var captureHandler: android.os.Handler? = null
+    @Volatile private var captureInFlight = false
+
+    private val frameListener = object : com.repository.glasses.listener.capture.CaptureBridge.Listener {
+        override fun onFrame(jpeg: ByteArray, width: Int, height: Int, rotationDeg: Int, frameId: Long) {
+            // rotationDeg is 0: the capture side bakes the upright rotation into the
+            // pixels, so the consumer must NOT rotate again.
+            try {
+                frameConsumer?.onFrame(jpeg, width, height, rotationDeg)
+            } finally {
+                scheduleNextCapture()
+            }
+        }
+        override fun onCaptureError(code: Int, msg: String) {
+            // Capture failed (e.g. camera busy with video). Back off and retry on cadence.
+            log("ReID capture error code=$code $msg")
+            scheduleNextCapture()
+        }
+    }
+
+    /** Fire the next ReID still after CAPTURE_MIN_INTERVAL_MS, unless stopped or a
+     *  capture is already queued. Called after each frame's detection / each error. */
+    private fun scheduleNextCapture() {
+        if (!isRunning) return
+        captureInFlight = false
+        captureHandler?.postDelayed({ triggerCapture() }, CAPTURE_MIN_INTERVAL_MS)
+    }
+
+    private fun triggerCapture() {
+        if (!isRunning) return
+        if (captureInFlight) return
+        captureInFlight = true
+        try {
+            captureBridge?.captureReidFrame()
+        } catch (e: Throwable) {
+            log("triggerCapture threw: ${e.message}")
+            scheduleNextCapture()
+        }
+    }
 
     fun start(context: android.content.Context) {
         if (isRunning) return
@@ -70,13 +124,58 @@ class ReidController {
         log("Starting reid controller")
         uiCallback?.onStatusChanged("SCANNING")
 
-        cameraCapturer = ReidCameraCapturer(context).apply {
-            remoteLog = this@ReidController.remoteLog
-            callback = cameraCallback
-            onActiveSessionEnter = this@ReidController.onActiveSessionEnter
-            onActiveSessionExit = this@ReidController.onActiveSessionExit
+        if (!sessionHeld) {
+            sessionHeld = true
+            try { onActiveSessionEnter?.invoke() } catch (_: Throwable) {}
         }
-        cameraCapturer?.start()
+
+        frameConsumer = ReidFrameConsumer().apply {
+            remoteLog = this@ReidController.remoteLog
+            callback = frameCallback
+        }
+        frameConsumer?.start()
+
+        val bridge = captureBridge
+        if (bridge == null) {
+            log("captureBridge is null -- ReID cannot receive frames")
+            uiCallback?.onStatusChanged("ERROR: no capture bridge")
+        } else {
+            bridge.addListener(frameListener)
+            val thread = android.os.HandlerThread("ReidCaptureDriver").apply { start() }
+            captureThread = thread
+            captureHandler = android.os.Handler(thread.looper)
+            // Kick the first capture immediately; subsequent ones are scheduled
+            // after each frame's detection completes (self-throttling loop).
+            captureHandler?.post { triggerCapture() }
+        }
+    }
+
+    /**
+     * One-shot ReID identify on a func-button photo frame, independent of whether ReID
+     * mode is on. Runs exactly ONE detection pass on the supplied JPEG and routes any
+     * detected faces through the SAME [frameCallback] the live loop uses (so the
+     * onFacesDetected -> btSender.sendFace identify path is identical).
+     *
+     * Does NOT start the controller, the periodic capture loop, or change the LED -- it
+     * borrows nothing from the camera (the frame is already captured) and uses a throwaway
+     * ReidFrameConsumer so a running loop's detector/bitmap lifecycle is untouched. Detection
+     * runs on a short-lived background thread; the caller may invoke this from any thread.
+     *
+     * [rotationDeg] must match the frame's orientation. The func-button photo file is stored
+     * upright (pixels physically rotated, EXIF NORMAL), so callers decoding that file pass 0.
+     */
+    fun detectPhotoOneShot(jpeg: ByteArray, rotationDeg: Int) {
+        val consumer = ReidFrameConsumer().apply {
+            remoteLog = this@ReidController.remoteLog
+            callback = frameCallback
+        }
+        Thread({
+            try {
+                consumer.detectOnce(jpeg, rotationDeg)
+            } catch (e: Throwable) {
+                log("detectPhotoOneShot threw: ${e.message}")
+            }
+        }, "ReidPhotoOneShot").start()
     }
 
     fun stop() {
@@ -84,8 +183,23 @@ class ReidController {
         isRunning = false
         log("Stopping reid controller")
 
-        cameraCapturer?.stop()
-        cameraCapturer = null
+        captureHandler?.removeCallbacksAndMessages(null)
+        captureHandler = null
+        captureThread?.quitSafely()
+        captureThread = null
+        captureInFlight = false
+
+        val bridge = captureBridge
+        if (bridge != null) {
+            bridge.removeListener(frameListener)
+        }
+        frameConsumer?.stop()
+        frameConsumer = null
+
+        if (sessionHeld) {
+            sessionHeld = false
+            try { onActiveSessionExit?.invoke() } catch (_: Throwable) {}
+        }
         uiCallback?.onStatusChanged("STOPPED")
     }
 
@@ -176,8 +290,8 @@ class ReidController {
         emitUi()
     }
 
-    private val cameraCallback = object : ReidCameraCapturer.Callback {
-        override fun onFacesDetected(faces: List<ReidCameraCapturer.DetectedFace>, frameCount: Int, fps: Double) {
+    private val frameCallback = object : ReidFrameConsumer.Callback {
+        override fun onFacesDetected(faces: List<ReidFrameConsumer.DetectedFace>, frameCount: Int, fps: Double) {
             val now = SystemClock.elapsedRealtime()
 
             for (face in faces) {

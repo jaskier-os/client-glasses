@@ -46,7 +46,7 @@ import kotlin.math.min
  * sensor rows vs. 1512, which is imperceptible.
  */
 @SuppressLint("MissingPermission")
-class LowLightCapturer(private val context: Context) {
+class LowLightCapturer(private val context: Context, private val cameraSession: CameraSession) {
 
     companion object {
         private const val TAG = "Cap:LowLight"
@@ -82,9 +82,11 @@ class LowLightCapturer(private val context: Context) {
         private const val AMPLIFICATION = 270f
     }
 
-    // Camera2 callbacks must not share a thread with [executor] -- doCapture blocks on
-    // CountDownLatch.await(), and if the callback handler were the same thread the
-    // camera's onOpened would never get delivered. Same split as PhotoCapturer.
+    // ImageReader + capture callbacks must not share a thread with [executor] --
+    // doCapture blocks on CountDownLatch.await(), and if the callback handler were
+    // the same thread the RAW frame would never be delivered. This thread services
+    // only the ImageReader / CameraCaptureSession callbacks; the CameraDevice itself
+    // is owned and opened by CameraSession on its own thread.
     private val handlerThread = HandlerThread("LowLight-cb").apply { start() }
     private val handler = Handler(handlerThread.looper)
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "LowLight-exec") }
@@ -194,14 +196,14 @@ class LowLightCapturer(private val context: Context) {
             } catch (e: Throwable) {
                 Log.e(TAG, "captureDng failed: ${e.message}")
                 onResult(null, e)
-                // Same leak pattern as capture(): on camera-open / session-configure
-                // timeout, the shared HandlerThread "LowLight-cb" stays alive
-                // forever otherwise. Reclaim the whole capturer on timeout so the
-                // thread is released; a fresh LowLightCapturer will be constructed
-                // on the next request.
+                // On a session-configure timeout the borrow lambda's CameraCaptureSession
+                // callback never fired, which can leave the shared HandlerThread
+                // "LowLight-cb" wedged. Reclaim the whole capturer so the thread is
+                // released; a fresh LowLightCapturer will be constructed on the next
+                // request.
                 val msg = e.message ?: ""
-                if (msg.contains("camera open timeout") || msg.contains("session configure timeout")) {
-                    Log.w(TAG, "camera open/session timeout -- closing capturer to reclaim HandlerThread")
+                if (msg.contains("session configure timeout")) {
+                    Log.w(TAG, "session configure timeout -- closing capturer to reclaim HandlerThread")
                     try { close() } catch (ce: Throwable) { Log.e(TAG, "close() during timeout recovery failed: ${ce.message}") }
                 }
             } finally {
@@ -239,68 +241,56 @@ class LowLightCapturer(private val context: Context) {
             imageLatch.countDown()
         }, handler)
 
-        var camera: CameraDevice? = null
-        var session: android.hardware.camera2.CameraCaptureSession? = null
         val resultHolder = arrayOfNulls<android.hardware.camera2.TotalCaptureResult>(1)
-        try {
-            val openLatch = java.util.concurrent.CountDownLatch(1)
-            val opened = arrayOfNulls<CameraDevice>(1)
-            val openErr = arrayOfNulls<Throwable>(1)
-            manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
-                override fun onOpened(device: CameraDevice) { opened[0] = device; openLatch.countDown() }
-                override fun onDisconnected(device: CameraDevice) {
-                    openErr[0] = IllegalStateException("camera disconnected"); device.close(); openLatch.countDown()
-                }
-                override fun onError(device: CameraDevice, error: Int) {
-                    openErr[0] = IllegalStateException("camera open error $error"); device.close(); openLatch.countDown()
-                }
-            }, handler)
-            if (!openLatch.await(8, java.util.concurrent.TimeUnit.SECONDS))
-                throw IllegalStateException("camera open timeout")
-            openErr[0]?.let { throw it }
-            camera = opened[0]!!
+        val ran = cameraSession.borrowDeviceExclusive(60_000L) { device ->
+            var session: android.hardware.camera2.CameraCaptureSession? = null
+            try {
+                val sessLatch = java.util.concurrent.CountDownLatch(1)
+                val sessErr = arrayOfNulls<Throwable>(1)
+                val sessOut = arrayOfNulls<android.hardware.camera2.CameraCaptureSession>(1)
+                @Suppress("DEPRECATION")
+                device.createCaptureSession(listOf(reader.surface), object : android.hardware.camera2.CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(s: android.hardware.camera2.CameraCaptureSession) { sessOut[0] = s; sessLatch.countDown() }
+                    override fun onConfigureFailed(s: android.hardware.camera2.CameraCaptureSession) {
+                        sessErr[0] = IllegalStateException("session configure failed"); sessLatch.countDown()
+                    }
+                }, handler)
+                if (!sessLatch.await(3, java.util.concurrent.TimeUnit.SECONDS))
+                    throw IllegalStateException("session configure timeout")
+                sessErr[0]?.let { throw it }
+                session = sessOut[0]!!
 
-            val sessLatch = java.util.concurrent.CountDownLatch(1)
-            val sessErr = arrayOfNulls<Throwable>(1)
-            val sessOut = arrayOfNulls<android.hardware.camera2.CameraCaptureSession>(1)
-            camera.createCaptureSession(listOf(reader.surface), object : android.hardware.camera2.CameraCaptureSession.StateCallback() {
-                override fun onConfigured(s: android.hardware.camera2.CameraCaptureSession) { sessOut[0] = s; sessLatch.countDown() }
-                override fun onConfigureFailed(s: android.hardware.camera2.CameraCaptureSession) {
-                    sessErr[0] = IllegalStateException("session configure failed"); sessLatch.countDown()
+                val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                    addTarget(reader.surface)
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                    set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureNs)
+                    set(CaptureRequest.SENSOR_SENSITIVITY, iso)
                 }
-            }, handler)
-            if (!sessLatch.await(3, java.util.concurrent.TimeUnit.SECONDS))
-                throw IllegalStateException("session configure timeout")
-            sessErr[0]?.let { throw it }
-            session = sessOut[0]!!
 
-            val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-                addTarget(reader.surface)
-                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-                set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureNs)
-                set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+                val resultLatch = java.util.concurrent.CountDownLatch(1)
+                session!!.capture(builder.build(), object : android.hardware.camera2.CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        s: android.hardware.camera2.CameraCaptureSession,
+                        req: CaptureRequest,
+                        result: android.hardware.camera2.TotalCaptureResult
+                    ) {
+                        val actIso = result.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)
+                        val actExp = result.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME)
+                        Log.i(TAG, "DNG capture result: requested iso=$iso exp=${exposureNs/1_000_000.0}ms -> actual iso=$actIso exp=${actExp?.let { it/1_000_000.0 }}ms")
+                        resultHolder[0] = result; resultLatch.countDown()
+                    }
+                }, handler)
+                if (!imageLatch.await(2, java.util.concurrent.TimeUnit.SECONDS))
+                    throw IllegalStateException("raw frame timeout")
+                if (!resultLatch.await(2, java.util.concurrent.TimeUnit.SECONDS))
+                    throw IllegalStateException("capture result timeout")
+            } finally {
+                try { session?.close() } catch (_: Exception) {}
             }
-
-            val resultLatch = java.util.concurrent.CountDownLatch(1)
-            session.capture(builder.build(), object : android.hardware.camera2.CameraCaptureSession.CaptureCallback() {
-                override fun onCaptureCompleted(
-                    s: android.hardware.camera2.CameraCaptureSession,
-                    req: CaptureRequest,
-                    result: android.hardware.camera2.TotalCaptureResult
-                ) {
-                    val actIso = result.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)
-                    val actExp = result.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME)
-                    Log.i(TAG, "DNG capture result: requested iso=$iso exp=${exposureNs/1_000_000.0}ms -> actual iso=$actIso exp=${actExp?.let { it/1_000_000.0 }}ms")
-                    resultHolder[0] = result; resultLatch.countDown()
-                }
-            }, handler)
-            if (!imageLatch.await(2, java.util.concurrent.TimeUnit.SECONDS))
-                throw IllegalStateException("raw frame timeout")
-            if (!resultLatch.await(2, java.util.concurrent.TimeUnit.SECONDS))
-                throw IllegalStateException("capture result timeout")
-        } finally {
-            try { session?.close() } catch (_: Exception) {}
-            try { camera?.close() } catch (_: Exception) {}
+        }
+        if (!ran) {
+            try { reader.close() } catch (_: Exception) {}
+            throw IllegalStateException("camera busy")
         }
 
         val img = captured ?: throw IllegalStateException("raw image null")
@@ -341,15 +331,14 @@ class LowLightCapturer(private val context: Context) {
             } catch (e: Throwable) {
                 Log.e(TAG, "low-light capture failed: ${e.message}")
                 onResult(null, e)
-                // Camera open timeout leaves no resources to clean up in
-                // doCapture's inner finally (camera/session never opened),
-                // but the shared HandlerThread "LowLight-cb" stays alive
-                // forever otherwise. Reclaim the whole capturer on timeout
-                // so the thread is released; a fresh LowLightCapturer will
-                // be constructed on the next request.
+                // On a session-configure timeout the borrow lambda's CameraCaptureSession
+                // callback never fired, which can leave the shared HandlerThread
+                // "LowLight-cb" wedged. Reclaim the whole capturer so the thread is
+                // released; a fresh LowLightCapturer will be constructed on the next
+                // request.
                 val msg = e.message ?: ""
-                if (msg.contains("camera open timeout") || msg.contains("session configure timeout")) {
-                    Log.w(TAG, "camera open/session timeout -- closing capturer to reclaim HandlerThread")
+                if (msg.contains("session configure timeout")) {
+                    Log.w(TAG, "session configure timeout -- closing capturer to reclaim HandlerThread")
                     try { close() } catch (ce: Throwable) { Log.e(TAG, "close() during timeout recovery failed: ${ce.message}") }
                 }
             } finally {
@@ -418,62 +407,41 @@ class LowLightCapturer(private val context: Context) {
             }
         }, handler)
 
-        var camera: CameraDevice? = null
-        var session: CameraCaptureSession? = null
-        try {
-            // Open camera (synchronous via latches).
-            val openLatch = CountDownLatch(1)
-            val opened = arrayOfNulls<CameraDevice>(1)
-            val openedErr = arrayOfNulls<Throwable>(1)
-            manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
-                override fun onOpened(device: CameraDevice) { opened[0] = device; openLatch.countDown() }
-                override fun onDisconnected(device: CameraDevice) {
-                    openedErr[0] = IllegalStateException("camera disconnected")
-                    device.close(); openLatch.countDown()
-                }
-                override fun onError(device: CameraDevice, error: Int) {
-                    openedErr[0] = IllegalStateException("camera open error $error")
-                    device.close(); openLatch.countDown()
-                }
-            }, handler)
-            // Camera open timeout is generous: the JPEG session just closed and
-            // the hardware needs a moment to release before we re-open for RAW.
-            if (!openLatch.await(8, TimeUnit.SECONDS))
-                throw IllegalStateException("camera open timeout")
-            openedErr[0]?.let { throw it }
-            camera = opened[0]!!
+        val ran = cameraSession.borrowDeviceExclusive(60_000L) { device ->
+            var session: CameraCaptureSession? = null
+            try {
+                val sessionLatch = CountDownLatch(1)
+                val createdSession = arrayOfNulls<CameraCaptureSession>(1)
+                val sessionErr = arrayOfNulls<Throwable>(1)
+                @Suppress("DEPRECATION")
+                device.createCaptureSession(listOf(reader.surface), object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(s: CameraCaptureSession) { createdSession[0] = s; sessionLatch.countDown() }
+                    override fun onConfigureFailed(s: CameraCaptureSession) {
+                        sessionErr[0] = IllegalStateException("session configure failed"); sessionLatch.countDown()
+                    }
+                }, handler)
+                if (!sessionLatch.await(3, TimeUnit.SECONDS))
+                    throw IllegalStateException("session configure timeout")
+                sessionErr[0]?.let { throw it }
+                session = createdSession[0]!!
 
-            val sessionLatch = CountDownLatch(1)
-            val createdSession = arrayOfNulls<CameraCaptureSession>(1)
-            val sessionErr = arrayOfNulls<Throwable>(1)
-            @Suppress("DEPRECATION")
-            camera.createCaptureSession(listOf(reader.surface), object : CameraCaptureSession.StateCallback() {
-                override fun onConfigured(s: CameraCaptureSession) { createdSession[0] = s; sessionLatch.countDown() }
-                override fun onConfigureFailed(s: CameraCaptureSession) {
-                    sessionErr[0] = IllegalStateException("session configure failed"); sessionLatch.countDown()
+                val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                    addTarget(reader.surface)
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                    set(CaptureRequest.SENSOR_EXPOSURE_TIME, EXPOSURE_MS * 1_000_000L)
+                    set(CaptureRequest.SENSOR_SENSITIVITY, iso)
                 }
-            }, handler)
-            if (!sessionLatch.await(3, TimeUnit.SECONDS))
-                throw IllegalStateException("session configure timeout")
-            sessionErr[0]?.let { throw it }
-            session = createdSession[0]!!
+                session!!.capture(builder.build(), null, handler)
 
-            val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-                addTarget(reader.surface)
-                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-                set(CaptureRequest.SENSOR_EXPOSURE_TIME, EXPOSURE_MS * 1_000_000L)
-                set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+                // Exposure is up to 313 ms; give plenty of headroom.
+                if (!imageLatch.await(2, TimeUnit.SECONDS))
+                    throw IllegalStateException("raw frame timeout")
+            } finally {
+                try { session?.close() } catch (_: Exception) {}
             }
-            session.capture(builder.build(), null, handler)
-
-            // Exposure is up to 313 ms; give plenty of headroom.
-            if (!imageLatch.await(2, TimeUnit.SECONDS))
-                throw IllegalStateException("raw frame timeout")
-        } finally {
-            try { session?.close() } catch (_: Exception) {}
-            try { camera?.close() } catch (_: Exception) {}
-            try { reader.close() } catch (_: Exception) {}
         }
+        try { reader.close() } catch (_: Exception) {}
+        if (!ran) throw IllegalStateException("camera busy")
 
         val raw = rawBuffer ?: throw IllegalStateException("no raw buffer received")
 

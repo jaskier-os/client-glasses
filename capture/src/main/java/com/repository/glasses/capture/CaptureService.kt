@@ -50,6 +50,7 @@ class CaptureService : Service() {
         const val ACTION_ADB_STOP_VIDEO = "com.repository.glasses.capture.ADB_STOP_VIDEO"
     }
 
+    private lateinit var cameraSession: CameraSession
     private lateinit var photo: PhotoCapturer
     private lateinit var rawStill: RawStillCapturer
     private lateinit var video: VideoRecorder
@@ -91,7 +92,11 @@ class CaptureService : Service() {
         override fun takePhoto() {
             Log.i(TAG, "AIDL takePhoto entry recording=${video.isRecording()}")
             if (video.isRecording()) {
-                Log.i(TAG, "takePhoto ignored: recording in progress")
+                // RECORDING: the full RAW archival path is unavailable (camera is
+                // held by the recorder). Produce a 1080p video-grade still from
+                // the live record session's snapshot reader instead, written to
+                // the same DCIM/Repository location and synced like any photo.
+                takeSnapshotPhoto()
                 return
             }
             // YUV preview-tap path. Two decoupled flows:
@@ -131,8 +136,8 @@ class CaptureService : Service() {
                     broadcast { it.onCaptureError(ERR_CAMERA, err?.message ?: "video start failed") }
                     return@start
                 }
-                // Solid white LED while recording.
-                try { LedController.turnOnWhite() } catch (_: Exception) {}
+                // LED is driven by CameraSession.StateListener when the recorder
+                // surface becomes active.
                 broadcast { it.onVideoStarted(file.absolutePath) }
             }
         }
@@ -171,13 +176,8 @@ class CaptureService : Service() {
             }
             video.stop { file, durationMs, sizeBytes, err ->
                 Log.i(TAG, "stopVideo callback err=${err?.message} file=${file?.absolutePath} durMs=$durationMs bytes=$sizeBytes")
-                // Always turn the LED off when recording ends, even on error. Cancel the
-                // Rokid CAMERA_OPEN event first -- otherwise it holds the LED lit at
-                // priority 8000 even after our turnOff.
-                try {
-                    LedController.cancelCameraOpenEvent()
-                    LedController.turnOffWhite()
-                } catch (_: Exception) {}
+                // LED is driven off by CameraSession.StateListener when the
+                // recorder surface is removed (in video.stop -> clearRecorderSurface).
                 if (err != null) {
                     broadcast { it.onCaptureError(ERR_CAMERA, err.message ?: "video stop failed") }
                 }
@@ -199,6 +199,145 @@ class CaptureService : Service() {
 
         override fun isRecording(): Boolean = video.isRecording()
         override fun isPaused(): Boolean = video.isPaused()
+
+        override fun captureReidFrame(cb: ICaptureCallback) {
+            Log.i(TAG, "AIDL captureReidFrame recording=${video.isRecording()}")
+            if (video.isRecording()) {
+                // RECORDING: the RAW borrow is refused, but the record session
+                // exposes a snapshot JPEG reader. Pull the latest video frame and
+                // deliver it as a ReID frame. The LED is already on for video
+                // (correct/expected), so do NOT touch the cameraLedGate here --
+                // the ref count is only owned by the non-recording silent path.
+                val frameId = reidFrameId.incrementAndGet()
+                cameraSession.captureVideoSnapshot(
+                    onJpeg = { jpeg, w, h, rotationDeg ->
+                        try { cb.onFrame(jpeg, w, h, rotationDeg, frameId) }
+                        catch (e: Exception) { Log.w(TAG, "reid snapshot onFrame deliver failed: ${e.message}") }
+                    },
+                    onError = { err ->
+                        // Treated as "retry next tick" by the listener-side driver.
+                        try { cb.onCaptureError(ERR_BUSY, err.message ?: "reid snapshot failed") }
+                        catch (e: Exception) { Log.w(TAG, "reid snapshot onCaptureError deliver failed: ${e.message}") }
+                    },
+                )
+                return
+            }
+            val frameId = reidFrameId.incrementAndGet()
+            // ReID capture is SILENT by design (privacy / UX): unlike the
+            // func-button photo path, which deliberately pulses the white LED,
+            // a ReID frame must show no light. Disable the firmware camera
+            // privacy LED at its SOURCE for the duration of the capture (see
+            // CameraLedGate / LedController.setCameraLedEnabled): with the
+            // vendor.rkd.camera.led.enable property 0, cameraserver does not
+            // fire the CAMERA_OPEN(2014) event at all, so the white LED never
+            // lights. Restored on completion. Ref-counted so concurrent silent
+            // captures do not restore the LED out from under each other.
+            cameraLedGate.acquireSilent()
+            rawStill.captureReidFrame(
+                onJpeg = { jpeg, w, h, rotationDeg ->
+                    cameraLedGate.releaseSilent()
+                    try { cb.onFrame(jpeg, w, h, rotationDeg, frameId) }
+                    catch (e: Exception) { Log.w(TAG, "reid onFrame deliver failed: ${e.message}") }
+                },
+                onError = { err ->
+                    cameraLedGate.releaseSilent()
+                    try { cb.onCaptureError(ERR_CAMERA, err.message ?: "reid capture failed") }
+                    catch (e: Exception) { Log.w(TAG, "reid onCaptureError deliver failed: ${e.message}") }
+                },
+            )
+        }
+    }
+
+    private val reidFrameId = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /**
+     * Func-button photo WHILE RECORDING. Grabs the latest JPEG from the record
+     * session's snapshot reader, rotates it upright (snapshot delivers
+     * rotationDeg = sensorOrientation), writes it to [FileNamer.photoFile], fires
+     * the same onPhotoTaken UX broadcast as the RAW path, and syncs it to the
+     * phone. No demosaic/denoise -- the HAL already encoded the JPEG. Video keeps
+     * recording throughout (the snapshot is a non-disruptive read of the live
+     * stream). The LED is already on for video, so the cameraLedGate is NOT
+     * touched here.
+     */
+    private fun takeSnapshotPhoto() {
+        cameraSession.captureVideoSnapshot(
+            onJpeg = { jpeg, w, h, rotationDeg ->
+                workerPool.execute {
+                    try {
+                        val out = FileNamer.photoFile()
+                        writeUprightJpeg(jpeg, rotationDeg, out)
+                        Log.i(TAG, "snapshot photo written ${out.absolutePath} bytes=${out.length()} src=${w}x${h} rot=$rotationDeg")
+                        try { LedController.pulseWhite() } catch (_: Exception) {}
+                        broadcast { it.onPhotoTaken(out.absolutePath, out.length()) }
+                        notifyPhotoSync(out)
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "snapshot photo failed: ${e.message}")
+                        broadcast { it.onCaptureError(ERR_INTERNAL, e.message ?: "snapshot photo failed") }
+                    }
+                }
+            },
+            onError = { err ->
+                Log.w(TAG, "snapshot photo no frame: ${err.message}")
+                broadcast { it.onCaptureError(ERR_CAMERA, err.message ?: "snapshot photo failed") }
+            },
+        )
+    }
+
+    /**
+     * Decode the snapshot JPEG, rotate it by [rotationDeg] so the image is
+     * upright (matches the RAW path's baked-rotation convention), re-encode, and
+     * stamp EXIF orientation NORMAL so downstream viewers do not re-rotate.
+     */
+    private fun writeUprightJpeg(jpeg: ByteArray, rotationDeg: Int, out: java.io.File) {
+        val src = android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+            ?: throw IllegalStateException("snapshot JPEG decode failed")
+        val rotated = if (rotationDeg % 360 != 0) {
+            val m = android.graphics.Matrix().apply { postRotate(rotationDeg.toFloat()) }
+            val r = android.graphics.Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, false)
+            if (r !== src) src.recycle()
+            r
+        } else src
+        try {
+            java.io.FileOutputStream(out).use {
+                rotated.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, it)
+            }
+        } finally {
+            rotated.recycle()
+        }
+        try {
+            val exif = androidx.exifinterface.media.ExifInterface(out.absolutePath)
+            exif.setAttribute(
+                androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL.toString(),
+            )
+            exif.saveAttributes()
+        } catch (e: Exception) {
+            Log.w(TAG, "snapshot EXIF stamp failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Ref-counted gate over the firmware camera privacy LED
+     * (`vendor.rkd.camera.led.enable`). ANY capture path can request a SILENT
+     * (no-LED) open by bracketing it with [acquireSilent] / [releaseSilent];
+     * the LED is disabled at the source while >= 1 silent holder exists and
+     * restored when the last holder releases. Ref-counting prevents one capture
+     * from re-enabling the LED while another silent capture is still in flight.
+     * Used by ReID today; available to photo/video for a silent capture too.
+     */
+    private val cameraLedGate = object {
+        private val silentHolders = java.util.concurrent.atomic.AtomicInteger(0)
+        fun acquireSilent() {
+            if (silentHolders.getAndIncrement() == 0) {
+                LedController.setCameraLedEnabled(false)
+            }
+        }
+        fun releaseSilent() {
+            if (silentHolders.updateAndGet { if (it > 0) it - 1 else 0 } == 0) {
+                LedController.setCameraLedEnabled(true)
+            }
+        }
     }
 
     override fun onCreate() {
@@ -233,11 +372,44 @@ class CaptureService : Service() {
         }
 
         FileNamer.ensureRoot()
-        lowLight = LowLightCapturer(this)
-        photo = PhotoCapturer(this, lowLight = lowLight)
-        rawStill = RawStillCapturer(this)
-        video = VideoRecorder(this)
+        cameraSession = CameraSession(this).apply {
+            emitter = object : CameraSession.FrameEmitter {
+                override fun onCameraError(msg: String) {
+                    broadcast { it.onCaptureError(ERR_CAMERA, msg) }
+                }
+            }
+            stateListener = object : CameraSession.StateListener {
+                override fun onRecordingOutputChanged(active: Boolean) {
+                    // Camera LED reflects video recording only. A frame stream
+                    // (ReID or any other subscriber) keeps the LED off.
+                    try {
+                        if (active) {
+                            LedController.assertCameraOpenEvent()
+                            LedController.turnOnWhite()
+                        } else {
+                            LedController.cancelCameraOpenEvent()
+                            LedController.turnOffWhite()
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+        lowLight = LowLightCapturer(this, cameraSession)
+        photo = PhotoCapturer(this, cameraSession, lowLight = lowLight)
+        // onResumedPhotoProcessed: a photo recovered from a leftover RAW sidecar
+        // (e.g. after an OOM kill mid-queue) has had its gray preview overwritten
+        // with the full-res color JPEG. Re-notify filesync so the phone -- which
+        // holds the gray preview -- pulls the corrected image (upsert on relPath
+        // refreshes sha+size).
+        rawStill = RawStillCapturer(this, cameraSession, onResumedPhotoProcessed = { file ->
+            notifyPhotoSync(file)
+        })
+        video = VideoRecorder(this, cameraSession)
         notifier = SyncNotifier(this)
+
+        // Crash-resume: pick up any RAW sidecars a previous run left unprocessed
+        // (the failure that produced gray photos) and finish them off-camera.
+        try { rawStill.resumePending() } catch (e: Exception) { Log.w(TAG, "resumePending failed: ${e.message}") }
 
         Log.i(TAG, "CaptureService started, root=${FileNamer.rootDir.absolutePath} onCreateMs=${android.os.SystemClock.elapsedRealtime() - tOnCreate}")
     }
@@ -259,6 +431,39 @@ class CaptureService : Service() {
             runCatching {
                 resultFile.writeText("""{"id":"$id","status":"pending"}""")
             }.onFailure { Log.w(TAG, "adb pending write failed: ${it.message}") }
+
+            if (video.isRecording()) {
+                // RECORDING: same snapshot-while-recording branch as the AIDL
+                // takePhoto. Grab a video-grade still, write the adb result JSON.
+                cameraSession.captureVideoSnapshot(
+                    onJpeg = { jpeg, _, _, rotationDeg ->
+                        workerPool.execute {
+                            val ms = android.os.SystemClock.elapsedRealtime() - tStart
+                            try {
+                                val out = FileNamer.photoFile()
+                                writeUprightJpeg(jpeg, rotationDeg, out)
+                                runCatching {
+                                    resultFile.writeText("""{"id":"$id","status":"ok","ok":true,"path":"${out.absolutePath}","bytes":${out.length()},"source":"snapshot","durationMs":$ms}""")
+                                }
+                                try { LedController.pulseWhite() } catch (_: Exception) {}
+                                broadcast { it.onPhotoTaken(out.absolutePath, out.length()) }
+                                notifyPhotoSync(out)
+                                Log.i(TAG, "ADB takePhoto snapshot id=$id path=${out.absolutePath} durMs=$ms")
+                            } catch (e: Throwable) {
+                                val msg = (e.message ?: "unknown").replace("\"", "'").take(300)
+                                runCatching { resultFile.writeText("""{"id":"$id","status":"error","ok":false,"durationMs":$ms,"error":"$msg"}""") }
+                            }
+                        }
+                    },
+                    onError = { err ->
+                        val ms = android.os.SystemClock.elapsedRealtime() - tStart
+                        val msg = (err.message ?: "unknown").replace("\"", "'").take(300)
+                        runCatching { resultFile.writeText("""{"id":"$id","status":"error","ok":false,"durationMs":$ms,"error":"$msg"}""") }
+                        Log.i(TAG, "ADB takePhoto snapshot err id=$id err=${err.message}")
+                    },
+                )
+                return START_NOT_STICKY
+            }
 
             var previewMs = 0L
             rawStill.takePhoto(
@@ -313,7 +518,8 @@ class CaptureService : Service() {
                         broadcast { it.onCaptureError(ERR_CAMERA, err?.message ?: "video start failed") }
                         return@start
                     }
-                    try { LedController.turnOnWhite() } catch (_: Exception) {}
+                    // LED is driven by CameraSession.StateListener when the
+                    // recorder surface becomes active.
                     broadcast { it.onVideoStarted(file.absolutePath) }
                 }
             }
@@ -324,7 +530,8 @@ class CaptureService : Service() {
             if (video.isRecording()) {
                 video.stop { file, durMs, bytes, err ->
                     Log.i(TAG, "ADB STOP_VIDEO callback err=${err?.message} file=${file?.absolutePath} durMs=$durMs bytes=$bytes")
-                    try { LedController.cancelCameraOpenEvent(); LedController.turnOffWhite() } catch (_: Exception) {}
+                    // LED is driven off by CameraSession.StateListener when the
+                    // recorder surface is removed (video.stop -> clearRecorderSurface).
                     if (err != null) broadcast { it.onCaptureError(ERR_CAMERA, err.message ?: "video stop failed") }
                     if (file != null) broadcast { it.onVideoStopped(file.absolutePath, durMs, bytes) }
                 }
@@ -383,6 +590,9 @@ class CaptureService : Service() {
         try { rawStill.shutdown() } catch (_: Exception) {}
         try { video.shutdown() } catch (_: Exception) {}
         try { lowLight.close() } catch (_: Exception) {}
+        // Close the camera device LAST, after every capturer has released its
+        // surfaces / borrows, so the shared session shuts down with no holders.
+        try { cameraSession.shutdown() } catch (_: Exception) {}
         workerPool.shutdown()
         callbacks.kill()
         Log.i(TAG, "onDestroy exit durMs=${android.os.SystemClock.elapsedRealtime() - tDestroy}")

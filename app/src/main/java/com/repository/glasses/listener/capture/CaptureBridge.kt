@@ -41,6 +41,13 @@ class CaptureBridge(private val context: Context) {
          * from a clean stop.
          */
         fun onCaptureKilledDuringRecording(activePath: String?) {}
+        /**
+         * A ReID still arrived from the capture process (one per captureReidFrame call).
+         * Delivered on the binder thread; consumers must hand off heavy work to their own
+         * executor. The byte[] is owned by the AIDL transaction -- copy out anything retained
+         * past this call. rotationDeg is 0 (the capture side bakes rotation into the pixels).
+         */
+        fun onFrame(jpeg: ByteArray, width: Int, height: Int, rotationDeg: Int, frameId: Long) {}
     }
 
     /**
@@ -100,6 +107,9 @@ class CaptureBridge(private val context: Context) {
         override fun onCaptureError(code: Int, msg: String) = GT.section("cap.cb.error") {
             logMsg("Capture: error code=$code $msg")
             listeners.forEach { it.onCaptureError(code, msg) }
+        }
+        override fun onFrame(jpeg: ByteArray, width: Int, height: Int, rotationDeg: Int, frameId: Long) = GT.section("cap.cb.frame") {
+            listeners.forEach { it.onFrame(jpeg, width, height, rotationDeg, frameId) }
         }
     }
 
@@ -238,6 +248,12 @@ class CaptureBridge(private val context: Context) {
     }
     fun stopVideo() = GT.section("cap.bridge.stop_video") {
         try { api?.stopVideo() } catch (e: Exception) { logMsg("Capture: stopVideo failed: ${e.message}") }
+    }
+    /** Trigger ONE exposed ReID still. The capture side delivers it via Listener.onFrame
+     *  (rotationDeg=0, rotation baked in) or reports failure via Listener.onCaptureError.
+     *  The caller (ReidController) drives this periodically and self-throttles. */
+    fun captureReidFrame() = GT.section("cap.bridge.capture_reid_frame") {
+        try { api?.captureReidFrame(callback) } catch (e: Exception) { logMsg("captureReidFrame failed: ${e.message}") }
     }
     fun isRecording(): Boolean = try { api?.isRecording ?: false } catch (_: Exception) { false }
     fun isPaused(): Boolean = try { api?.isPaused ?: false } catch (_: Exception) { false }

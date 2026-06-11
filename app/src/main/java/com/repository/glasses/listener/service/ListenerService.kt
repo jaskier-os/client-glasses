@@ -522,9 +522,6 @@ class ListenerService : LifecycleService(),
     // LISTENING / IDLE events are emitted on real transitions when the phone actually needs to
     // know. Keeping any periodic heartbeat would defeat the whole idle teardown.
     private var reidController: ReidController? = null
-    // Tracks whether ReID has the camera-LED gate held down, so stopReidWithLed
-    // restores vendor.rkd.camera.led.enable=1 exactly once per start.
-    private var reidLedDisabled = false
 
     // Map overlay (persistent minimap when pinned)
     private var mapOverlayView: ImageView? = null
@@ -1726,7 +1723,7 @@ class ListenerService : LifecycleService(),
                 val face = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }!!
                 val box = face.boundingBox
 
-                // Crop with 100% padding (matches ReidCameraCapturer.cropAndCompressJpeg)
+                // Crop with 100% padding (matches ReidFrameConsumer.cropAndCompressJpeg)
                 val padX = (box.width() * 1.0f).toInt()
                 val padY = (box.height() * 1.0f).toInt()
                 val cropRect = Rect(
@@ -2469,6 +2466,7 @@ class ListenerService : LifecycleService(),
 
         reidController = ReidController().apply {
             remoteLog = { btLog(it) }
+            captureBridge = if (this@ListenerService::captureBridge.isInitialized) this@ListenerService.captureBridge else null
             onActiveSessionEnter = { setBtSession("reid_streaming") }
             onActiveSessionExit = { clearBtSession("reid_streaming") }
             btSender = object : ReidController.BtSender {
@@ -3809,13 +3807,20 @@ class ListenerService : LifecycleService(),
      * Aggressively free memory in the listener process right before capture starts a recording.
      * Goal: drop listener's RSS so capture isn't the highest-RSS user when lmkd activates --
      * lmkd targets by oom_score_adj * size, and a foreground priv-app at 100 MB beats a
-     * recording priv-app at 200 MB. Frees: ReID camera+detector if running, requests GC.
+     * recording priv-app at 200 MB. Requests GC only -- ReID stays running since it now shares
+     * the capture-owned camera over AIDL.
      * Conservative: does NOT touch active TTS playback, BT, or chat history.
      */
     private fun flushMemoryForCapture() {
         val rt = Runtime.getRuntime()
         val before = (rt.totalMemory() - rt.freeMemory()) / 1024
-        try { stopReidWithLed("flushForCap") } catch (e: Throwable) { btErr("flushForCap: reid.stop threw: ${e.message}") }
+        // ReID is no longer stopped here: video and ReID now share the single capture-owned
+        // camera (frames arrive over AIDL), so starting a recording must not tear ReID down.
+        // Coexistence is memory-safe: ReidFrameConsumer is strictly single-in-flight (the
+        // processingFrame guard admits one frame at a time, recycled in its finally), so ReID's
+        // live footprint is at most ONE decoded frame bitmap (~5MB at 1280x960 ARGB_8888, plus a
+        // transient rotated copy) on top of the once-loaded ML Kit graph -- a <20MB delta that the
+        // video encoder comfortably tolerates on this 1.7GB device. No frames are buffered.
         // Hint two passes: first runs finalizers, second collects them.
         try { System.gc(); System.runFinalization(); System.gc() } catch (_: Throwable) {}
         val after = (rt.totalMemory() - rt.freeMemory()) / 1024
@@ -3847,6 +3852,19 @@ class ListenerService : LifecycleService(),
     private val captureFeedbackListener = object : com.repository.glasses.listener.capture.CaptureBridge.Listener {
         override fun onPhotoTaken(absPath: String, sizeBytes: Long) {
             photoPreviewOverlay?.show(absPath)
+            // ONE-SHOT ReID on the photo frame, independent of whether ReID mode is on:
+            // every func-button photo also drives a single identify attempt. The photo file
+            // is stored upright (pixels rotated, EXIF NORMAL), so rotationDeg=0 -- the same
+            // orientation the live ReID frames are delivered in. Runs off the binder thread
+            // (decode + ML Kit) and does NOT start ReID mode, the periodic loop, or the LED.
+            photoCallbackExecutor.execute {
+                try {
+                    val bytes = java.io.File(absPath).readBytes()
+                    reidController?.detectPhotoOneShot(bytes, 0)
+                } catch (t: Throwable) {
+                    btErr("photo one-shot reid failed: ${t.message}")
+                }
+            }
             // Drain one waiter (FIFO) -- BT command flows that asked for
             // bytes get the file path here. FN button doesn't enqueue, so
             // the queue is empty for those and this is a no-op.
@@ -7655,7 +7673,7 @@ class ListenerService : LifecycleService(),
         // the UI/LED state can drift. Tear ReID down so the STOPPED status
         // broadcast flips the icon back to play and the LED gate restores.
         if (!connected && reidController?.isRunning == true) {
-            stopReidWithLed("orchestrator_disconnected")
+            stopReid("orchestrator_disconnected")
         }
     }
 
@@ -8390,29 +8408,17 @@ class ListenerService : LifecycleService(),
         }
     }
 
-    // ReID start/stop wrappers that gate the camera LED via the rooted-build
-    // property vendor.rkd.camera.led.enable. cameraserver reads this on every
-    // camera open and skips queuing the CAMERA_OPEN(2014) lights_ctrl event
-    // when it's "0", so the white LED never lights for the streaming session.
-    // Idempotent: setCameraLedEnabled is only called when the gate state
-    // actually changes, so back-to-back starts or duplicate stops don't thrash
-    // the property and we never restore "1" without a matching "0".
-    private fun startReidWithLed() {
-        if (!reidLedDisabled) {
-            setCameraLedEnabled(false)
-            reidLedDisabled = true
-        }
+    // ReID start/stop wrappers. The listener no longer owns the camera (frames are streamed
+    // from the capture process over AIDL), so there is no camera LED to gate here -- the capture
+    // process owns the privacy light for its own camera session.
+    private fun startReid() {
         reidController?.start(this@ListenerService)
     }
 
-    private fun stopReidWithLed(reason: String) {
+    private fun stopReid(reason: String) {
         val wasRunning = reidController?.isRunning == true
         if (wasRunning) btLog("Reid stop: reason=$reason")
         reidController?.stop()
-        if (reidLedDisabled) {
-            setCameraLedEnabled(true)
-            reidLedDisabled = false
-        }
     }
 
     private val reidStartReceiver = object : BroadcastReceiver() {
@@ -8425,21 +8431,21 @@ class ListenerService : LifecycleService(),
                 sendBroadcast(Intent(ACTION_REQUEST_CAMERA_PERMISSION).apply { setPackage(packageName) })
                 return
             }
-            startReidWithLed()
+            startReid()
         }
     }
 
     private val cameraPermGrantedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             btLog("Camera permission granted, starting reid")
-            startReidWithLed()
+            startReid()
         }
     }
 
     private val reidStopReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             btLog("Reid stop requested by activity")
-            stopReidWithLed("user")
+            stopReid("user")
         }
     }
 
@@ -8675,7 +8681,7 @@ class ListenerService : LifecycleService(),
         try { unregisterReceiver(notificationTestReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(batteryLedReceiver) } catch (_: Exception) {}
         try { batteryLedArmer?.stop() } catch (_: Exception) {}
-        stopReidWithLed("onDestroy")
+        stopReid("onDestroy")
         stopPcAudioListener()
         disconnectPhoneAudio()
         // Unregister audio-pipeline receivers (wake-word hit, audio-archive sync,

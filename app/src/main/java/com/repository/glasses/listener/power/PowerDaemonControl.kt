@@ -36,8 +36,17 @@ object PowerDaemonControl {
             // Ensure parent dir exists. On a fresh reflash the daemon may
             // not have run yet to create /data/local/diy-overlay/, and the
             // app must not silently lose the first config write.
-            File(CONF_PATH).parentFile?.mkdirs()
-            File(CONF_PATH).writeText(body)
+            val conf = File(CONF_PATH)
+            conf.parentFile?.mkdirs()
+            // Unlink any existing file before recreating. writeText() opens with
+            // O_TRUNC, which fails with EACCES when the existing conf is owned by
+            // a STALE app UID (the listener's UID changes across reinstalls, e.g.
+            // u0_a18 -> u0_a28, and the old file is mode 0600). The diy-overlay
+            // dir is 0777, so we can always unlink + recreate even when we can't
+            // truncate-in-place. Without this, the first post-reinstall config
+            // push silently fails and the daemon keeps its stale defaults.
+            conf.delete()
+            conf.writeText(body)
             Log.i(TAG, "wrote $CONF_PATH ($screenTimeoutSec s, $powerTimeoutMin min)")
         } catch (e: Exception) {
             Log.w(TAG, "failed to write $CONF_PATH: ${e.message}")

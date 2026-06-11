@@ -647,6 +647,10 @@ class MainActivity : AppCompatActivity() {
     // Tracks the last-applied sub-tab-circle visibility so we only fire the
     // fade-in/out (and the snap-to-rest on appear) on an actual transition.
     private var subtabCapsuleShown: Boolean = false
+    // Tracks the last-applied bottom-bar circle visibility so the fade only
+    // fires on an actual focus transition (updateFocusVisual runs on every
+    // scroll/key event). The pill starts visible in the initial TAB_NAV state.
+    private var pillHighlightShown: Boolean = true
     private var todoEmptyText: TextView? = null
     private var todoHasError: Boolean = false
     private var todoMessageOverlay: FrameLayout? = null
@@ -4457,6 +4461,17 @@ class MainActivity : AppCompatActivity() {
         // Cancel previous animation
         focusBorderAnimator?.cancel()
 
+        // The bottom-bar selection circle is the focus cursor for the tab row,
+        // so it is only ever visible in TAB_NAV. The moment focus drills into
+        // any tab's content it fades out (mirroring how the TODO sub-tab capsule
+        // fades when the sub-tab row stops being the active nav target). Guarded
+        // so the fade fires once per transition, not on every scroll/key event.
+        val pillShouldShow = state == FocusState.TAB_NAV
+        if (pillShouldShow != pillHighlightShown) {
+            pillHighlightShown = pillShouldShow
+            if (pillShouldShow) fadeInHighlight(pillHighlight) else fadeOutHighlight(pillHighlight)
+        }
+
         // Reset previous focused view to default thin stroke
         val prevView = previousFocusedView
         if (prevView != null) {
@@ -6354,15 +6369,14 @@ class MainActivity : AppCompatActivity() {
         // "Sub-tabs selected" == the sub-tab row is the active nav target.
         val subtabsActive = todoFocusLevel == 0 && focusState == FocusState.TODO_FOCUSED
 
-        // The sub-tab highlight circle is the focus cursor for this row, so it
-        // appears exactly when the main bottom-bar circle is hidden, and vice
-        // versa -- only one circle is ever the active cursor. Both cross-fade
-        // on the transition instead of hard-cutting.
+        // The sub-tab highlight circle is the focus cursor for this row: it
+        // appears exactly when the sub-tab row is the active nav target and
+        // fades out otherwise. The bottom-bar circle is handled centrally in
+        // updateFocusVisual (visible only in TAB_NAV), so this path owns only
+        // its own capsule.
         if (subtabsActive != subtabCapsuleShown) {
             subtabCapsuleShown = subtabsActive
             if (subtabsActive) {
-                // Main bar circle out, sub-tab circle in.
-                fadeOutHighlight(pillHighlight)
                 todoSubTabCapsule?.let { cap ->
                     // Re-seat the capsule under the active sub-tab BEFORE it
                     // becomes visible, and clear motion state, so its first
@@ -6372,9 +6386,7 @@ class MainActivity : AppCompatActivity() {
                     fadeInHighlight(cap)
                 }
             } else {
-                // Sub-tab circle out, main bar circle back in.
                 todoSubTabCapsule?.let { fadeOutHighlight(it) }
-                fadeInHighlight(pillHighlight)
             }
         }
 
