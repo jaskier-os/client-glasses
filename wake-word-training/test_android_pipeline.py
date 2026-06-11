@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
-ASSETS_DIR = Path("/media/varingait/Lobotomite/Repository/AI/clients/phone/app/src/main/assets")
+ASSETS_DIR = Path("/media/user/Lobotomite/Repository/AI/clients/phone/app/src/main/assets")
 
 CHUNK_SIZE = 512        # AudioRecorder chunk size on phone
 ACCUM_SIZE = 1280       # OWW accumulation target

@@ -169,4 +169,4 @@ The AssistServer's `changeAudioSceneIdGlobal(int)` method on IInstructServer int
 | IInstructServer.java | `.../jadx/sources/com/rokid/os/sprite/basic/server/IInstructServer.java` |
 | CXRServiceManager.java | `.../jadx/sources/com/rokid/sprite/bluetooth/manager/CXRServiceManager.java` |
 
-All under: `/media/varingait/Lobotomite/Repository/Recon/rokid-docs/yodaos/DECOMPILED-APPS/product/app/RokidSpriteAssistServer/`
+All under: `/media/user/Lobotomite/Repository/Recon/rokid-docs/yodaos/DECOMPILED-APPS/product/app/RokidSpriteAssistServer/`

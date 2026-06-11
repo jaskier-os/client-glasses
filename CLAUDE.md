@@ -151,7 +151,7 @@ the privapp-permissions, and applies runtime grants. Requires the glasses
 connected over USB (the script auto-detects them by `ro.product.model`).
 
 ```bash
-bash /media/varingait/Lobotomite/Repository/AI/clients/glasses/scripts/deploy-to-glasses.sh
+bash /media/user/Lobotomite/Repository/AI/clients/glasses/scripts/deploy-to-glasses.sh
 ```
 
 ## ADB via USB Cable
@@ -176,7 +176,7 @@ When glasses are connected via USB cable, direct ADB access is available (`adb d
 
 ```bash
 # Build + direct install (keeps app data)
-/media/varingait/Lobotomite/Repository/AI/clients/glasses/gradlew -p /media/varingait/Lobotomite/Repository/AI/clients/glasses assembleDebug && adb install -r /media/varingait/Lobotomite/Repository/AI/clients/glasses/app/build/outputs/apk/debug/app-debug.apk
+/media/user/Lobotomite/Repository/AI/clients/glasses/gradlew -p /media/user/Lobotomite/Repository/AI/clients/glasses assembleDebug && adb install -r /media/user/Lobotomite/Repository/AI/clients/glasses/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ### ADB Logcat (USB cable)
@@ -482,10 +482,10 @@ Counters emitted: `bt.tx_bytes`, `bt.rx_bytes`, `bt.chunk_bytes`, `tts.queue.dep
 
 ### Capturing and viewing traces
 
-The capture + analysis pipeline lives outside this repo at `/media/varingait/Lobotomite/Repository/glasses-profiling/`. One-shot capture + HTML report:
+The capture + analysis pipeline lives outside this repo at `/media/user/Lobotomite/Repository/glasses-profiling/`. One-shot capture + HTML report:
 
 ```bash
-bash /media/varingait/Lobotomite/Repository/glasses-profiling/scripts/profile_once.sh iter-name 30
+bash /media/user/Lobotomite/Repository/glasses-profiling/scripts/profile_once.sh iter-name 30
 ```
 
 Outputs `reports/<ts>_iter-name.html`. The **App Traces** tab shows a Gantt timeline (rows per subsystem, segments per slice), a slice rate chart, and a filterable top-slices table. `grep -n 'GT\.' app/src/main/java/...` to find existing trace points when adding new ones.
@@ -541,10 +541,10 @@ The orchestrator live-AI WS drivers that feed this end-to-end are in
 
 ```bash
 # Native build only
-/media/varingait/Lobotomite/Repository/AI/clients/glasses/gradlew -p /media/varingait/Lobotomite/Repository/AI/clients/glasses assembleDebug
+/media/user/Lobotomite/Repository/AI/clients/glasses/gradlew -p /media/user/Lobotomite/Repository/AI/clients/glasses assembleDebug
 
 # Clean
-/media/varingait/Lobotomite/Repository/AI/clients/glasses/gradlew -p /media/varingait/Lobotomite/Repository/AI/clients/glasses clean
+/media/user/Lobotomite/Repository/AI/clients/glasses/gradlew -p /media/user/Lobotomite/Repository/AI/clients/glasses clean
 ```
 
 ## Dependencies

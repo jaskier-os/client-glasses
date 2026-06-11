@@ -484,7 +484,7 @@ def main():
     shutil.copy2(str(best["model_path"]), str(final_path))
     log.info(f"Saved to {final_path}")
 
-    phone_assets = Path("/media/varingait/Lobotomite/Repository/AI/clients/phone/app/src/main/assets")
+    phone_assets = Path("/media/user/Lobotomite/Repository/AI/clients/phone/app/src/main/assets")
     if phone_assets.exists():
         shutil.copy2(str(final_path), str(phone_assets / "sireneviy.onnx"))
         log.info(f"Copied to phone assets")

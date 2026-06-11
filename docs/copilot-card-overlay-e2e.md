@@ -35,7 +35,7 @@ requires installing the `.test` APK on the glasses.
    installed via the **priv-app overlay slot**. Deploy it ONLY via:
 
    ```bash
-   bash /media/varingait/Lobotomite/Repository/Recon/scripts/deploy-to-glasses.sh
+   bash /media/user/Lobotomite/Repository/Recon/scripts/deploy-to-glasses.sh
    ```
 
    NEVER `adb install` / `adb install -r` / `pm install` the app APK -- that

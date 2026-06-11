@@ -16,7 +16,7 @@
 // Deploy: adb push build/acd-probe /data/local/tmp/ && adb shell chmod
 //   +x /data/local/tmp/acd-probe && adb shell /data/local/tmp/acd-probe
 //
-// Task 3 of /home/varingait/.claude/plans/you-are-an-orchestrator-temporal-lightning.md
+// Task 3 of /home/user/.claude/plans/you-are-an-orchestrator-temporal-lightning.md
 // (Option 3 / Gate 4 — DSP-side VAD via PAL ACD).
 
 #include "pal/PalDefs.h"

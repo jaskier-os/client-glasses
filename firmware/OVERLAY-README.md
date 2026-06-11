@@ -110,7 +110,7 @@ Prerequisites (see the checklist at the top of `root-firmware.sh`). All
 paths are overridable via env vars.
 
 ```bash
-cd /media/varingait/Lobotomite/Repository/Recon/rokid-docs/yodaos-root-full
+cd /media/user/Lobotomite/Repository/Recon/rokid-docs/yodaos-root-full
 
 # 1. Build the hook library.
 bash sinkconn-hook/build.sh

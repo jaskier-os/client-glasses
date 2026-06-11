@@ -68,7 +68,7 @@ readonly PSOC_SYSFS="/sys/devices/platform/soc/a90000.i2c/i2c-1/1-0008"
 
 # Phase-3 source paths (can be overridden via env).
 PHASE3_HAL="${PHASE3_HAL:-$GLASSES_CLIENT/sthal/build/sound_trigger.primary.neo.so}"
-QNN_SDK_ROOT="${QNN_SDK_ROOT:-/home/varingait/qairt/2.45.0.260326}"
+QNN_SDK_ROOT="${QNN_SDK_ROOT:-/home/user/qairt/2.45.0.260326}"
 PHASE3_LIB_QNNHTP="$QNN_SDK_ROOT/lib/aarch64-android/libQnnHtp.so"
 PHASE3_LIB_QNNSYSTEM="$QNN_SDK_ROOT/lib/aarch64-android/libQnnSystem.so"
 PHASE3_LIB_QNNHTPV73STUB="$QNN_SDK_ROOT/lib/aarch64-android/libQnnHtpV73Stub.so"

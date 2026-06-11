@@ -64,3 +64,6 @@ nightvision_dataset/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Internal planning docs (not for public mirror)
+docs/plans/

@@ -18,12 +18,10 @@
 #
 # Env overrides: GLASSES_SERIAL, ADB_WIFI_PORT (default 5555), WAIT_IP_S (default 15).
 #
-# Known network for the lab/home glasses (the device does NOT reliably auto-join
-# saved networks -- pass these explicitly if `cmd wifi list-scan-results` is empty
-# or wlan0 never gets an IP):
-#   SSID: 5G-Vaccination-SlimyBirb   PSK: SlimyBirb
-#   i.e.  enable-glasses-wifi-adb.sh "5G-Vaccination-SlimyBirb" "SlimyBirb"
-# Glasses typically land at 192.168.0.100:5555 on this network.
+# The device does NOT reliably auto-join saved networks -- pass the SSID and PSK
+# explicitly if `cmd wifi list-scan-results` is empty or wlan0 never gets an IP:
+#   enable-glasses-wifi-adb.sh "<YOUR_SSID>" "<YOUR_WIFI_PASSWORD>"
+# The glasses then land at <their DHCP IP>:5555 on that network.
 set -euo pipefail
 
 SERIAL="${GLASSES_SERIAL:-}"
