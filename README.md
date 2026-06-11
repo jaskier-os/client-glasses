@@ -99,14 +99,11 @@ These are the subprojects listed in `settings.gradle.kts`.
 
 ### Native audio libraries (C/C++ source compiled into `app`)
 
-- **`WebRTC_AECM/`** -- The mobile WebRTC AECM acoustic-echo-cancellation port
-  actually used by the listener's audio pipeline (driven from
-  `audio/WebRtcAecm.kt` via JNI).
-- **`KOTI_AEC/`** -- A reference AEC variant built on the WebRTC aec/aecm modules
-  plus Speex 1.0/1.2. It is a research/reference implementation; the live path is
-  `WebRTC_AECM/`.
 - **`external/`** -- Vendored third-party dependencies for the audio modules
-  (currently just `speexdsp`).
+  (currently just `speexdsp`). The glasses rely on native on-device echo
+  cancellation; the WebRTC AECM sources compiled into `app` (`app/src/main/cpp/aecm_lib/`,
+  driven from `audio/WebRtcAecm.kt`) are kept as disabled bring-up
+  infrastructure.
 
 ### Other components (HAL, assets, tooling)
 

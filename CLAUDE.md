@@ -73,9 +73,7 @@ Top-level Gradle subprojects + bundled native libraries living in this directory
 | `touchpad-daemon/` | native arm64 C binary (`/system/bin/rokid-touchpad-daemon`) + patched `psoc_ts_drv_right.ko` | Grabs `/dev/input/event1` from the PSoC touchpad and emits filtered/scaled `KEY_KP*` events on a uinput device. Also defers `KEY_PROG1` to suppress accidental Rokid AI triggers. See "Touchpad Daemon + App-Side Scroll". |
 | `touchpad-test-app/` | standalone APK | Diagnostic harness for the touchpad daemon -- visualizes incoming key events. Not deployed in production. |
 | `led-cam-test/` | standalone APK | Diagnostic harness for the LED ring + camera HAL. Not deployed in production. |
-| `KOTI_AEC/` | C/C++ source | Korean-style AEC variant (WebRTC + Speex 1.0/1.2). Reference implementation; the live AEC path is `WebRTC_AECM/`. |
-| `WebRTC_AECM/` | C/C++ source + JNI | The actual mobile-AECM port used by the listener's audio pipeline (`audio/WebRtcAecm.kt`). |
-| `external/` | vendored deps | Currently just `speexdsp` (used by the AEC/AECM modules). |
+| `external/` | vendored deps | Currently just `speexdsp`. |
 | `nightvision-asset/` | binary asset + deploy script | `nightvision_unet.onnx` ONNX model for the Night Vision tab, plus `deploy-nightvision-asset.sh` to push it to the glasses. |
 | `raw_data/` | captured PCM | Sample microphone recordings used by AEC bring-up tests. |
 | `test/` | Python pytest harness | E2E tests, `adb/` helpers, `fn-button-daemon.sh`. |
