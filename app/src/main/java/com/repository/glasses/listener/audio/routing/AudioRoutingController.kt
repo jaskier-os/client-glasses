@@ -42,11 +42,9 @@ class AudioRoutingController(
     private val ctx: Context,
     private val mediaMonitor: MediaSessionMonitor,
     private val log: (String) -> Unit = {},
-) : WearSensor.Listener {
+) {
 
     companion object {
-        const val DEBUG_ACTION_WEAR = "com.repository.glasses.listener.DEBUG_WEAR"
-        const val DEBUG_EXTRA_WEARING = "wearing"
         const val DEBUG_ACTION_DISCOVERABLE = "com.repository.glasses.listener.DEBUG_DISCOVERABLE"
         const val DEBUG_EXTRA_DURATION = "duration_s"
 
@@ -58,7 +56,6 @@ class AudioRoutingController(
         private const val WATCHDOG_MAX_RECOVERIES = 3
     }
 
-    private val wearSensor = WearSensor(ctx = ctx, log = log)
     private val a2dp = A2dpSinkController(ctx, log)
     private val audioMgr = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val stillness = StillnessSensor(ctx, log)
@@ -69,13 +66,6 @@ class AudioRoutingController(
      * the boot-time poll always passes the dedup, regardless of value.
      */
     @Volatile private var foldedRef: Boolean? = null
-
-    /**
-     * Most recent raw wear signal from the sensor. Cached so fold/stillness
-     * change events can re-evaluate the off-head condition without waiting
-     * for another wear broadcast.
-     */
-    @Volatile private var lastWearingSignal: Boolean? = null
 
     /**
      * True while the system audio mode is non-NORMAL (MODE_IN_CALL,
@@ -115,16 +105,8 @@ class AudioRoutingController(
 
     private fun resumeFromCall() {
         log("resumeFromCall: re-evaluating fold after call end")
-        // WEAR-DECOUPLED 2026-05-08: A2DP no longer keys off wear; resume
-        // based on fold state alone. If unfolded, glasses are on the user
+        // Resume based on fold state alone. If unfolded, glasses are on the user
         // (or about to be); reconnect. If folded, stay off.
-        // val w = lastWearingSignal
-        // if (w == true) {
-        //     val myGen = transitionGeneration.incrementAndGet()
-        //     workHandler?.post { transitionOn(myGen) }
-        // } else {
-        //     reevaluateOffHead("call-end")
-        // }
         if (foldedRef != true) {
             val myGen = transitionGeneration.incrementAndGet()
             workHandler?.post { transitionOn(myGen) }
@@ -149,27 +131,10 @@ class AudioRoutingController(
 
     @Volatile private var running: Boolean = false
 
-    /**
-     * Optional downstream hook. Fires synchronously from onWearChanged whenever the
-     * raw wear bit flips, BEFORE A2DP transitions run. Used by ListenerService to
-     * (a) re-evaluate its duck state and (b) relay wear state to the phone so the
-     * phone can suppress its own pre-duck when glasses are off.
-     */
-    @Volatile var onWearChangedRaw: ((worn: Boolean) -> Unit)? = null
-
     // Watchdog state: timestamps + counters tied to the active connect-session.
     @Volatile private var onHeadSinceMs: Long = 0L
     @Volatile private var lastMusicActiveMs: Long = 0L
     @Volatile private var watchdogRecoveries: Int = 0
-
-    private val debugWearReceiver = object : BroadcastReceiver() {
-        override fun onReceive(c: Context, i: Intent) {
-            val wearing = i.getBooleanExtra(DEBUG_EXTRA_WEARING, false)
-            log("DEBUG inject wearing=$wearing")
-            wearSensor.setLastStable(wearing)
-            onWearChanged(wearing)
-        }
-    }
 
     private val debugDiscoverableReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
@@ -327,11 +292,6 @@ class AudioRoutingController(
             }
         }
         a2dp.addWatcher(reactiveWatcher)
-        // running MUST be set before wearSensor.start() -- the sensor fires the initial
-        // is_take_on callback synchronously during start(), and onWearChanged() drops it
-        // if running=false. Otherwise the initial OFF_HEAD state is lost and the
-        // controller sits in WearState.UNKNOWN forever, so music keeps streaming to
-        // glasses that aren't being worn.
         running = true
         try {
             audioMgr.addOnModeChangedListener(
@@ -356,15 +316,6 @@ class AudioRoutingController(
             }
         }
         stillness.start()
-        wearSensor.start(this)
-        try {
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                Context.RECEIVER_EXPORTED else 0
-            ctx.registerReceiver(debugWearReceiver, IntentFilter(DEBUG_ACTION_WEAR), flags)
-            log("debugWearReceiver registered action=$DEBUG_ACTION_WEAR")
-        } catch (e: Exception) {
-            log("debugWearReceiver register failed: ${e.message}")
-        }
         try {
             val flags2 = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                 Context.RECEIVER_EXPORTED else 0
@@ -411,80 +362,18 @@ class AudioRoutingController(
 
     fun stop() {
         running = false
-        try { ctx.unregisterReceiver(debugWearReceiver) } catch (_: Exception) {}
         try { ctx.unregisterReceiver(debugDiscoverableReceiver) } catch (_: Exception) {}
         try { ctx.unregisterReceiver(btStateReceiver) } catch (_: Exception) {}
         try { a2dp.removeWatcher(reactiveWatcher) } catch (_: Throwable) {}
         try { audioMgr.removeOnModeChangedListener(modeChangedListener) } catch (_: Throwable) {}
         stillness.stop()
         stillness.listener = null
-        wearSensor.stop()
         a2dp.release()
         workHandler?.removeCallbacksAndMessages(null)
         workThread?.quitSafely()
         workThread = null
         workHandler = null
         log("AudioRoutingController stopped")
-    }
-
-    override fun onWearChanged(wearing: Boolean) {
-        if (!running) {
-            log("onWearChanged dropped: not running")
-            return
-        }
-        val current = stateRef.get()
-        log("onWearChanged wearing=$wearing current=$current")
-        try { onWearChangedRaw?.invoke(wearing) } catch (t: Throwable) {
-            log("onWearChangedRaw hook threw: ${t.message}")
-        }
-        lastWearingSignal = wearing
-        if (inCallSuspend) {
-            // Track the wear bit but don't drive A2DP -- transitionOn would
-            // bail anyway, and disconnectForCall already dropped any sink.
-            // resumeFromCall() will replay the latest wear signal.
-            log("onWearChanged($wearing) deferred: inCallSuspend; lastWearingSignal cached")
-            return
-        }
-        // Boot-time UNKNOWN short-circuit. Only the OFF_HEAD branch is safe to skip:
-        // there is nothing to do when nothing is connected. The ON_HEAD branch must
-        // NOT short-circuit -- transitionOn() is the only path that runs the
-        // post-ON setActive sweep and forceNormalAudioMode(), so skipping it leaves
-        // audio routed to the phone speaker even though the sink is connected.
-        // WEAR-DECOUPLED 2026-05-08: wear=false must NOT flip stateRef to OFF_HEAD;
-        // fold drives that decision now. A noisy wear blip at boot used to commit
-        // OFF_HEAD here, then the reactive watcher would tear down any incoming sink.
-        // if (current == WearState.UNKNOWN) {
-        //     if (!wearing && a2dp.allDisconnected()) {
-        //         stateRef.set(WearState.OFF_HEAD)
-        //         log("UNKNOWN->OFF_HEAD skipped transition: all disconnected")
-        //         return
-        //     }
-        // }
-        workHandler ?: run {
-            log("onWearChanged dropped; worker not started")
-            return
-        }
-        // WEAR-DECOUPLED 2026-05-08: wear no longer drives A2DP transitions.
-        // The capacitive PSoC sensor proved too noisy (false-zero blips while
-        // worn). Fold state alone now gates A2DP; see setFolded(). The raw
-        // hook (onWearChangedRaw) above still fires for non-A2DP consumers
-        // (ListenerService duck/phone relay).
-        // if (wearing) {
-        //     // ON path is unconditional: a single wear=true is the strongest
-        //     // signal we have and we want audio on the glasses immediately.
-        //     val myGen = transitionGeneration.incrementAndGet()
-        //     if (current == WearState.TRANSITIONING_ON || current == WearState.TRANSITIONING_OFF) {
-        //         log("supersede in-flight transition (was $current); gen=$myGen")
-        //     }
-        //     h.post { transitionOn(myGen) }
-        //     return
-        // }
-        // // OFF path is gated. The wear sensor is noisy (capacitive PSoC under a
-        // // sweat-dampened temple regularly drops to 0 for a beat while worn).
-        // // Only commit OFF_HEAD when ALL THREE conditions hold: wear=0, legs
-        // // folded, IMU still. Otherwise stay where we are; fold and stillness
-        // // changes will re-trigger this evaluation as conditions accrue.
-        // reevaluateOffHead("wear")
     }
 
     /**
@@ -517,25 +406,16 @@ class AudioRoutingController(
     }
 
     /**
-     * Commit an OFF_HEAD transition if we are confident the glasses are not
-     * being worn. Two independent triggers qualify:
-     *   1. Folded legs -- 100% guarantee they're off the user's face.
-     *   2. wear=0 AND IMU still -- glasses sitting unfolded on a surface.
-     * Idempotent: no-op when already OFF_HEAD. Called from onWearChanged
-     * (wear=0), setFolded(true), and StillnessSensor.onStillnessChanged(true).
+     * Commit an OFF_HEAD transition when the legs are folded -- a 100% guarantee
+     * the glasses are off the user's face. Idempotent: no-op when already
+     * OFF_HEAD. Called from setFolded(true).
      */
     private fun reevaluateOffHead(reason: String) {
         if (!running) return
         val cur = stateRef.get()
         if (cur == WearState.OFF_HEAD || cur == WearState.TRANSITIONING_OFF) return
-        // WEAR-DECOUPLED 2026-05-08: fold is the sole off-head signal now.
-        // Wear/stillness reads kept (commented) for revival visibility.
-        // val wearing = lastWearingSignal
-        // val still = stillness.isStill()
         val folded = foldedRef == true
-        // val offHead = folded || (wearing == false && still)
-        val offHead = folded
-        if (!offHead) {
+        if (!folded) {
             log("reevaluateOffHead($reason): conditions unmet folded=$folded; staying $cur")
             return
         }
@@ -785,8 +665,8 @@ class AudioRoutingController(
  *      and transitionOff() falls through to stateRef.set(OFF_HEAD) -- the state never
  *      remains TRANSITIONING_*.
  *   3. BluetoothAdapter STATE_OFF/TURNING_OFF bumps the generation and drops the
- *      proxy, so any pending transition aborts cleanly; STATE_ON re-binds and lets
- *      WearSensor re-emit.
+ *      proxy, so any pending transition aborts cleanly; STATE_ON re-binds and
+ *      re-evaluates fold state.
  *   4. The watchdog handles the silent-sink case (bug 4/6A): if audio is never
  *      flowing despite a connected sink, it force-reconnects. Capped at 3 recoveries
  *      per session to prevent loops.

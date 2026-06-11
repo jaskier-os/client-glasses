@@ -90,6 +90,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivityUI"
+        private const val FOLD_LEG_ACTION = "com.rokid.sprite.ACTION_LEG_STATUS_CHANGED"
         private const val DOUBLE_TAP_THRESHOLD_MS = 400L
         // Pre-daemon the stock touchpad fired one event per swipe so we
         // needed a throttle against nothing. With rokid-touchpad-daemon the
@@ -331,10 +332,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pillContainer: View
     private lateinit var scrollIndicator: View
 
-    // Gates touchpad keycodes to worn-only. Off the UI thread: a sysfs read
-    // here costs 5-50 ms per keycode and shows up as visible scroll lag.
-    @Volatile private var wornState: Boolean = true
-    private var wearSensor: com.repository.glasses.listener.audio.routing.WearSensor? = null
+    // Gates touchpad keycodes: swallowed only while the glasses are folded.
+    // Tracked from the Rokid leg fold/unfold broadcast so the read is a cheap
+    // volatile (no per-keycode sysfs read, which would cost 5-50 ms and lag scroll).
+    @Volatile private var foldedState: Boolean = false
 
     private var arCameraPreview: ArCameraPreview? = null
 
@@ -1705,6 +1706,28 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
+    // Rokid PsensorObserver leg fold/unfold broadcast (glasses_leg_state
+    // "1"=spread/unfolded, "0"=folded). Drives foldedState, which gates touchpad.
+    private val foldStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != FOLD_LEG_ACTION) return
+            when (intent.getStringExtra("glasses_leg_state")) {
+                "1" -> foldedState = false
+                "0" -> foldedState = true
+            }
+        }
+    }
+
+    private fun readFoldedProperty(): Boolean? = try {
+        val cls = Class.forName("android.os.SystemProperties")
+        val m = cls.getMethod("get", String::class.java, String::class.java)
+        when (m.invoke(null, "vendor.rkd.glasses.is_spread", "") as String) {
+            "1" -> false
+            "0" -> true
+            else -> null
+        }
+    } catch (_: Throwable) { null }
 
     private val teleprompterReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -3860,11 +3883,10 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(sessionResetReceiver, IntentFilter(ListenerService.ACTION_SESSION_RESET))
             registerReceiver(cameraPreviewReceiver, IntentFilter(ListenerService.ACTION_CAMERA_PREVIEW))
             registerReceiver(uiRecordReceiver, IntentFilter(ListenerService.ACTION_UI_RECORD))
-            wearSensor = com.repository.glasses.listener.audio.routing.WearSensor(applicationContext, log = { uiLog(it) }).also {
-                it.start(object : com.repository.glasses.listener.audio.routing.WearSensor.Listener {
-                    override fun onWearChanged(wearing: Boolean) { wornState = wearing }
-                })
-            }
+            // Seed fold state from the property, then track the Rokid leg
+            // fold/unfold broadcast. Touchpad keycodes are swallowed only while folded.
+            foldedState = readFoldedProperty() ?: false
+            registerReceiver(foldStateReceiver, IntentFilter(FOLD_LEG_ACTION))
             registerReceiver(teleprompterReceiver, IntentFilter(ListenerService.ACTION_TELEPROMPTER))
             if (mapWorkerThread == null) {
                 val t = android.os.HandlerThread("MapBitmapWorker", android.os.Process.THREAD_PRIORITY_BACKGROUND)
@@ -6953,14 +6975,14 @@ class MainActivity : AppCompatActivity() {
         // RIGHT+DOWN and LEFT+UP throughout its when() blocks so a single
         // horizontal keycode covers both tab-switching (native LEFT/RIGHT)
         // and vertical scrolling (handlers accept LEFT/RIGHT as aliases).
-        // Gate touchpad keycodes on wear state: swallow when off-head so the
-        // glasses don't react to pocket/case contact. Doesn't affect real
-        // buttons (KEYCODE_CAMERA, DPAD_*) since those only arrive on genuine
-        // hardware events, not from the touchpad daemon's synthetic uinput.
+        // Gate touchpad keycodes on fold state: swallow only when folded so the
+        // glasses don't react to pocket/case contact while put away. Doesn't
+        // affect real buttons (KEYCODE_CAMERA, DPAD_*) since those only arrive on
+        // genuine hardware events, not from the touchpad daemon's synthetic uinput.
         if ((keyCode == KeyEvent.KEYCODE_NUMPAD_0 ||
                 keyCode == KeyEvent.KEYCODE_NUMPAD_1 ||
                 keyCode == KeyEvent.KEYCODE_NUMPAD_2 ||
-                keyCode == KeyEvent.KEYCODE_NUMPAD_3) && !isGlassesWorn()) {
+                keyCode == KeyEvent.KEYCODE_NUMPAD_3) && foldedState) {
             lastNumpad2Ms = 0L
             return@section true
         }
@@ -7107,10 +7129,10 @@ class MainActivity : AppCompatActivity() {
         // an ongoing call can never be navigated away from by accident.
         if (focusState == FocusState.CALL_INCOMING) {
             if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
-                if (!isGlassesWorn()) {
-                    // Off-head: consume so stray taps don't reach other handlers,
-                    // but do not accept or decline. User must don the glasses first.
-                    uiLog("CALL: tap ignored (off-head)")
+                if (foldedState) {
+                    // Folded: consume so stray taps don't reach other handlers,
+                    // but do not accept or decline. User must unfold the glasses first.
+                    uiLog("CALL: tap ignored (folded)")
                     return true
                 }
                 val nowMs = android.os.SystemClock.uptimeMillis()
@@ -8281,8 +8303,6 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
-    private fun isGlassesWorn(): Boolean = wornState
-
     override fun onStop() = GT.section("ui.onStop") {
         activityLog("onStop isFinishing=${isFinishing} isChangingConfigurations=${isChangingConfigurations}")
         super.onStop()
@@ -9187,7 +9207,7 @@ class MainActivity : AppCompatActivity() {
         teleprompterController?.destroy(teleprompterContainer)
         arCameraPreview?.stop()
         nightVisionPreview?.stop()
-        wearSensor?.stop()
+        try { unregisterReceiver(foldStateReceiver) } catch (_: Exception) {}
         super.onDestroy()
     }
 }

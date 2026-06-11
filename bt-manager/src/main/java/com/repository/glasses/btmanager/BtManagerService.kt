@@ -41,7 +41,7 @@ class BtManagerService : Service() {
     private lateinit var bondWatcher: BondWatcher
     private lateinit var hfpClient: HfpClientController
     private lateinit var a2dpSink: A2dpSinkController
-    private lateinit var wearGate: WearGate
+    private lateinit var foldGate: FoldGate
     private lateinit var profileAutoConnector: ProfileAutoConnector
 
     private val adapterReceiver = object : BroadcastReceiver() {
@@ -426,18 +426,21 @@ class BtManagerService : Service() {
             }
         })
 
-        wearGate = WearGate(applicationContext) { msg -> Log.i(TAG, msg) }
-        // Start WearGate so it tracks fold state (worn property).
-        // ProfileAutoConnector reads wearGate.worn to skip A2DP when folded.
-        wearGate.start(object : WearGate.Listener {
-            override fun onWearChanged(worn: Boolean) {
-                Log.i(TAG, "event=wear.changed worn=$worn")
-            }
-        })
+        foldGate = FoldGate(applicationContext) { msg -> Log.i(TAG, msg) }
         profileAutoConnector = ProfileAutoConnector(
-            applicationContext, adapter, hfpClient, a2dpSink, wearGate
+            applicationContext, adapter, hfpClient, a2dpSink, foldGate
         ) { msg -> Log.i(TAG, msg) }
         profileAutoConnector.start()
+        // FoldGate tracks fold state (vendor.rkd.glasses.is_spread +
+        // ACTION_LEG_STATUS_CHANGED). On fold, ProfileAutoConnector drops A2DP +
+        // HFP so the BT stack releases hal_bluetooth_lock and the power daemon
+        // can freeze; on unfold it reconnects both.
+        foldGate.start(object : FoldGate.Listener {
+            override fun onFoldChanged(folded: Boolean) {
+                Log.i(TAG, "event=fold.changed folded=$folded")
+                profileAutoConnector.onFold(folded)
+            }
+        })
 
         Log.i(TAG, "event=service.onCreate.done adapter=${adapter?.name ?: "null"} dt_ms=${SystemClock.elapsedRealtime() - tStart}")
         }
@@ -463,7 +466,7 @@ class BtManagerService : Service() {
             bleAdvertiser.stopAll()
             rfcommManager.closeAll()
             try { profileAutoConnector.stop() } catch (_: Exception) {}
-            try { wearGate.stop() } catch (_: Exception) {}
+            try { foldGate.stop() } catch (_: Exception) {}
             try { a2dpSink.release() } catch (_: Exception) {}
             try { hfpClient.release() } catch (_: Exception) {}
             callbacks.kill()

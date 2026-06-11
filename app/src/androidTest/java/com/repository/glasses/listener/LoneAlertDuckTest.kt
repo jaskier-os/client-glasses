@@ -28,7 +28,7 @@ import org.junit.runner.RunWith
  * not-exported receiver; UiAutomation.executeShellCommand runs as shell so it can
  * read logcat.
  *
- * Preconditions (bench): glasses worn+unfolded (is_take_on=1) so the wornOk gate
+ * Preconditions (bench): glasses unfolded (is_spread=1) so the wornOk gate
  * in updateDuckState is satisfied, and an A2DP source connected + streaming.
  */
 @RunWith(AndroidJUnit4::class)

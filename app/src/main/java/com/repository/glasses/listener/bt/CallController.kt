@@ -1,7 +1,9 @@
 package com.repository.glasses.listener.bt
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.os.SystemClock
@@ -11,7 +13,6 @@ import java.util.concurrent.TimeUnit
 import com.repository.glasses.listener.MainActivity
 import com.repository.glasses.listener.R
 import com.repository.glasses.listener.audio.TtsPlayer
-import com.repository.glasses.listener.audio.routing.WearSensor
 import com.repository.glasses.listener.service.ListenerService
 import com.repository.glasses.listener.ui.CallOverlay
 import com.repository.glasses.tracing.GT
@@ -37,6 +38,12 @@ class CallController : BtManagerBridge.CallListener {
 
     companion object {
         private const val TAG = "App:Call"
+
+        // Rokid PsensorObserver leg fold/unfold broadcast (glasses_leg_state
+        // "1"=spread/unfolded, "0"=folded). Mirrors FoldGate / the listener's
+        // nativeLegReceiver.
+        private const val ACTION_LEG_STATUS_CHANGED =
+            "com.rokid.sprite.ACTION_LEG_STATUS_CHANGED"
 
         // HFP call states
         private const val STATE_ACTIVE = 0
@@ -64,7 +71,6 @@ class CallController : BtManagerBridge.CallListener {
     private var ctx: Context? = null
     private var remoteLog: ((String) -> Unit)? = null
     private var ringtonePlayer: MediaPlayer? = null
-    private var wearSensor: WearSensor? = null
     @Volatile private var contactsCache: ContactsCache? = null
     @Volatile private var activeAgMac: String = ""
 
@@ -80,11 +86,11 @@ class CallController : BtManagerBridge.CallListener {
     }
 
     /**
-     * Wear state as tracked by this controller. null = unknown (no signal received yet).
-     * We default to true (worn) so that before the first wear event we behave as before
-     * (full UX on incoming call). If a "0" broadcast arrives, we transition to OFF_HEAD.
+     * Fold state as tracked by this controller. Drives whether incoming-call UI
+     * surfaces: unfolded = show full UX, folded = suppress (glasses are put away).
+     * Default unfolded so before the first fold signal we show the full UX.
      */
-    @Volatile private var wornState: Boolean = true
+    @Volatile private var folded: Boolean = false
 
     @Volatile var phase: CallPhase = CallPhase.IDLE
         private set
@@ -122,17 +128,21 @@ class CallController : BtManagerBridge.CallListener {
         Log.i(TAG, "event=controller_start")
         log("CallController started")
 
-        // Seed wornState from the property so first decision is correct even before any broadcast.
-        wornState = readWearProperty() ?: true
-        Log.i(TAG, "event=wear_initial worn=$wornState")
+        // Seed fold state from the property so the first decision is correct
+        // even before any broadcast arrives.
+        folded = readFoldProperty() ?: false
+        Log.i(TAG, "event=fold_initial folded=$folded")
 
-        val sensor = WearSensor(ctx = ctx.applicationContext, log = { log("wear: $it") })
-        wearSensor = sensor
-        sensor.start(object : WearSensor.Listener {
-            override fun onWearChanged(wearing: Boolean) {
-                handleWearChanged(wearing)
-            }
-        })
+        try {
+            ctx.applicationContext.registerReceiver(
+                foldReceiver,
+                IntentFilter(ACTION_LEG_STATUS_CHANGED),
+                Context.RECEIVER_EXPORTED,
+            )
+            log("fold receiver registered ($ACTION_LEG_STATUS_CHANGED)")
+        } catch (t: Throwable) {
+            log("fold receiver register failed: ${t.message}")
+        }
     }
 
     fun stop() {
@@ -140,8 +150,7 @@ class CallController : BtManagerBridge.CallListener {
         stopRingtone()
         overlay?.hide()
         reset()
-        try { wearSensor?.stop() } catch (_: Exception) {}
-        wearSensor = null
+        try { ctx?.unregisterReceiver(foldReceiver) } catch (_: Exception) {}
         bridge = null
         overlay = null
         ttsPlayer = null
@@ -155,7 +164,7 @@ class CallController : BtManagerBridge.CallListener {
      * Queries the current call snapshot and aligns the glasses UI with it.
      */
     fun onBtManagerBound() {
-        Log.i(TAG, "event=bt_bound_resync phase=$phase worn=$wornState")
+        Log.i(TAG, "event=bt_bound_resync phase=$phase folded=$folded")
         resyncFromSnapshot("bt_bound")
         // Always re-emit UI state on bind. When MainActivity restarts (config
         // change, process recreated) it registers callUiStateReceiver fresh and
@@ -417,13 +426,13 @@ class CallController : BtManagerBridge.CallListener {
         if (phase == CallPhase.INCOMING) return
         val prev = phase
         phase = CallPhase.INCOMING
-        Log.i(TAG, "event=phase_transition from=$prev to=INCOMING addr=$currentAddr id=$currentCallId worn=$wornState")
-        log("phase -> INCOMING worn=$wornState")
-        if (wornState) {
+        Log.i(TAG, "event=phase_transition from=$prev to=INCOMING addr=$currentAddr id=$currentCallId folded=$folded")
+        log("phase -> INCOMING folded=$folded")
+        if (!folded) {
             showIncomingUi()
         } else {
-            Log.i(TAG, "event=incoming_suppressed_off_head addr=$currentAddr id=$currentCallId")
-            log("incoming suppressed (off-head); will restore on don")
+            Log.i(TAG, "event=incoming_suppressed_folded addr=$currentAddr id=$currentCallId")
+            log("incoming suppressed (folded); will restore on unfold")
         }
     }
 
@@ -606,47 +615,63 @@ class CallController : BtManagerBridge.CallListener {
         remoteLog?.invoke("CallController: $msg")
     }
 
-    // ---- Wear handling ----
+    // ---- Fold handling ----
 
-    private fun readWearProperty(): Boolean? {
+    private val foldReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != ACTION_LEG_STATUS_CHANGED) return
+            val raw = intent.getStringExtra("glasses_leg_state") ?: return
+            val f = when (raw) {
+                "1" -> false  // spread = unfolded
+                "0" -> true   // not spread = folded
+                else -> {
+                    log("fold: malformed glasses_leg_state=$raw")
+                    return
+                }
+            }
+            handleFoldChange(f)
+        }
+    }
+
+    private fun readFoldProperty(): Boolean? {
         return try {
             val cls = Class.forName("android.os.SystemProperties")
             val m = cls.getMethod("get", String::class.java, String::class.java)
-            val v = m.invoke(null, "vendor.rkd.glasses.is_take_on", "") as String
+            val v = m.invoke(null, "vendor.rkd.glasses.is_spread", "") as String
             when (v) {
-                "1" -> true
-                "0" -> false
+                "1" -> false
+                "0" -> true
                 else -> null
             }
         } catch (t: Throwable) {
-            log("readWearProperty failed: ${t.message}")
+            log("readFoldProperty failed: ${t.message}")
             null
         }
     }
 
-    private fun handleWearChanged(wearing: Boolean) {
-        if (wornState == wearing) return
-        val prev = wornState
-        wornState = wearing
-        Log.i(TAG, "event=wear_changed from=$prev to=$wearing phase=$phase")
-        log("wear changed $prev -> $wearing phase=$phase")
+    private fun handleFoldChange(nowFolded: Boolean) {
+        if (folded == nowFolded) return
+        val prev = folded
+        folded = nowFolded
+        Log.i(TAG, "event=fold_changed from=$prev to=$nowFolded phase=$phase")
+        log("fold changed $prev -> $nowFolded phase=$phase")
 
-        if (wearing) {
-            // OFF -> ON. Restore UI for whatever state the call is actually in.
+        if (!nowFolded) {
+            // FOLDED -> UNFOLDED. Restore UI for whatever state the call is in.
             if (phase == CallPhase.INCOMING) {
                 // Late-surface suppressed incoming UI.
-                Log.i(TAG, "event=wear_on_restore_incoming id=$currentCallId")
+                Log.i(TAG, "event=unfold_restore_incoming id=$currentCallId")
                 showIncomingUi()
             } else {
                 // No active incoming inside us; resync from the snapshot in case the
-                // call originated or transitioned while we were off-head.
-                resyncFromSnapshot("wear_on")
+                // call originated or transitioned while we were folded.
+                resyncFromSnapshot("unfold")
             }
         } else {
-            // ON -> OFF. Hide user-visible artifacts but keep internal state so
-            // re-donning mid-ring restores the UI.
+            // UNFOLDED -> FOLDED. Hide user-visible artifacts but keep internal
+            // state so unfolding mid-ring restores the UI.
             if (phase == CallPhase.INCOMING) {
-                Log.i(TAG, "event=wear_off_suppress_incoming id=$currentCallId")
+                Log.i(TAG, "event=fold_suppress_incoming id=$currentCallId")
                 overlay?.hide()
                 hideLed()
                 stopRingtone()
@@ -664,7 +689,7 @@ class CallController : BtManagerBridge.CallListener {
         val b = bridge ?: return
         val json = try { b.getCallSnapshotJson() } catch (_: Exception) { "{}" }
         val snap = parseSnapshot(json)
-        Log.i(TAG, "event=snapshot_resync reason=$reason raw='$json' parsed=$snap worn=$wornState phase=$phase")
+        Log.i(TAG, "event=snapshot_resync reason=$reason raw='$json' parsed=$snap folded=$folded phase=$phase")
         log("snapshot($reason): $json")
         if (snap == null) return
 
@@ -700,9 +725,9 @@ class CallController : BtManagerBridge.CallListener {
             STATE_INCOMING, STATE_WAITING -> {
                 if (phase != CallPhase.INCOMING) {
                     phase = CallPhase.INCOMING
-                    Log.i(TAG, "event=phase_transition from=resync to=INCOMING worn=$wornState")
+                    Log.i(TAG, "event=phase_transition from=resync to=INCOMING folded=$folded")
                 }
-                if (wornState) showIncomingUi()
+                if (!folded) showIncomingUi()
             }
             STATE_ACTIVE -> {
                 if (phase != CallPhase.ACTIVE) {

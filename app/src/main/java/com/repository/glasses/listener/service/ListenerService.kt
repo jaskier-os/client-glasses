@@ -443,13 +443,11 @@ class ListenerService : LifecycleService(),
         }
     @Volatile private var prebufferFlushInProgress = false
 
-    // Track B wear gating: cached most recent worn state from
-    // AudioRoutingController.onWearChangedRaw. Volatile because the wear
-    // broadcast fires on the main thread and we read it from the same thread
-    // during boot, but treat it as a memory barrier in case future code reads
-    // it from another thread. null means we haven't seen any wear event yet.
+    // Cached most recent worn state, sourced from fold state in
+    // handleFoldChange (lastWornState = !folded). Volatile because fold
+    // broadcasts/polls fire on the main thread and worn-gated paths may read
+    // it from another thread. null means we haven't seen any fold event yet.
     @Volatile private var lastWornState: Boolean? = null
-    @Volatile private var psensorEnforceLatched = false
     // Touched only on reconcileExecutor; tracks last on-demand bit seen by OpusGate
     // so we can detect on->off transitions and rotate the writer file.
     private var lastOnDemandSeen: Boolean = false
@@ -2775,90 +2773,6 @@ class ListenerService : LifecycleService(),
                 android.util.Log.i("AudioRoutingController", msg)
                 btLog("[AudioRouting] $msg")
             }
-            audioRouting?.onWearChangedRaw = { worn ->
-                btLog("Wear change hook: worn=$worn -> relay to phone (capture stack now fold-driven)")
-                // WEAR-DECOUPLED 2026-05-08: lastWornState is now sourced from
-                // fold state in handleFoldChange. Wear sensor only relays to
-                // phone for UI; it no longer gates capture/mic.
-                // lastWornState = worn
-
-                // Latch PSoC enforce_psensor on first on-head detection so the
-                // chip keeps the touchpad alive after take-off. The I2C command
-                // only sticks when the chip is physically worn (psensor active).
-                if (worn && !psensorEnforceLatched) {
-                    psensorEnforceLatched = true
-                    try {
-                        val cls = Class.forName("android.os.SystemProperties")
-                        val m = cls.getMethod("set", String::class.java, String::class.java)
-                        m.invoke(null, "rokid.debug.enforce_psensor", "1")
-                        btLog("[Psensor] enforce_psensor latched on first wear")
-                    } catch (t: Throwable) {
-                        btErr("[Psensor] enforce_psensor latch failed: ${t.message}")
-                    }
-                }
-                try { btClient.sendWearState(worn) } catch (t: Throwable) {
-                    btErr("sendWearState failed: ${t.message}")
-                }
-                // G3: also nudge phone over BLE so it can refresh glasses-status
-                // UI without waiting for an RFCOMM polling cycle.
-                if (::btManagerBridge.isInitialized) {
-                    try {
-                        val ok = btManagerBridge.notifyPhone(
-                            com.repository.glasses.listener.bt.BleWakeEvent.WEAR_CHANGED,
-                            System.nanoTime()
-                        )
-                        btLog("[Wear] BLE notify WEAR_CHANGED ok=$ok worn=$worn")
-                    } catch (t: Throwable) {
-                        btErr("[Wear] BLE notifyPhone threw: ${t.message}")
-                    }
-                }
-                updateDuckState()
-
-                // WEAR-DECOUPLED 2026-05-08: capture stack reconcile moved to
-                // handleFoldChange. Wear sensor no longer starts/stops mic /
-                // wake-word / opus writer; fold does.
-                // // Track B: gate the always-on capture stack on the wear sensor.
-                // // worn=false (off-head / on desk) stops AudioRecord + WakeWordPipeline
-                // // + LocalOpusWriter so the device doesn't burn CPU encoding silence.
-                // // worn=true puts everything back. start()/stop() on each component is
-                // // idempotent (see WakeWordPipeline.kt:196-235 / 273-325 and
-                // // LocalOpusWriter.kt:81-151).
-                // if (worn) {
-                //     btLog("WearGate: glasses put on -- restarting capture stack")
-                //     // Track C: start wake-word FIRST so it counts as a consumer
-                //     // when reconcileMicStream evaluates demand. WW only starts if
-                //     // an RFCOMM phone peer is also connected (reconcileWakeWord).
-                //     reconcileWakeWord("wear")
-                //     postReconcileLocalOpusWriter("wear")
-                //     reconcileMicStream("wear-on")
-                // } else {
-                //     btLog("WearGate: glasses taken off -- stopping capture stack")
-                //     // If a live BT utterance is in flight, close the gate cleanly so
-                //     // the phone-side session terminates rather than seeing a dead
-                //     // socket mid-stream. exitLiveUtteranceMode is the canonical cancel
-                //     // hook (see signalAudioStart / stopGlassesAudioStream).
-                //     if (streamMode == StreamMode.LIVE_UTTERANCE) {
-                //         exitLiveUtteranceMode("wear-off")
-                //     }
-                //     postReconcileLocalOpusWriter("wear")
-                //     reconcileWakeWord("wear")
-                //     // Track C: reconcile after stopping wake-word so demand recomputes
-                //     // to false and the mic pump stops cleanly. With worn=false the
-                //     // demand condition is unconditionally false regardless of peers.
-                //     reconcileMicStream("wear-off")
-                    // WEAR-DECOUPLED 2026-05-08: wear sensor is too noisy to drive
-                    // screen-off (false-zero blips would blank the display mid-use).
-                    // Fold + idle paths in glasses-power-daemon still blank the screen.
-                    // // Blank the display when the user takes the glasses off. ScreenOffAccessibilityService
-                    // // performs GLOBAL_ACTION_LOCK_SCREEN -- this only locks/blanks the display, it
-                    // // does NOT power the device off (the fold-timeout path in glasses-power-daemon
-                    // // is the only thing that calls `svc power shutdown`). Without this, the display
-                    // // stays on off-head, wasting battery and emitting light from the waveguide.
-                    // sendBroadcast(Intent(ScreenOffAccessibilityService.ACTION_LOCK_SCREEN).apply {
-                    //     setPackage(packageName)
-                    // })
-                // }
-            }
             audioRouting?.start()
             btLog("AudioRoutingController started")
         } catch (e: Exception) {
@@ -3276,20 +3190,14 @@ class ListenerService : LifecycleService(),
         // pump fan-out uses MicBus so ordering is the only thing that matters
         // here.
         //
-        // Track B wear gating: if the wear sensor already reported off-head
-        // before we got here (the AudioRoutingController.start() above runs
-        // WearSensor.start() synchronously and fires our onWearChangedRaw
-        // callback for the initial state), don't start the heavy pipelines on
-        // boot -- the wear handler will start them when the user puts the
-        // glasses on. Default to "running" when wear is unknown, since silent
-        // on first put-on is worse than burning a few seconds of CPU.
-        // audioRouting?.start() above invokes WearSensor.start() synchronously,
-        // which fires our onWearChangedRaw callback once with the initial wear
-        // state. By the time we reach this point, lastWornState reflects the
-        // current value (or stays null if the property is empty / reflection
-        // failed). Treat null as "unknown -> default to running" per Track B.
-        val initialWearKnownOff: Boolean = (lastWornState == false)
-        btLog("WearGate: initial wear=${lastWornState} -> ${if (initialWearKnownOff) "hold capture stack" else "start capture stack"}")
+        // Fold gating: if the glasses are folded at boot, don't start the heavy
+        // pipelines -- handleFoldChange will start them on unfold. The fold
+        // initial-seed above (handleFoldChange("initial")) already set
+        // lastWornState = !folded by now. Treat null (is_spread empty / read
+        // failed) as "unknown -> default to running", since silent on first
+        // unfold is worse than burning a few seconds of CPU.
+        val initialFoldedKnownOff: Boolean = (lastWornState == false)
+        btLog("FoldGate: initial folded=${lastWornState == false} -> ${if (initialFoldedKnownOff) "hold capture stack" else "start capture stack"}")
         try {
             localOpusWriter = LocalOpusWriter(this, remoteLog = { btLog(it) })
             postReconcileLocalOpusWriter("boot")
@@ -3299,7 +3207,7 @@ class ListenerService : LifecycleService(),
         try {
             wakeWordPipeline = WakeWordPipeline(this)
             val wwEnabled = GlassesConfig.wakewordEnabled
-            if (!initialWearKnownOff && wwEnabled) {
+            if (!initialFoldedKnownOff && wwEnabled) {
                 wakeWordPipeline.start()
                 btLog("[WakeWord] pipeline started (wakewordEnabled=true)")
             } else {
@@ -3381,9 +3289,9 @@ class ListenerService : LifecycleService(),
         // service boot, regardless of screen/BT state. Under LOCAL_ONLY (the
         // default) the radio stays cold; under LIVE_UTTERANCE the BT sockets and
         // RFCOMM writes turn on.
-        if (!initialWearKnownOff) {
+        if (!initialFoldedKnownOff) {
             // Track C: demand-driven boot. wakeWordPipeline.start() ran above for
-            // !initialWearKnownOff, so wake-word counts as a consumer and the
+            // !initialFoldedKnownOff, so wake-word counts as a consumer and the
             // mic will start. If a future toggle disables wake-word at boot and
             // no peer has connected yet, the mic stays off until demand arrives.
             reconcileMicStream("boot")
