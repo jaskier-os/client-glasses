@@ -1070,25 +1070,32 @@ int main(int argc, char **argv) {
     config_loaded_ms = now_ms();
     last_activity_ms = now_ms();
 
-    // Unlatch Rokid's enforce_psensor / enforce_hall so the PSoC driver
-    // emits real extcon uevents. enforce_psensor is re-latched later by
-    // ListenerService on first on-head detection (the chip must be
-    // physically worn for the enforce I2C command to stick).
+    // PSoC extcon latch policy:
+    //   enforce_psensor = 1 -- LATCH the wear (JIG/psensor) channel high so
+    //     stock Rokid PsensorObserver (com.rokid.sysconfig) never sees wear
+    //     transitions. Otherwise it plays an earcon (sound effects 18/56) and
+    //     calls PowerManager.wakeUp("psensor") on every on/off-head event,
+    //     toggling the screen. We do not use is_take_on at all (deprecated);
+    //     fold is the sole off-head signal, so suppressing wear is free.
+    //   enforce_hall = 0 -- UNLATCH the fold (DOCK/hall) channel so the PSoC
+    //     driver keeps emitting real extcon uevents for fold/unfold, which
+    //     drives is_spread + ACTION_LEG_STATUS_CHANGED (FoldGate, suspend, etc.).
     {
-        PWR_TRACE_BEGIN("pwr.boot.unlatch");
-        static const char *const unlatch_nodes[] = {
-            "/sys/devices/platform/soc/a90000.i2c/i2c-1/1-0008/enforce_psensor",
-            "/sys/devices/platform/soc/a90000.i2c/i2c-1/1-0008/enforce_hall",
+        PWR_TRACE_BEGIN("pwr.boot.latch");
+        struct { const char *node; const char *val; } latch[] = {
+            { "/sys/devices/platform/soc/a90000.i2c/i2c-1/1-0008/enforce_psensor", "1\n" },
+            { "/sys/devices/platform/soc/a90000.i2c/i2c-1/1-0008/enforce_hall",    "0\n" },
         };
-        for (size_t i = 0; i < sizeof(unlatch_nodes)/sizeof(unlatch_nodes[0]); ++i) {
-            int fd = open(unlatch_nodes[i], O_WRONLY);
+        for (size_t i = 0; i < sizeof(latch)/sizeof(latch[0]); ++i) {
+            int fd = open(latch[i].node, O_WRONLY);
             if (fd < 0) {
-                log_line("unlatch: open(%s) failed: %s", unlatch_nodes[i], strerror(errno));
+                log_line("latch: open(%s) failed: %s", latch[i].node, strerror(errno));
                 continue;
             }
-            ssize_t w = write(fd, "0\n", 2);
+            ssize_t w = write(fd, latch[i].val, 2);
             close(fd);
-            log_line("unlatch: %s <- 0 (%s)", unlatch_nodes[i], w == 2 ? "ok" : "err");
+            log_line("latch: %s <- %c (%s)", latch[i].node, latch[i].val[0],
+                     w == 2 ? "ok" : "err");
         }
         PWR_TRACE_END();
     }

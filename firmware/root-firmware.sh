@@ -257,6 +257,10 @@ A11Y_SVC="com.repository.glasses.listener/.service.ScreenOffAccessibilityService
 # --- Touchpad: force active scan ------------------------------------------
 # Order matters. Observed experimentally: cycling enforce_psensor resets
 # other knobs, so do the cycle FIRST and set auto_startup/pa_en AFTER.
+# The 1->0 transition is what wakes the touch driver; we then re-latch to 1
+# so stock Rokid PsensorObserver never sees wear transitions (no earcon /
+# screen-wake on on/off-head -- is_take_on is deprecated, fold is the only
+# off-head signal). enforce_hall stays 0 so fold/hall extcon keeps firing.
 echo 1 > \$PSOC/enforce_psensor 2>/dev/null || true
 sleep 1
 echo 0 > \$PSOC/enforce_psensor 2>/dev/null || true
@@ -265,6 +269,8 @@ echo 1 > \$PSOC/auto_startup  2>/dev/null || true
 echo 0 > \$PSOC/low_power     2>/dev/null || true
 echo 0 > \$PSOC/deep_sleep    2>/dev/null || true
 echo 1 > \$PSOC/pa_en         2>/dev/null || true
+# Re-latch wear high (suppress stock PsensorObserver earcon + screen wake).
+echo 1 > \$PSOC/enforce_psensor 2>/dev/null || true
 
 # --- ScreenOffAccessibilityService: re-arm the capture-button route -------
 # Idempotent set + verify-bound loop. \`sys.boot_completed=1\` fires before

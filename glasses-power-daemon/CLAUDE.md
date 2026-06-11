@@ -1,12 +1,12 @@
 # glasses-power-daemon
 
-Native arm64 C binary running as root via init service (`class core`, auto-respawn). Manages screen timeout, fold-triggered suspend, PSoC sensor unlatching, and tombstone crash log collection.
+Native arm64 C binary running as root via init service (`class core`, auto-respawn). Manages screen timeout, fold-triggered suspend, PSoC extcon latch policy, and tombstone crash log collection.
 
 ## Responsibilities
 
 1. **Screen-off** after `screen_timeout_s` of input idleness (no key events on watched `/dev/input/eventN`).
 2. **Suspend-to-RAM** after `power_timeout_s` of continuous folded state (hall sensor). Unfold wakes instantly (~1-2s).
-3. **PSoC unlatch** at boot -- writes `0` to `enforce_psensor`/`enforce_hall` so the wear sensor chain works.
+3. **PSoC latch policy** at boot -- writes `1` to `enforce_psensor` (latch wear high so stock Rokid PsensorObserver never fires its wear earcon / `PowerManager.wakeUp("psensor")` screen-toggle; `is_take_on` is deprecated and unused) and `0` to `enforce_hall` (keep the fold/hall extcon emitting real uevents so `is_spread` + `ACTION_LEG_STATUS_CHANGED` / FoldGate / suspend still work).
 4. **Tombstone crash logs** -- copies new `/data/tombstones/` files to `/data/local/tmp/crash-logs/` at boot (max 10, pruned).
 5. **Time sync** -- reads epoch from config dir on cold boot if NTP hasn't run.
 
