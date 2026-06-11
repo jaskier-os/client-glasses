@@ -44,20 +44,20 @@ git clone -q "$GL_URL" "$work"
 cd "$work"
 git remote add github "$GH_URL"
 git fetch -q origin "$BRANCH"
-git fetch -q github "$BRANCH" || true   # github branch may not exist on first run
-
-GL="$(git rev-parse "origin/${BRANCH}")"
-GH="$(git rev-parse "github/${BRANCH}" 2>/dev/null || echo "")"
-echo "gitlab=$GL  github=${GH:-none}"
-
 git checkout -q -B "$BRANCH" "origin/${BRANCH}"
+GL="$(git rev-parse "origin/${BRANCH}")"
 
-# First push: GitHub has no main yet -> just push GitLab up.
-if [ -z "$GH" ]; then
-  echo "github main absent -> initial push."
+# First run: GitHub has no main branch yet (ls-remote returned nothing) ->
+# just seed it from GitLab. Avoids fetching a ref that doesn't exist.
+if [ -z "$GH_HEAD" ]; then
+  echo "github main absent -> initial push (seed)."
   git push -q github "${BRANCH}:${BRANCH}"
   echo "github seeded."; exit 0
 fi
+
+git fetch -q github "$BRANCH"
+GH="$(git rev-parse "github/${BRANCH}")"
+echo "gitlab=$GL  github=$GH"
 
 if [ "$GL" = "$GH" ]; then
   echo "in sync; nothing to do."; exit 0
