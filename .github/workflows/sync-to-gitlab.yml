@@ -1,0 +1,25 @@
+name: sync-to-gitlab
+
+# When GitHub main changes (incl. merged PRs), poke the GitLab sync pipeline.
+# GitLab is canonical and runs the actual merge logic. NOTE: GitLab is VPN-only,
+# so this trigger may not reach it from GitHub-hosted runners; the GitLab-side
+# 10-minute schedule is the reliable path. This workflow is best-effort.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  trigger-gitlab:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.head_commit.author.name != 'gitlab-github-sync' }}
+    steps:
+      - name: Trigger GitLab sync pipeline (best-effort)
+        continue-on-error: true
+        run: |
+          curl -fsS -k -X POST \
+            -F "token=${{ secrets.GITLAB_TRIGGER_TOKEN }}" \
+            -F "ref=main" \
+            "https://${{ secrets.GITLAB_HOST }}/api/v4/projects/${{ secrets.GITLAB_PROJECT_ID }}/trigger/pipeline"

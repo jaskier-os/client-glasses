@@ -1,0 +1,16 @@
+# Two-way GitLab<->GitHub sync for jaskier-os/client-glasses.
+# GitLab is canonical and VPN-only, so sync is GitLab-initiated:
+#   - push to main          -> immediate GitLab->GitHub propagation.
+#   - scheduled (every 10m)  -> pulls GitHub-side changes (PR merges) back; cheap
+#                              ls-remote pre-check exits fast when already in sync.
+# Conflicts open a GitHub PR (see scripts/sync-gitlab-github.sh).
+stages: [sync]
+
+sync-github:
+  stage: sync
+  tags: [shell]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_AUTHOR != "gitlab-github-sync <sync-bot@jaskier-os>"'
+  script:
+    - bash scripts/sync-gitlab-github.sh
