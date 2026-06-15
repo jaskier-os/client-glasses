@@ -5,16 +5,16 @@ import android.content.Context
 import com.repository.glasses.tracing.GT
 import android.graphics.Bitmap
 import android.graphics.ImageFormat
+import android.graphics.SurfaceTexture
+import android.view.Surface
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
-import android.graphics.SurfaceTexture
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
-import android.view.Surface
 import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
@@ -55,10 +55,11 @@ class RawStillCapturer(
         /** Magic + version for the pending RAW sidecar header. Lets the processor
          *  reject a truncated/corrupt file instead of demosaicing garbage. */
         private const val RAW_MAGIC = 0x52415731 // "RAW1"
-        /** v2 added the 3 per-shot HAL WB gains (wbR,wbG,wbB) to the header so the
-         *  disk-backed demosaic can apply the same AWB-estimated gains the camera
-         *  HAL computed for this exact shot, instead of the old hardcoded constants. */
-        private const val RAW_VERSION = 2
+        /** v4 carries the 3 per-shot HAL WB gains (wbR,wbG,wbB). Exposure is no
+         *  longer persisted: the demosaic computes its own percentile auto-level
+         *  from the RAW itself, so there is no gain to store. Older versions are
+         *  rejected on read (a transient in-flight raw is just discarded). */
+        private const val RAW_VERSION = 4
         /** magic(4) + version(4) + w(4) + h(4) + blackLevel(4 float) + whiteLevel(4 float)
          *  + wbR(4 float) + wbG(4 float) + wbB(4 float) = 36 bytes. */
         private const val RAW_HEADER_BYTES = 36
@@ -75,21 +76,21 @@ class RawStillCapturer(
          *  for scenes where the HAL never reports convergence. */
         private const val AE_WARMUP_MS = 1500L
 
-        /** Exposure compensation in 1/N EV steps applied ONLY to the still-
-         *  capture request. Warmup runs at 0 EV so AE converges to the
-         *  scene's base brightness; the still capture then re-targets a
-         *  brighter point. Glasses use indoor / dim scenes most of the
-         *  time and the SplitterDenoiser eats the extra noise from the
-         *  longer exposure / higher ISO that this bias forces.
-         *  Most Qualcomm HALs use 1/3 EV step.
-         *
-         *  Set to 0: trust the HAL's metered exposure. The previous +6 (=+2 EV)
-         *  deliberately overbrightened to lift dim indoor scenes, but it CLIPPED
-         *  highlights -- a bright monitor/screen blew out to pure white. The
-         *  SplitterDenoiser already eats the read noise of a correctly-metered
-         *  (not pushed) exposure, so we hand exposure fully to the HAL AE and
-         *  keep highlights intact. */
-        private const val STILL_AE_COMPENSATION = 0
+        // Exposure correction is no longer an absolute-target DRO gain. This Rokid
+        // HAL exposes RAW conservatively (a well-lit scene's green sits at codes
+        // ~78-94 of 1023), so an absolute target/mean clamped to 8x on nearly every
+        // indoor scene and just amplified noise. Instead the demosaic applies a
+        // PERCENTILE auto-level computed from the frame itself (see RawDemosaic):
+        // it drives the high percentile of the linear luma to near-white, so the
+        // scene is correctly exposed regardless of the low absolute codes, and a
+        // bright/clipping scene gets ~1x. Nothing exposure-related is persisted --
+        // the demosaic recomputes its own level from the RAW.
+
+        /** Tiny PRIVATE SurfaceTexture preview size. RAW + PRIVATE(preview) is the
+         *  known-good combo on this HAL (the ZSLPreviewRaw usecase); the preview
+         *  surface only drives AE warmup frames -- it is never read. */
+        private const val PREVIEW_TEX_W = 640
+        private const val PREVIEW_TEX_H = 480
 
         /** Number of RAW frames averaged per capture. sqrt(N) noise reduction. */
         private const val BURST_N = 3
@@ -108,6 +109,15 @@ class RawStillCapturer(
 
         /** JPEG output quality. */
         private const val JPEG_QUALITY = 95
+
+        /** DEBUG (until-reboot) system property. When set to "1" the ~60-107s
+         *  SplitterDenoiser pass is skipped and the demosaiced full-res JPEG (with
+         *  the percentile auto-level exposure already applied) becomes the final
+         *  file -- so exposure iteration is fast. Set via
+         *  `adb shell setprop debug.glasses.capture.skip_denoise 1`. It is a
+         *  NON-persist prop, so it is automatically reset on reboot; there is no UI
+         *  and no persistence. Read via SystemProperties reflection ([skipDenoise]). */
+        private const val SKIP_DENOISE_PROP = "debug.glasses.capture.skip_denoise"
 
         /** Long edge of the first-pass preview JPEG. Matches the listener overlay's
          *  TARGET_LONG_EDGE_PX so the overlay doesn't even need to downsample. Keeps
@@ -370,29 +380,20 @@ class RawStillCapturer(
             val bb = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
             val magic = bb.int
             val version = bb.int
-            // Accept the current v2 (with WB gains) and the legacy v1 (no gains) so
-            // an in-flight raw written by a previous build still resumes -- a v1 raw
-            // just falls back to the WB_* constants. Anything else is corrupt.
-            if (magic != RAW_MAGIC || (version != RAW_VERSION && version != 1)) {
+            // Only the current version is accepted. A raw from an older build is a
+            // transient in-flight artifact (the queue drains in seconds), so an old
+            // version is just discarded rather than carried with a compat shim.
+            if (magic != RAW_MAGIC || version != RAW_VERSION) {
                 Log.w(TAG, "pending raw ${rawFile.name} bad magic/version ($magic/$version); discarding")
                 rawFile.delete(); return null
             }
-            val v1HeaderBytes = 24 // magic+version+w+h+black+white, no WB gains
-            val headerBytes = if (version >= 2) RAW_HEADER_BYTES else v1HeaderBytes
             val w = bb.int
             val h = bb.int
             val blackLevel = bb.float
             val whiteLevel = bb.float
-            val wbR: Float; val wbG: Float; val wbB: Float
-            if (version >= 2) {
-                wbR = bb.float; wbG = bb.float; wbB = bb.float
-            } else {
-                // Legacy raw: no per-shot gains stored, fall back to constants.
-                Log.w(TAG, "pending raw ${rawFile.name} is v1 (no WB gains); using fallback constants")
-                wbR = WB_R; wbG = WB_G; wbB = WB_B
-            }
+            val wbR = bb.float; val wbG = bb.float; val wbB = bb.float
             val expectedShorts = w.toLong() * h.toLong()
-            val actualShorts = (bytes.size - headerBytes).toLong() / 2
+            val actualShorts = (bytes.size - RAW_HEADER_BYTES).toLong() / 2
             if (w <= 0 || h <= 0 || actualShorts < expectedShorts) {
                 Log.w(TAG, "pending raw ${rawFile.name} payload mismatch w=$w h=$h want=$expectedShorts have=$actualShorts; discarding")
                 rawFile.delete(); return null
@@ -440,6 +441,30 @@ class RawStillCapturer(
                 Log.e(TAG, "process demosaic failed: ${e.message}")
                 onPreviewOnce(null, e)
                 // Leave the raw on disk so a later resume can retry it; do NOT delete.
+                return@process
+            }
+            // DEBUG (until-reboot): when SKIP_DENOISE_PROP is "1", short-circuit the
+            // ~60-107s SplitterDenoiser pass entirely. The already-written demosaiced
+            // full-res JPEG (binToBitmap output, carrying the percentile auto-level
+            // exposure) is left in place as the final file. We still write the upright
+            // full-res demosaic over the gray preview, fire onFinal/onResumed, and
+            // delete the sidecar -- so filesync, callbacks and cleanup all behave
+            // exactly as the denoise path, just without the denoise overwrite. The
+            // flag is a non-persist sysprop, so it resets on reboot.
+            if (skipDenoise()) {
+                try {
+                    FileOutputStream(file).use { binned.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it) }
+                    binned.recycle()
+                    stampExifOrientationNormal(file)
+                    if (!rawFile.delete()) Log.w(TAG, "pending raw delete failed ${rawFile.absolutePath}")
+                    Log.i(TAG, "skip_denoise=1: using undenoised demosaic as final ${file.absolutePath} totalMs=${android.os.SystemClock.elapsedRealtime() - t0}")
+                    onFinal(file, null)
+                    onResumed?.invoke(file)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "skip_denoise write failed: ${e.message}")
+                    if (!binned.isRecycled) binned.recycle()
+                    onFinal(file, e)
+                }
                 return@process
             }
             GT.section("cap.raw.denoise") {
@@ -538,6 +563,10 @@ class RawStillCapturer(
         val imageLatch = CountDownLatch(1)
         val frameErr = arrayOfNulls<Throwable>(1)
 
+        // RAW reader holds the BURST_N burst frames. No separate metering frame:
+        // metering off a distinct RAW frame faults the HAL FD pipeline (~20% photo
+        // failure), so the burst captures at comp=0 (always-works) and DRO is measured
+        // from the burst's own averaged RAW after the fact (zero extra frames).
         val reader = ImageReader.newInstance(w, h, ImageFormat.RAW_SENSOR, BURST_N)
         reader.setOnImageAvailableListener({ r ->
             val img = r.acquireNextImage() ?: run {
@@ -561,6 +590,12 @@ class RawStillCapturer(
                     previewExecutor.execute {
                         try {
                             val tPrev = android.os.SystemClock.elapsedRealtime()
+                            // No explicit DRO gain on the fast preview: fastPreviewToBitmap
+                            // already percentile-stretches (p2..p98) its grayscale output,
+                            // which inherently lifts a dark scene to a visible range -- so the
+                            // preview is already roughly as bright as the DRO-corrected final.
+                            // The final color JPEG (binToBitmap) carries the precise measured
+                            // gain; the preview just gives an instant, already-bright proxy.
                             val gray = RawDemosaic.fastPreviewToBitmap(
                                 frame0, w, h, blackLevel, whiteLevel,
                             )
@@ -602,13 +637,11 @@ class RawStillCapturer(
             }
         }, handler)
 
-        // Preview surface: SurfaceTexture-backed Surface so the HAL has
-        // somewhere to send the warmup frames while AE converges. Tiny
-        // resolution (640x480) -- we never read from it.
-        val previewTex = SurfaceTexture(0).apply {
-            setDefaultBufferSize(640, 480)
-            detachFromGLContext()
-        }
+        // AE-warmup target: a tiny PRIVATE SurfaceTexture preview surface. RAW +
+        // PRIVATE(preview) is the only RAW-plus-second-stream combo this HAL accepts
+        // (its ZSLPreviewRaw usecase). The surface only gives the HAL AE frames to
+        // converge on so the burst lands at a real exposure; it is never read.
+        val previewTex = SurfaceTexture(0).apply { setDefaultBufferSize(PREVIEW_TEX_W, PREVIEW_TEX_H) }
         val previewSurface = Surface(previewTex)
 
         // The capture body runs on CameraSession's single camera thread with an
@@ -637,17 +670,12 @@ class RawStillCapturer(
                 sessErr[0]?.let { throw it }
                 session = sessOut[0]!!
 
-                // Hand exposure off to the HAL's standard AE. SplitterDenoiser
-                // cleans up whatever noise the chosen ISO leaves behind, so the
-                // hand-tuned manual ISO/shutter pairing is no longer worth its
-                // failure modes (under/overexposure when the scene differs from
-                // the indoor "sweet spot" the constants were tuned to).
-                //
-                // Run a preview repeating request so AE has frames to meter, then
-                // wait for CONTROL_AE_STATE to reach CONVERGED (or fall back to
-                // AE_WARMUP_MS hard cap). Without convergence the HAL hasn't
-                // picked an exposure yet and the still burst lands at the
-                // sensor's default near-zero values -> dark images.
+                // Hand exposure off to the HAL's standard AE. AE warmup on the PRIVATE
+                // preview surface (precapture trigger + converge wait, AE_WARMUP_MS cap)
+                // gives the HAL a base exposure, then the burst captures at comp=0 (pure
+                // HAL-metered, always-works -- no separate metering frame that would fault
+                // the HAL FD pipeline). The HAL under-meters outdoors; we correct that
+                // brightness DIGITALLY (DRO) in the demosaic from the burst's own luma.
                 run {
                     val warmupBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                         addTarget(previewSurface)
@@ -678,8 +706,8 @@ class RawStillCapturer(
                         }
                     }, handler)
                     val convergedOk = converged.await(AE_WARMUP_MS, TimeUnit.MILLISECONDS)
-                    Log.i(TAG, "AE warmup: converged=$convergedOk aeState=${lastAeState.get()} exp=${lastExp.get() / 1_000_000.0}ms iso=${lastIso.get()}")
                     session.stopRepeating()
+                    Log.i(TAG, "AE warmup: converged=$convergedOk aeState=${lastAeState.get()} exp=${lastExp.get() / 1_000_000.0}ms iso=${lastIso.get()}")
                 }
                 val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                     addTarget(reader.surface)
@@ -687,9 +715,10 @@ class RawStillCapturer(
                     set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                     // AWB auto so the result carries the HAL's AWB-estimated gains.
                     set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-                    set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, STILL_AE_COMPENSATION)
+                    // comp=0: pure HAL-metered. Brightness is lifted digitally (DRO).
+                    set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, 0)
                 }
-                Log.i(TAG, "initial capture: AE_MODE_ON AWB_AUTO aeComp=$STILL_AE_COMPENSATION (HAL-managed, ${AE_WARMUP_MS}ms warmup)")
+                Log.i(TAG, "initial capture: AE_MODE_ON AWB_AUTO comp=0 (${AE_WARMUP_MS}ms warmup, digital DRO)")
                 val burstRequests = List(BURST_N) { builder.build() }
                 val captureLatch = CountDownLatch(BURST_N)
                 val captureErr = arrayOfNulls<Throwable>(1)
@@ -747,6 +776,8 @@ class RawStillCapturer(
         for (i in 0 until w * h) {
             avg[i] = (acc[i] / BURST_N).toShort()
         }
+        // Exposure is corrected by the demosaic's own percentile auto-level from this
+        // RAW, so nothing exposure-related is measured or persisted here.
         Log.i(TAG, "burst accumulated+averaged ${w}x${h} burstN=$BURST_N wb=[${wbGainsOut[0]},${wbGainsOut[1]},${wbGainsOut[2]}] (camera free, demosaic offloaded)")
         BurstResult(out, avg, w, h, blackLevel, whiteLevel, wbGainsOut[0], wbGainsOut[1], wbGainsOut[2])
     }
@@ -764,7 +795,7 @@ class RawStillCapturer(
             burst.avg, burst.w, burst.h, burst.blackLevel, burst.whiteLevel,
             burst.wbR, burst.wbG, burst.wbB,
         )
-        Log.i(TAG, "demosaic wb=[${burst.wbR},${burst.wbG},${burst.wbB}]")
+        Log.i(TAG, "demosaic wb=[${burst.wbR},${burst.wbG},${burst.wbB}] (percentile autolevel)")
         val tDemosaic = android.os.SystemClock.elapsedRealtime()
         // Physically rotate 90° CCW. EXIF-only rotation is unreliable once
         // we overwrite the file after denoise, so bake the rotation into
@@ -786,8 +817,9 @@ class RawStillCapturer(
      *
      * Reuses the photo path's known-good exposed-capture recipe: borrow the
      * device exclusively, run an AE warmup with a precapture trigger until
-     * CONTROL_AE_STATE reaches CONVERGED (cap AE_WARMUP_MS), then fire a single
-     * TEMPLATE_STILL_CAPTURE RAW frame at +STILL_AE_COMPENSATION EV. The RAW
+     * CONTROL_AE_STATE reaches CONVERGED (cap AE_WARMUP_MS), meter the scene from
+     * one RAW frame (mean green + clip) and fire a single TEMPLATE_STILL_CAPTURE
+     * RAW frame at the adaptive per-scene EV. The RAW
      * frame is demosaiced with WB gains via [RawDemosaic.binToBitmap], rotated
      * -90 (sensor 270, matching the photo path so the face is upright), and
      * JPEG-encoded.
@@ -870,7 +902,10 @@ class RawStillCapturer(
         // fallback constants until the capture result populates them.
         val wbGainsOut = floatArrayOf(WB_R, WB_G, WB_B)
 
-        val reader = ImageReader.newInstance(w, h, ImageFormat.RAW_SENSOR, REID_BURST_N + 1)
+        // RAW reader holds the single ReID frame. No separate metering frame (would
+        // fault the HAL FD pipeline); the frame is captured at comp=0 and brightness
+        // is corrected digitally (DRO) from this frame's own luma after the fact.
+        val reader = ImageReader.newInstance(w, h, ImageFormat.RAW_SENSOR, REID_BURST_N)
         reader.setOnImageAvailableListener({ r ->
             val img = r.acquireNextImage() ?: return@setOnImageAvailableListener
             try {
@@ -885,10 +920,10 @@ class RawStillCapturer(
             }
         }, handler)
 
-        val previewTex = SurfaceTexture(0).apply {
-            setDefaultBufferSize(640, 480)
-            detachFromGLContext()
-        }
+        // AE-warmup target: tiny PRIVATE SurfaceTexture preview (RAW + PRIVATE is
+        // the only RAW-plus-stream combo this HAL accepts). Never read; brightness
+        // is metered off a RAW frame.
+        val previewTex = SurfaceTexture(0).apply { setDefaultBufferSize(PREVIEW_TEX_W, PREVIEW_TEX_H) }
         val previewSurface = Surface(previewTex)
 
         val bodyErr = arrayOfNulls<Throwable>(1)
@@ -909,9 +944,10 @@ class RawStillCapturer(
                 sessErr[0]?.let { throw it }
                 session = sessOut[0]!!
 
-                // AE warmup: same precapture-trigger + converge-wait as the photo
-                // path, so the still lands at a real exposure instead of the
-                // sensor's near-zero default (black frames).
+                // AE warmup on the PRIVATE preview surface (precapture-trigger +
+                // converge-wait, so the still lands at a real exposure, not the
+                // sensor's near-zero default). The frame then captures at comp=0;
+                // brightness is corrected digitally (DRO) from its own luma.
                 run {
                     val warmupBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                         addTarget(previewSurface)
@@ -935,8 +971,8 @@ class RawStillCapturer(
                         }
                     }, handler)
                     val convergedOk = converged.await(AE_WARMUP_MS, TimeUnit.MILLISECONDS)
-                    Log.i(TAG, "reid AE warmup converged=$convergedOk")
                     session.stopRepeating()
+                    Log.i(TAG, "reid AE warmup converged=$convergedOk")
                 }
 
                 val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
@@ -944,7 +980,8 @@ class RawStillCapturer(
                     set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
                     set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                     set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-                    set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, STILL_AE_COMPENSATION)
+                    // comp=0: pure HAL-metered. Brightness lifted digitally (DRO).
+                    set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, 0)
                 }
                 val captureLatch = CountDownLatch(1)
                 val captureErr = arrayOfNulls<Throwable>(1)
@@ -986,7 +1023,9 @@ class RawStillCapturer(
         bodyErr[0]?.let { throw it }
         if (!ran) throw IllegalStateException("camera busy (borrowDeviceExclusive refused)")
 
-        Log.i(TAG, "reid demosaic wb=[${wbGainsOut[0]},${wbGainsOut[1]},${wbGainsOut[2]}]")
+        // Exposure is corrected by the demosaic's own percentile auto-level from this
+        // RAW frame; nothing exposure-related is measured here.
+        Log.i(TAG, "reid demosaic wb=[${wbGainsOut[0]},${wbGainsOut[1]},${wbGainsOut[2]}] (percentile autolevel)")
         val raw = RawDemosaic.binToBitmapFast(
             frame, w, h, blackLevel, whiteLevel,
             wbGainsOut[0], wbGainsOut[1], wbGainsOut[2], downsample = REID_DOWNSAMPLE,
@@ -1026,6 +1065,23 @@ class RawStillCapturer(
         val gAvg = (gains.greenEven + gains.greenOdd) / 2f
         Log.i(TAG, "WB: HAL gains R=${gains.red} Geven=${gains.greenEven} Godd=${gains.greenOdd} B=${gains.blue} -> wbR=${gains.red} wbG=$gAvg wbB=${gains.blue}")
         return Triple(gains.red, gAvg, gains.blue)
+    }
+
+    /**
+     * Read the DEBUG [SKIP_DENOISE_PROP] non-persist system property via
+     * SystemProperties reflection (same pattern as [LedController]). Returns true
+     * when it is "1"/"true", false otherwise (including when unset or unreadable).
+     * Non-persist props reset on reboot, so this is a temporary until-reboot flag.
+     */
+    private fun skipDenoise(): Boolean {
+        return try {
+            val sp = Class.forName("android.os.SystemProperties")
+            val v = sp.getMethod("get", String::class.java).invoke(null, SKIP_DENOISE_PROP) as? String
+            v == "1" || v == "true"
+        } catch (e: Exception) {
+            Log.w(TAG, "skipDenoise read failed: ${e.message}")
+            false
+        }
     }
 
     private fun findRawCapableCamera(manager: CameraManager): String? {

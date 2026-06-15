@@ -1,0 +1,1 @@
+{ "backend_extensions": { "shared_library_path": "libQnnHtpNetRunExtensions.so", "config_file_path": "/tmp/qnnbuild/htp_cfg58_q.json" } }

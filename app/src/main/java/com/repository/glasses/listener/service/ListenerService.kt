@@ -135,6 +135,11 @@ class ListenerService : LifecycleService(),
         const val EXTRA_MOUSE_ACTIVE = "mouse_active"
         const val EXTRA_MOUSE_SENSITIVITY_X = "sensitivity_x"
         const val EXTRA_MOUSE_SENSITIVITY_Y = "sensitivity_y"
+        // Authoritative head-tracking state of the RFCOMM/stream mouse path. The UI reads this
+        // so it reflects stream-mode tracking (which the HID path's isTracking does NOT cover).
+        const val ACTION_RFCOMM_MOUSE_TRACKING = "com.repository.glasses.listener.RFCOMM_MOUSE_TRACKING"
+        const val EXTRA_RFCOMM_TRACKING = "rfcomm_tracking"
+        const val EXTRA_RFCOMM_ACTIVE = "rfcomm_active"
         const val ACTION_RFCOMM_MOUSE_EVENT = "com.repository.glasses.listener.RFCOMM_MOUSE_EVENT"
         const val ACTION_TOOL_THUMBNAIL = "com.repository.glasses.listener.TOOL_THUMBNAIL"
         const val ACTION_BOTTOM_PADDING = "com.repository.glasses.listener.BOTTOM_PADDING"
@@ -935,10 +940,16 @@ class ListenerService : LifecycleService(),
             }
             return
         }
-        // Capture is the source of truth otherwise. Toggle as usual.
+        // Capture is the source of truth otherwise. Toggle on the AUTHORITATIVE
+        // session state (recorder surface present), not the VideoRecorder
+        // boolean: a binder/HAL wedge can make isRecording() read false while
+        // the camera + white LED are actually up, which would flip this
+        // long-press into a second startVideo() and strand the LED on. stopVideo
+        // is now an unconditional, idempotent camera + LED teardown, so even an
+        // "unknown" state safely resolves to a stop.
         try {
-            val capRec = captureBridge.isRecording()
-            btLog("FN long-press: phone idle, capture rec=$capRec -> ${if (capRec) "stopVideo" else "startVideo"}")
+            val capRec = captureBridge.isRecordingActive()
+            btLog("FN long-press: phone idle, capture active=$capRec -> ${if (capRec) "stopVideo" else "startVideo"}")
             if (capRec) captureBridge.stopVideo() else captureBridge.startVideo()
         } catch (e: Exception) {
             btErr("FN long-press: capture toggle failed: ${e.message}")
@@ -2513,6 +2524,10 @@ class ListenerService : LifecycleService(),
             assistantSuppressor.suppress()
             registerReceiver(sensorLongPressReceiver, IntentFilter(ACTION_SENSOR_LONG_PRESS))
             btLog("AssistantSuppressor activated")
+            // Re-apply voice-control-off on every boot so a glasses reboot keeps
+            // the Rokid wakeword/offline-voice suppressed (the phone may also re-send
+            // voice_ctrl_off, which is idempotent).
+            applyVoiceControlOff()
         } catch (e: Exception) {
             btErr("AssistantSuppressor failed: ${e.message}")
         }
@@ -6410,15 +6425,25 @@ class ListenerService : LifecycleService(),
             "start_mouse" -> {
                 val sensX = params.optDouble("sensitivity_x", 1800.0).toFloat()
                 val sensY = params.optDouble("sensitivity_y", 4200.0).toFloat()
-                btLog("Starting mouse (sensX=$sensX sensY=$sensY)")
+                // Stream mode (phone footer "Glasses" over a video stream): reports go
+                // glasses RFCOMM -> phone -> PC stream. Head-tracking must begin immediately
+                // (there is no on-glasses tap available), and the standalone BLE-HID mouse
+                // activity must NOT be launched (it targets a directly-paired PC, not the stream).
+                val streamMode = params.optBoolean("stream_mode", false)
+                btLog("Starting mouse (sensX=$sensX sensY=$sensY streamMode=$streamMode)")
                 // Post to main handler -- HeadTracker needs a Looper thread for sensor callbacks
-                rfcommMouseHandler.post { startRfcommMouse(sensX, sensY) }
-                // Start BLE HID mouse in default process (unchanged)
-                ensureActivityRunning(android.os.Bundle().apply {
-                    putBoolean("start_mouse", true)
-                    putFloat(EXTRA_MOUSE_SENSITIVITY_X, sensX)
-                    putFloat(EXTRA_MOUSE_SENSITIVITY_Y, sensY)
-                })
+                rfcommMouseHandler.post {
+                    startRfcommMouse(sensX, sensY)
+                    if (streamMode && !rfcommMouseTracking) toggleRfcommMouseTracking()
+                }
+                if (!streamMode) {
+                    // Start BLE HID mouse in default process (direct-paired-PC path)
+                    ensureActivityRunning(android.os.Bundle().apply {
+                        putBoolean("start_mouse", true)
+                        putFloat(EXTRA_MOUSE_SENSITIVITY_X, sensX)
+                        putFloat(EXTRA_MOUSE_SENSITIVITY_Y, sensY)
+                    })
+                }
                 sendBroadcast(Intent(ACTION_MOUSE_STATE).apply {
                     setPackage(packageName)
                     putExtra(EXTRA_MOUSE_ACTIVE, true)
@@ -6602,10 +6627,98 @@ class ListenerService : LifecycleService(),
                     }
                 }.start()
             }
+            "get_glass_info" -> {
+                Thread {
+                    val info = JSONObject()
+                    try { info.put("model", android.os.Build.MODEL ?: "") } catch (_: Exception) {}
+                    try { info.put("androidVersion", android.os.Build.VERSION.RELEASE ?: "") } catch (_: Exception) {}
+                    val firmware = (android.os.Build.DISPLAY?.takeIf { it.isNotBlank() })
+                        ?: readGetprop("ro.build.display.id")
+                    if (!firmware.isNullOrBlank()) try { info.put("firmware", firmware) } catch (_: Exception) {}
+                    val serial = try {
+                        android.os.Build.getSerial().takeIf { it.isNotBlank() && it != android.os.Build.UNKNOWN }
+                    } catch (_: Throwable) { null } ?: readGetprop("ro.serialno")
+                    if (!serial.isNullOrBlank()) try { info.put("serial", serial) } catch (_: Exception) {}
+                    try { info.put("battery", GlassesConfig.batteryPct) } catch (_: Exception) {}
+                    try {
+                        android.bluetooth.BluetoothAdapter.getDefaultAdapter()?.let { ad ->
+                            ad.address?.takeIf { it.isNotBlank() }?.let { info.put("mac", it) }
+                            ad.name?.takeIf { it.isNotBlank() }?.let { info.put("name", it) }
+                        }
+                    } catch (_: Exception) {}
+                    btClient.sendCommandResult(requestId, info.toString())
+                }.start()
+            }
+            "set_time" -> {
+                val epochMs = params.optLong("epochMs", 0L)
+                val tz = params.optString("tz", "").ifBlank { "" }
+                btLog("set_time: epochMs=$epochMs tz='$tz'")
+                if (epochMs <= 0L) {
+                    btClient.sendCommandResult(requestId, JSONObject().apply {
+                        put("ok", false)
+                        put("error", "invalid epochMs")
+                    }.toString())
+                } else {
+                    // Reuse the existing time-sync mechanism: drop a sentinel the
+                    // root-capable glasses-power-daemon picks up via inotify
+                    // (clock_settime + persist.sys.timezone). Same path onTimeSync uses.
+                    try {
+                        val f = java.io.File("/data/local/diy-overlay/glasses-time.sync")
+                        f.parentFile?.mkdirs()
+                        f.writeText("$epochMs\n$tz\n")
+                        btClient.sendCommandResult(requestId, JSONObject().apply {
+                            put("ok", true)
+                        }.toString())
+                    } catch (e: Exception) {
+                        btErr("set_time write failed: ${e.message}")
+                        btClient.sendCommandResult(requestId, JSONObject().apply {
+                            put("ok", false)
+                            put("error", e.message ?: "write failed")
+                        }.toString())
+                    }
+                }
+            }
+            "voice_ctrl_off" -> {
+                btLog("voice_ctrl_off: re-asserting Rokid assistant suppression")
+                applyVoiceControlOff()
+                btClient.sendCommandResult(requestId, JSONObject().apply {
+                    put("ok", true)
+                }.toString())
+            }
             else -> {
                 btErr("Unknown command type: $type")
             }
         }
+    }
+
+    /**
+     * Reads a system property via getprop. Best-effort; returns null on any failure.
+     */
+    private fun readGetprop(key: String): String? = try {
+        val p = Runtime.getRuntime().exec(arrayOf("getprop", key))
+        val out = p.inputStream.bufferedReader().readText().trim()
+        p.waitFor()
+        out.takeIf { it.isNotBlank() }
+    } catch (_: Throwable) { null }
+
+    /**
+     * Suppress the Rokid offline wakeword/assistant locally. The AssistantSuppressor
+     * (started in onCreate, also re-asserted here) aborts ACTION_AI_START so the
+     * stock assistant never launches. Best-effort root setprop additionally pins
+     * the Rokid offline-voice switch OFF. Idempotent.
+     */
+    private fun applyVoiceControlOff() {
+        try {
+            if (::assistantSuppressor.isInitialized) {
+                // suppress() is idempotent on the receiver registration.
+                try { assistantSuppressor.suppress() } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {}
+        // Best-effort: pin the Rokid offline-voice property OFF on the rooted ROM.
+        // Harmless if the property is absent.
+        try {
+            Runtime.getRuntime().exec(arrayOf("sh", "-c", "setprop persist.rkd.voice.enable 0")).waitFor()
+        } catch (_: Throwable) {}
     }
 
     override fun onSettings(settingsJson: String) {
@@ -8433,6 +8546,8 @@ class ListenerService : LifecycleService(),
         val tracker = com.repository.glasses.listener.mouse.HeadTracker(this)
         tracker.sensitivityX = sensX
         tracker.sensitivityY = sensY
+        // Accumulation fields are touched on rfcommMouseHandler's thread; deliver callbacks there.
+        tracker.callbackHandler = rfcommMouseHandler
         tracker.listener = object : com.repository.glasses.listener.mouse.HeadTracker.Listener {
             override fun onHeadMove(dx: Float, dy: Float) {
                 if (!rfcommMouseTracking) return
@@ -8448,6 +8563,7 @@ class ListenerService : LifecycleService(),
         rfcommMouseTracker = tracker
         registerReceiver(rfcommMouseEventReceiver, IntentFilter(ACTION_RFCOMM_MOUSE_EVENT), null, rfcommMouseHandler)
         btLog("RFCOMM mouse started (sensX=$sensX sensY=$sensY), tracking=OFF (tap to start)")
+        broadcastRfcommMouseTracking()
     }
 
     private fun toggleRfcommMouseTracking() {
@@ -8461,6 +8577,7 @@ class ListenerService : LifecycleService(),
             rfcommMouseButtons = 0; rfcommMouseDirty = false
         }
         btLog("RFCOMM mouse tracking ${if (rfcommMouseTracking) "ON" else "OFF"}")
+        broadcastRfcommMouseTracking()
     }
 
     private fun stopRfcommMouse() {
@@ -8473,6 +8590,16 @@ class ListenerService : LifecycleService(),
         rfcommMouseButtons = 0; rfcommMouseDirty = false
         try { unregisterReceiver(rfcommMouseEventReceiver) } catch (_: Exception) {}
         btLog("RFCOMM mouse stopped")
+        broadcastRfcommMouseTracking()
+    }
+
+    /** Push the RFCOMM/stream mouse path's active + tracking state to the UI (MainActivity). */
+    private fun broadcastRfcommMouseTracking() {
+        sendBroadcast(Intent(ACTION_RFCOMM_MOUSE_TRACKING).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_RFCOMM_ACTIVE, rfcommMouseActive)
+            putExtra(EXTRA_RFCOMM_TRACKING, rfcommMouseTracking)
+        })
     }
 
     private fun flushRfcommMouse() {

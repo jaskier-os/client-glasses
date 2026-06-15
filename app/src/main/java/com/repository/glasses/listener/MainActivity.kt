@@ -2173,7 +2173,26 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == HidMouseService.ACTION_STATUS) {
                 val tracking = intent.getBooleanExtra(HidMouseService.EXTRA_TRACKING, false)
-                dpadHandler.trackingEnabled = tracking
+                dpadHandler.trackingEnabled = tracking || rfcommMouseTracking
+                runOnUiThread { updateMouseUI() }
+            }
+        }
+    }
+
+    // Authoritative tracking state of the RFCOMM/stream mouse path (stream_mode). The HID path's
+    // isTracking does not cover it, so the UI + gesture machine must read this too.
+    @Volatile private var rfcommMouseActive = false
+    @Volatile private var rfcommMouseTracking = false
+
+    private val rfcommMouseTrackingReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == ListenerService.ACTION_RFCOMM_MOUSE_TRACKING) {
+                rfcommMouseActive = intent.getBooleanExtra(ListenerService.EXTRA_RFCOMM_ACTIVE, false)
+                rfcommMouseTracking = intent.getBooleanExtra(ListenerService.EXTRA_RFCOMM_TRACKING, false)
+                // Drive the d-pad gesture machine (tap=click/scroll, hold=right-click) off the
+                // real tracking state so it works in stream-mode where HID isTracking stays false.
+                dpadHandler.trackingEnabled = rfcommMouseTracking ||
+                    (mouseService?.isTracking ?: false)
                 runOnUiThread { updateMouseUI() }
             }
         }
@@ -2400,33 +2419,29 @@ class MainActivity : AppCompatActivity() {
         startForegroundService(intent)
         bindService(intent, mouseServiceConnection, BIND_AUTO_CREATE)
         dpadHandler.listener = object : DpadInputHandler.Listener {
+            // Route each gesture to the ACTIVE mouse path only: RFCOMM/stream when active,
+            // else the standalone BLE-HID service. Driving both would do dead GATT writes and
+            // (for toggle) spawn a second HeadTracker in stream_mode.
             override fun onLeftClick() {
-                mouseService?.sendClick(0x01)
-                sendRfcommMouseEvent(click = 1)
+                if (rfcommMouseActive) sendRfcommMouseEvent(click = 1) else mouseService?.sendClick(0x01)
             }
             override fun onRightClick() {
-                mouseService?.sendClick(0x02)
-                sendRfcommMouseEvent(click = 2)
+                if (rfcommMouseActive) sendRfcommMouseEvent(click = 2) else mouseService?.sendClick(0x02)
             }
             override fun onToggleTracking() {
-                mouseService?.toggleTracking()
-                sendRfcommMouseEvent(toggle = true)
+                if (rfcommMouseActive) sendRfcommMouseEvent(toggle = true) else mouseService?.toggleTracking()
             }
             override fun onScrollUp() {
-                mouseService?.accumulateScroll(SCROLL_DELTA)
-                sendRfcommMouseEvent(scroll = SCROLL_DELTA)
+                if (rfcommMouseActive) sendRfcommMouseEvent(scroll = SCROLL_DELTA) else mouseService?.accumulateScroll(SCROLL_DELTA)
             }
             override fun onScrollDown() {
-                mouseService?.accumulateScroll(-SCROLL_DELTA)
-                sendRfcommMouseEvent(scroll = -SCROLL_DELTA)
+                if (rfcommMouseActive) sendRfcommMouseEvent(scroll = -SCROLL_DELTA) else mouseService?.accumulateScroll(-SCROLL_DELTA)
             }
             override fun onScrollLeft() {
-                mouseService?.accumulateScroll(SCROLL_DELTA)
-                sendRfcommMouseEvent(scroll = SCROLL_DELTA)
+                if (rfcommMouseActive) sendRfcommMouseEvent(scroll = SCROLL_DELTA) else mouseService?.accumulateScroll(SCROLL_DELTA)
             }
             override fun onScrollRight() {
-                mouseService?.accumulateScroll(-SCROLL_DELTA)
-                sendRfcommMouseEvent(scroll = -SCROLL_DELTA)
+                if (rfcommMouseActive) sendRfcommMouseEvent(scroll = -SCROLL_DELTA) else mouseService?.accumulateScroll(-SCROLL_DELTA)
             }
         }
     }
@@ -2451,21 +2466,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateMouseUI() {
-        val svc = mouseService
-        if (svc == null) {
+        // Tracking is ON if EITHER path reports it: RFCOMM/stream (stream_mode) or BLE-HID.
+        val tracking = rfcommMouseTracking || (mouseService?.isTracking ?: false)
+        // "Connected" is shown whenever a mouse session exists on either path.
+        val connected = rfcommMouseActive || mouseService != null
+
+        if (!connected) {
             mouseConnectionStatus.text = "Ready (via phone)"
             mouseConnectionStatus.setTextColor(Lum.DIM)
             mouseControlsHint.text = "Tap to start tracking"
             mouseControlsHint.setTextColor(Lum.GHOST)
             return
         }
-        val tracking = svc.isTracking
 
         mouseConnectionStatus.text = if (tracking) "Tracking" else "Connected (via phone)"
         mouseConnectionStatus.setTextColor(if (tracking) Lum.BRIGHT else Lum.MID)
 
         if (tracking) {
-            mouseControlsHint.text = "Tap: click | DblTap: right click | Swipe: scroll"
+            mouseControlsHint.text = "Tap: click | Hold: right click | Swipe: scroll"
             mouseControlsHint.setTextColor(Lum.SOFT)
         } else {
             mouseControlsHint.text = "Tap to start tracking"
@@ -3916,6 +3934,7 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(translationStateReceiver, IntentFilter(ListenerService.ACTION_TRANSLATION_STATE))
             registerReceiver(mouseStateReceiver, IntentFilter(ListenerService.ACTION_MOUSE_STATE))
             registerReceiver(mouseStatusReceiver, IntentFilter(HidMouseService.ACTION_STATUS))
+            registerReceiver(rfcommMouseTrackingReceiver, IntentFilter(ListenerService.ACTION_RFCOMM_MOUSE_TRACKING))
             registerReceiver(reidFacesReceiver, IntentFilter(ListenerService.ACTION_REID_FACES))
             registerReceiver(reidStatsReceiver, IntentFilter(ListenerService.ACTION_REID_STATS))
             registerReceiver(reidStatusReceiver, IntentFilter(ListenerService.ACTION_REID_STATUS))
@@ -6994,6 +7013,15 @@ class MainActivity : AppCompatActivity() {
         // through to the ACTION_SENSOR_LONG_PRESS branch below. When no repliable
         // notification is present, NUMPAD_3 falls through and AI listening still
         // fires -- the two coexist without conflict.
+        // Mouse mode: a touchpad HOLD (NUMPAD_3) is a RIGHT-CLICK while tracking is active.
+        // Intercept before the notification-reply / AI-chat long-press paths below so the hold
+        // never summons the assistant. Double-tap stays as the tracking toggle (BACK handler).
+        if (keyCode == KeyEvent.KEYCODE_NUMPAD_3 &&
+            focusState == FocusState.MOUSE_FOCUSED && dpadHandler.trackingEnabled) {
+            uiLog("[Mouse] HOLD -> right click")
+            dpadHandler.listener?.onRightClick()
+            return@section true
+        }
         if (keyCode == KeyEvent.KEYCODE_NUMPAD_3) {
             uiLog("[NREPLY] NUMPAD_3 down: repliable=$notificationRepliable pendingNotifId=${pendingNotifId?.take(12)} activeReplyNotifId=${activeReplyNotifId?.take(12)} focus=$focusState replyArming=$replyArming")
         }
@@ -7234,7 +7262,10 @@ class MainActivity : AppCompatActivity() {
             }
             if (focusState == FocusState.MOUSE_FOCUSED) {
                 if (dpadHandler.trackingEnabled) {
-                    mouseService?.toggleTracking()
+                    // Double-tap (BACK) toggles tracking OFF on the ACTIVE path only -- never both,
+                    // or two HeadTrackers (RFCOMM + HID) would run at once.
+                    if (rfcommMouseActive) sendRfcommMouseEvent(toggle = true)
+                    else mouseService?.toggleTracking()
                     return true
                 }
                 focusState = FocusState.TAB_NAV
@@ -8058,7 +8089,9 @@ class MainActivity : AppCompatActivity() {
                     if (dpadHandler.onKeyDown(keyCode, event)) return true
                 }
                 if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
-                    mouseService?.toggleTracking()
+                    // Not yet tracking: a tap starts tracking on the ACTIVE path only (never both).
+                    if (rfcommMouseActive) sendRfcommMouseEvent(toggle = true)
+                    else mouseService?.toggleTracking()
                     return true
                 }
                 // Consume all DPAD in mouse mode to prevent tab switching
@@ -9194,7 +9227,7 @@ class MainActivity : AppCompatActivity() {
             notificationShownReceiver, notificationHiddenReceiver,
             notificationSoloShowReceiver, notificationSoloEndReceiver,
             soloScreenOffReceiver, soloScreenOnReceiver,
-            callUiStateReceiver
+            callUiStateReceiver, rfcommMouseTrackingReceiver
         ).forEach {
             try { unregisterReceiver(it) } catch (_: Exception) {}
         }

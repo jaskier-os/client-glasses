@@ -257,4 +257,16 @@ class CaptureBridge(private val context: Context) {
     }
     fun isRecording(): Boolean = try { api?.isRecording ?: false } catch (_: Exception) { false }
     fun isPaused(): Boolean = try { api?.isPaused ?: false } catch (_: Exception) { false }
+
+    /**
+     * Authoritative recording state from the live camera session (recorder
+     * surface present), NOT the VideoRecorder boolean. The FN-button toggle must
+     * use this: a binder/HAL wedge can make isRecording() return false while the
+     * camera + white LED are actually up, which would flip a long-press into a
+     * second startVideo() instead of a stop and strand the LED on. When the
+     * binder itself is unreachable we cannot know the real state; default to
+     * true so the toggle prefers STOP (which is now an unconditional, idempotent
+     * camera + LED teardown -- safe even if nothing was recording).
+     */
+    fun isRecordingActive(): Boolean = try { api?.isRecordingActive ?: true } catch (_: Exception) { true }
 }

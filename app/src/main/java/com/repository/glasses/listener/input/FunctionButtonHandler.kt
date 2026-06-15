@@ -69,8 +69,10 @@ class FunctionButtonHandler(
                 log("FnButton: onLongPressVideo threw: ${t.message}")
             }
         } else {
-            val rec = capture.isRecording()
-            log("FnButton: long-press, recording=$rec -> ${if (rec) "stopVideo" else "startVideo"}")
+            // Authoritative session state, not the VideoRecorder boolean (see
+            // CaptureBridge.isRecordingActive) so a wedged false can't double-start.
+            val rec = capture.isRecordingActive()
+            log("FnButton: long-press, active=$rec -> ${if (rec) "stopVideo" else "startVideo"}")
             if (rec) capture.stopVideo() else capture.startVideo()
         }
     }
@@ -123,8 +125,12 @@ class FunctionButtonHandler(
         if (longPressFired) return@section true  // long-press path already acted
         val elapsed = SystemClock.elapsedRealtime() - start
         if (elapsed >= longPressMs) return@section true  // race: treat as long (unlikely)
-        val rec = capture.isRecording()
-        log("FnButton: short-press, recording=$rec -> ${if (rec) "togglePauseVideo" else "takePhoto"}")
+        // Use the AUTHORITATIVE session state (recorder surface present) rather
+        // than the VideoRecorder boolean, so a binder/HAL wedge that desyncs
+        // isRecording() to false can't make a short-press mis-route (pause vs
+        // photo). Matches the long-press toggle.
+        val rec = capture.isRecordingActive()
+        log("FnButton: short-press, active=$rec -> ${if (rec) "togglePauseVideo" else "takePhoto"}")
         if (rec) {
             capture.togglePauseVideo()
         } else {

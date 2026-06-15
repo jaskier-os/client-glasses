@@ -20,6 +20,7 @@
     <application
         android:name=".CaptureApp"
         android:allowBackup="false"
+        android:extractNativeLibs="true"
         android:largeHeap="true"
         android:label="Capture">
 
@@ -29,6 +30,16 @@
         <uses-native-library android:name="libOpenCL.so" android:required="false"/>
         <uses-native-library android:name="libOpenCL-car.so" android:required="false"/>
         <uses-native-library android:name="libOpenCL-pixel.so" android:required="false"/>
+
+        <!-- The QNN HTP backend stub (libQnnHtpV73Stub.so) dlopens the Qualcomm
+             CDSP fastRPC client to reach the Hexagon V73 NPU. These are public
+             vendor libs (listed in /vendor/etc/public.libraries.txt) but the app's
+             classloader namespace blocks /vendor/lib64 unless explicitly granted
+             here (API 31+). Without this the stub load fails ("libcdsprpc.so not
+             found"), device-create returns INVALID_CONFIG and denoise falls to CPU. -->
+        <uses-native-library android:name="libcdsprpc.so" android:required="false"/>
+        <uses-native-library android:name="libadsprpc.so" android:required="false"/>
+        <uses-native-library android:name="libsdsprpc.so" android:required="false"/>
 
         <service
             android:name=".CaptureService"

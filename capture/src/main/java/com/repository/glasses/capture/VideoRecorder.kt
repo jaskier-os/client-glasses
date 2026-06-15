@@ -228,6 +228,25 @@ class VideoRecorder(
         paused = false
     }
 
+    /**
+     * Force the recorder down regardless of the [recording] flag. Used by the
+     * stop path when state has desynced (the flag reads false but the camera/LED
+     * may still be up). Idempotent and crash-safe: detaches the recorder surface
+     * (a no-op when already cleared), stops + releases any MediaRecorder, and
+     * resets all state. Safe to call when nothing is recording -- it just ensures
+     * the recorder is fully torn down and returns. The camera session's
+     * clearRecorderSurface() is also called by the caller (forceTeardown); this
+     * call makes the detach + recorder release robust from this side too.
+     */
+    fun forceStop() {
+        handler.post {
+            try { cameraSession.clearRecorderSurface() } catch (_: Exception) {}
+            try { recorder?.stop() } catch (_: Exception) {}
+            cleanupRecorder()
+            Log.i(TAG, "forceStop done recording=$recording")
+        }
+    }
+
     private fun cleanupQuietly() {
         Log.i(TAG, "cleanupQuietly entry recording=$recording")
         if (recording) {

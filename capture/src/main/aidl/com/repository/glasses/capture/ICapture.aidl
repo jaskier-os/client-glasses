@@ -28,6 +28,12 @@ interface ICapture {
     boolean isRecording();
     boolean isPaused();
 
+    /** Authoritative recording state derived from the live camera session
+     *  (recorder surface present), NOT the VideoRecorder boolean. Use this for
+     *  the FN-button toggle so a desynced/wedged isRecording()==false cannot
+     *  cause a second startVideo() instead of a stop. */
+    boolean isRecordingActive();
+
     /** Capture ONE correctly-exposed still for ReID using the known-good RAW
      *  burst -> demosaic recipe (RawStillCapturer), then deliver the upright
      *  JPEG to [cb] via onFrame(jpeg, w, h, rotationDeg=0, frameId). Rotation is

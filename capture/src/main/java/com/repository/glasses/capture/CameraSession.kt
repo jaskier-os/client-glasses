@@ -3,9 +3,6 @@ package com.repository.glasses.capture
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
-import android.media.Image
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -59,19 +56,19 @@ class CameraSession(private val context: Context) {
         // transaction limit (~1MB). 1280x960 JPEG is ~80-200KB.
         private const val FRAME_MAX_W = 1280
         private const val FRAME_MAX_H = 960
-        // Snapshot-while-recording YUV size. This Rokid HAL does NOT deliver
-        // frames to a JPEG ImageReader in a REPEATING request (a JPEG reader
-        // alongside the recorder starves the whole repeating request -> the
-        // recorder surface stops getting frames and the stall watchdog fires).
-        // YUV_420_888, however, DOES deliver in a repeating request (the old
-        // PhotoCapturer proved this with a 1280x720 YUV preview reader), so the
-        // snapshot reader is YUV and we JPEG-encode on demand. 1280x720 is the
-        // known-good size that reliably delivers in the record session. Used by
+        // Live-shot (snapshot-while-recording) JPEG size. The reader is part of
+        // the record session's output set but is NOT a target of the
+        // TEMPLATE_RECORD repeating request -- it sits idle until a snapshot is
+        // requested via a one-shot session.capture() with
+        // CONTROL_CAPTURE_INTENT = VIDEO_SNAPSHOT. This is the HAL's blessed
+        // "video live shot" path (selects a *LiveSnapshot* / PreviewVideo
+        // usecase, NOT the unsustainable RealTimeFeatureZSLPreviewRawYUV that a
+        // continuously-streamed YUV second target selected). 1280x720 BLOB is on
+        // the advertised JPEG size ladder and well within the procStalling
+        // budget (recorder PRIV non-stalling + 1 JPEG stalling = 1/2). Used by
         // both the func-button photo and ReID while a recording is active.
         private const val SNAPSHOT_W = 1280
         private const val SNAPSHOT_H = 720
-        // On-demand JPEG quality for the YuvImage encode in captureVideoSnapshot.
-        private const val SNAPSHOT_JPEG_QUALITY = 90
         // Force-stop recording if the repeating request produces no frame in
         // this window (mirrors the old VideoRecorder stall watchdog).
         private const val FRAME_STALL_MS = 2000L
@@ -116,19 +113,26 @@ class CameraSession(private val context: Context) {
     @Volatile private var session: CameraCaptureSession? = null
     @Volatile private var frameReader: ImageReader? = null
 
-    // Snapshot reader: a YUV_420_888 ImageReader that joins the TEMPLATE_RECORD
-    // session as a SECOND output alongside the MediaRecorder surface, so callers
-    // can pull a video-grade still WHILE recording (the RAW borrow path is
-    // unavailable then). YUV (not JPEG) because this HAL only delivers YUV --
-    // not JPEG -- to an ImageReader in a repeating request; a JPEG reader here
-    // would starve the recorder. The latest YUV frame is plane-copied to NV21
-    // and cached; captureVideoSnapshot JPEG-encodes that cache on demand.
-    // Created when the recorder surface is added, closed when it is cleared.
-    // While recording this is the ONLY frame source for both the func-button
-    // photo and ReID (the reid frameReader is NOT also added -- the record
-    // session stays at exactly two outputs: recorder + snapshot).
+    // Live-shot reader: a JPEG (BLOB) ImageReader configured into the
+    // TEMPLATE_RECORD session as a SECOND output alongside the MediaRecorder
+    // surface, so callers can pull a video-grade still WHILE recording (the RAW
+    // borrow path is unavailable then). It is NOT a target of the repeating
+    // request -- it stays idle until captureVideoSnapshot() fires a single
+    // high-priority one-shot session.capture() with
+    // CONTROL_CAPTURE_INTENT = VIDEO_SNAPSHOT against it. The HAL encodes the
+    // JPEG itself (no demosaic on our side). Created when the recorder surface
+    // is added, closed when it is cleared. While recording this is the ONLY
+    // frame source for both the func-button photo and ReID (the reid frameReader
+    // is NOT also added -- the record session stays at exactly two outputs:
+    // recorder + live-shot JPEG).
     @Volatile private var snapshotReader: ImageReader? = null
     private var snapshotSize = Size(SNAPSHOT_W, SNAPSHOT_H)
+    // One live-shot in flight at a time. A new request while one is pending is
+    // rejected with onError (the ReID driver tolerates retry-next-tick).
+    @Volatile private var liveShotInFlight = false
+    // Delivery callbacks for the pending live-shot, set on the handler thread.
+    private var liveShotOnJpeg: ((ByteArray, Int, Int, Int) -> Unit)? = null
+    private var liveShotOnError: ((Throwable) -> Unit)? = null
 
     // Holders.
     @Volatile private var recorderSurface: Surface? = null
@@ -156,15 +160,6 @@ class CameraSession(private val context: Context) {
 
     // Pending one-shot still request, satisfied from the next stream frame.
     private var pendingStill: ((ByteArray, Int, Int, Int) -> Unit)? = null
-
-    // Latest NV21 frame from the YUV snapshot reader (recording-only). Replaced
-    // on every onSnapshotAvailable with a cheap plane-copy (NO JPEG encode on
-    // the 30fps hot path); captureVideoSnapshot JPEG-encodes whatever is cached
-    // here on demand. Guarded by snapshotLock. width/height track the bytes.
-    private val snapshotLock = Any()
-    private var latestSnapshot: ByteArray? = null
-    private var latestSnapshotW = 0
-    private var latestSnapshotH = 0
 
     fun isOpen(): Boolean = device != null
 
@@ -408,11 +403,13 @@ class CameraSession(private val context: Context) {
             frameReader = null
         }
 
-        // Output set:
-        //  - RECORDING: recorder surface + snapshot JPEG reader (exactly two).
-        //    The reid frameReader is NOT added while recording; ReID pulls from
-        //    the shared snapshot reader instead, so the record session never
-        //    exceeds two outputs.
+        // Output set (what is CONFIGURED into the session):
+        //  - RECORDING: recorder surface + live-shot JPEG reader (exactly two).
+        //    Both are configured so the JPEG reader can receive a one-shot
+        //    capture, but only the recorder is added to the repeating request
+        //    (see startRepeating). The reid frameReader is NOT added while
+        //    recording; ReID fires a live-shot one-shot instead, so the record
+        //    session never exceeds two outputs.
         //  - NOT RECORDING: the func-button-photo frameReader (when a still is
         //    pending), as before.
         val outputs = mutableListOf<Surface>()
@@ -470,8 +467,20 @@ class CameraSession(private val context: Context) {
         // frames on this Rokid HAL (verified on-device: zero onImageAvailable /
         // onCaptureCompleted), so the stream MUST use TEMPLATE_PREVIEW.
         val template = if (recording) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
+        // Repeating targets: while RECORDING, ONLY the recorder surface. The
+        // live-shot JPEG reader is configured into the session but must NOT be a
+        // repeating target -- a continuously-streamed second readout is exactly
+        // what selected the unsustainable RealTimeFeatureZSLPreviewRawYUV usecase
+        // and storms the HAL with buffer errors. It receives a buffer only on the
+        // on-demand one-shot capture in captureVideoSnapshot(). When NOT
+        // recording, every output (the func-button JPEG reader) is a target.
+        val repeatingTargets = if (recording) {
+            outputs.filter { it === recorderSurface }
+        } else {
+            outputs
+        }
         val builder = cam.createCaptureRequest(template).apply {
-            for (out in outputs) addTarget(out)
+            for (out in repeatingTargets) addTarget(out)
             set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             // Match the func-button photo path (PhotoCapturer warmup): let AWB
@@ -639,125 +648,100 @@ class CameraSession(private val context: Context) {
         }
     }
 
-    /** Create the snapshot YUV reader for the recording session. YUV_420_888
-     *  (not JPEG) because this HAL only delivers YUV to an ImageReader in a
-     *  repeating request; a JPEG reader here delivers zero frames and starves
-     *  the recorder. Runs on the handler thread (from setRecorderSurface).
-     *  Idempotent. */
+    /** Create the live-shot JPEG (BLOB) reader for the recording session. It is
+     *  configured into the record session as a second output but is NEVER a
+     *  target of the repeating request; captureVideoSnapshot fires a one-shot
+     *  capture against it. This is the HAL-blessed video live-shot path and does
+     *  NOT select the ZSL-RAW-YUV usecase a streamed YUV second target did. Runs
+     *  on the handler thread (from setRecorderSurface). Idempotent. */
     private fun openSnapshotReader() {
         if (snapshotReader != null) return
         snapshotSize = chooseSnapshotSize()
         snapshotReader = ImageReader.newInstance(
-            snapshotSize.width, snapshotSize.height, ImageFormat.YUV_420_888, 3
+            snapshotSize.width, snapshotSize.height, ImageFormat.JPEG, 2
         ).apply {
-            setOnImageAvailableListener({ r -> onSnapshotAvailable(r) }, handler)
+            setOnImageAvailableListener({ r -> onLiveShotAvailable(r) }, handler)
         }
-        Log.i(TAG, "openSnapshotReader YUV ${snapshotSize.width}x${snapshotSize.height}")
+        Log.i(TAG, "openSnapshotReader JPEG ${snapshotSize.width}x${snapshotSize.height}")
     }
 
-    /** Close the snapshot reader and drop the latest cached frame. Handler thread. */
+    /** Close the live-shot reader and fail any pending request. Handler thread. */
     private fun closeSnapshotReader() {
         try { snapshotReader?.close() } catch (_: Exception) {}
         snapshotReader = null
-        synchronized(snapshotLock) {
-            latestSnapshot = null
-            latestSnapshotW = 0
-            latestSnapshotH = 0
+        val err = liveShotOnError
+        liveShotOnJpeg = null
+        liveShotOnError = null
+        liveShotInFlight = false
+        if (err != null) userCbExecutor.execute {
+            try { err(IllegalStateException("live-shot reader closed")) } catch (_: Throwable) {}
         }
     }
 
-    /** Keep only the most recent frame as NV21 so a snapshot grab is a cheap
-     *  on-demand JPEG encode and the recorder is never starved. This does the
-     *  CHEAP plane-copy only (honoring row/pixel stride padding) -- NO JPEG
-     *  encode on this 30fps hot path. Runs on the handler thread. */
-    private fun onSnapshotAvailable(reader: ImageReader) {
-        val image = reader.acquireLatestImage() ?: return
-        try {
-            val nv21 = yuvImageToNv21(image)
-            synchronized(snapshotLock) {
-                latestSnapshot = nv21
-                latestSnapshotW = image.width
-                latestSnapshotH = image.height
-            }
-        } catch (e: Throwable) {
-            Log.w(TAG, "onSnapshotAvailable read failed: ${e.message}")
-        } finally {
+    /** A one-shot live-shot JPEG landed: read the already-encoded bytes and
+     *  deliver them to the pending request's callback. Runs on the handler
+     *  thread. The reader produces a buffer ONLY in response to the one-shot
+     *  capture fired by captureVideoSnapshot, so any frame here belongs to the
+     *  in-flight request. */
+    private fun onLiveShotAvailable(reader: ImageReader) {
+        val image = reader.acquireLatestImage()
+        if (image == null) return
+        val onJpeg = liveShotOnJpeg
+        if (onJpeg == null) {
+            // No request outstanding (e.g. raced a close): drop the buffer.
             image.close()
+            return
+        }
+        val data: ByteArray
+        val w: Int
+        val h: Int
+        try {
+            // BLOB: planes[0] is the complete, already-encoded JPEG stream.
+            val buffer = image.planes[0].buffer
+            data = ByteArray(buffer.remaining())
+            buffer.get(data)
+            w = image.width
+            h = image.height
+        } catch (e: Throwable) {
+            Log.w(TAG, "onLiveShotAvailable read failed: ${e.message}")
+            image.close()
+            val onError = liveShotOnError
+            liveShotOnJpeg = null
+            liveShotOnError = null
+            liveShotInFlight = false
+            if (onError != null) userCbExecutor.execute {
+                try { onError(IllegalStateException("live-shot read failed: ${e.message}")) } catch (_: Throwable) {}
+            }
+            return
+        }
+        image.close()
+        // Deliver sensorOrientation as rotationDeg (the HAL JPEG is
+        // sensor-oriented); consumers rotate, matching the old contract.
+        val rot = sensorOrientation
+        liveShotOnJpeg = null
+        liveShotOnError = null
+        liveShotInFlight = false
+        userCbExecutor.execute {
+            try { onJpeg(data, w, h, rot) } catch (e: Throwable) {
+                Log.w(TAG, "live-shot callback threw: ${e.message}")
+            }
         }
     }
 
     /**
-     * Plane-copy a YUV_420_888 [Image] into a tightly-packed NV21 byte array,
-     * honoring each plane's rowStride/pixelStride (YUV_420_888 planes are often
-     * padded, so a naive bulk copy would shear the image). Re-implements the
-     * proven PhotoCapturer.yuvImageToRawNv21 logic: the full Y plane row by row,
-     * then the interleaved V,U chroma (NV21 = Y plane followed by V0 U0 V1 U1...)
-     * at half resolution, reading each chroma sample at its own pixelStride.
-     */
-    private fun yuvImageToNv21(image: Image): ByteArray {
-        val w = image.width
-        val h = image.height
-        val nv21 = ByteArray(w * h * 3 / 2)
-
-        val yPlane = image.planes[0]
-        val uPlane = image.planes[1]
-        val vPlane = image.planes[2]
-        val yBuf = yPlane.buffer
-        val uBuf = uPlane.buffer
-        val vBuf = vPlane.buffer
-        val yRowStride = yPlane.rowStride
-        val yPixelStride = yPlane.pixelStride
-        val uRowStride = uPlane.rowStride
-        val uPixelStride = uPlane.pixelStride
-        val vRowStride = vPlane.rowStride
-        val vPixelStride = vPlane.pixelStride
-
-        var dst = 0
-        // Y plane: copy each row, respecting rowStride padding. When the row is
-        // tightly packed (stride == width, pixelStride == 1) bulk-copy the row.
-        if (yPixelStride == 1) {
-            val rowBuf = ByteArray(w)
-            for (row in 0 until h) {
-                yBuf.position(row * yRowStride)
-                yBuf.get(rowBuf, 0, w)
-                System.arraycopy(rowBuf, 0, nv21, dst, w)
-                dst += w
-            }
-        } else {
-            for (row in 0 until h) {
-                val base = row * yRowStride
-                for (col in 0 until w) {
-                    nv21[dst++] = yBuf.get(base + col * yPixelStride)
-                }
-            }
-        }
-
-        // Chroma: NV21 interleaves V then U at half width/height.
-        val cw = w / 2
-        val ch = h / 2
-        for (row in 0 until ch) {
-            val uRow = row * uRowStride
-            val vRow = row * vRowStride
-            for (col in 0 until cw) {
-                nv21[dst++] = vBuf.get(vRow + col * vPixelStride)
-                nv21[dst++] = uBuf.get(uRow + col * uPixelStride)
-            }
-        }
-        return nv21
-    }
-
-    /**
-     * Grab the LATEST frame from the snapshot reader and JPEG-encode it ON
-     * DEMAND (recording-only). The record session streams YUV frames into the
-     * snapshot reader at the video framerate; onSnapshotAvailable plane-copies
-     * each to NV21 (cheap) and caches it. This call takes that cached NV21 and
-     * JPEG-encodes it once, here -- so the 30fps hot path never burns CPU on
-     * encoding. No session change, no blocking capture. [onJpeg] receives
-     * (jpegBytes, width, height, rotationDeg) where rotationDeg =
-     * sensorOrientation; the caller rotates (matching the reid frameReader
-     * contract). If no frame is cached yet (recording just started), retries
-     * briefly before erroring so callers never see a spurious empty result.
+     * Fire a single high-priority video live-shot JPEG WHILE RECORDING and
+     * deliver the encoded bytes (recording-only). The live-shot JPEG reader is
+     * already configured into the live record session (idle); this builds a
+     * one-shot request from TEMPLATE_STILL_CAPTURE targeting ONLY the JPEG
+     * reader, sets CONTROL_CAPTURE_INTENT = VIDEO_SNAPSHOT (steers CamX onto the
+     * live-snapshot pipeline, not ZSL-RAW-YUV), keeps AE/AWB auto, and fires it
+     * once against the SAME live session (no reconfigure). The recorder repeating
+     * request keeps running on the single PRIV stream throughout. [onJpeg]
+     * receives (jpegBytes, width, height, rotationDeg) where rotationDeg =
+     * sensorOrientation; the caller rotates (matching the old contract).
      *
+     * One live-shot in flight at a time: a request arriving while one is pending
+     * fails fast with [onError] (the ReID driver tolerates retry-next-tick).
      * Only valid while a recorder surface is active; otherwise [onError] fires
      * and callers must use the RAW path instead.
      */
@@ -766,61 +750,62 @@ class CameraSession(private val context: Context) {
         onError: (Throwable) -> Unit,
     ) {
         handler.post {
-            if (recorderSurface == null || snapshotReader == null) {
+            val s = session
+            val reader = snapshotReader
+            val cam = device
+            if (recorderSurface == null || reader == null || s == null || cam == null) {
                 userCbExecutor.execute {
                     onError(IllegalStateException("captureVideoSnapshot: not recording"))
                 }
                 return@post
             }
-            // Up to ~10 short waits (500ms total) for the first frame after the
-            // record session starts streaming. The repeating request is already
-            // running, so a frame normally lands within one frame interval.
-            var attempt = 0
-            while (true) {
-                val nv21: ByteArray?
-                val w: Int
-                val h: Int
-                synchronized(snapshotLock) {
-                    nv21 = latestSnapshot
-                    w = latestSnapshotW
-                    h = latestSnapshotH
+            if (liveShotInFlight) {
+                userCbExecutor.execute {
+                    onError(IllegalStateException("captureVideoSnapshot: live-shot already in flight"))
                 }
-                if (nv21 != null) {
-                    val rot = sensorOrientation
-                    val jpeg = try {
-                        encodeNv21ToJpeg(nv21, w, h)
-                    } catch (e: Throwable) {
-                        Log.w(TAG, "snapshot JPEG encode failed: ${e.message}")
-                        userCbExecutor.execute {
-                            onError(IllegalStateException("captureVideoSnapshot encode failed: ${e.message}"))
+                return@post
+            }
+            try {
+                val req = cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                    addTarget(reader.surface)
+                    set(
+                        CaptureRequest.CONTROL_CAPTURE_INTENT,
+                        CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_SNAPSHOT
+                    )
+                    set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                    set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                }
+                liveShotOnJpeg = onJpeg
+                liveShotOnError = onError
+                liveShotInFlight = true
+                s.capture(req.build(), object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureFailed(
+                        s2: CameraCaptureSession,
+                        request: CaptureRequest,
+                        failure: android.hardware.camera2.CaptureFailure
+                    ) {
+                        Log.w(TAG, "live-shot capture failed reason=${failure.reason}")
+                        val cb = liveShotOnError
+                        liveShotOnJpeg = null
+                        liveShotOnError = null
+                        liveShotInFlight = false
+                        if (cb != null) userCbExecutor.execute {
+                            try { cb(IllegalStateException("live-shot capture failed reason=${failure.reason}")) } catch (_: Throwable) {}
                         }
-                        return@post
                     }
-                    userCbExecutor.execute {
-                        try { onJpeg(jpeg, w, h, rot) } catch (e: Throwable) {
-                            Log.w(TAG, "snapshot callback threw: ${e.message}")
-                        }
-                    }
-                    return@post
+                }, handler)
+                Log.i(TAG, "live-shot one-shot fired ${snapshotSize.width}x${snapshotSize.height}")
+            } catch (e: Throwable) {
+                liveShotOnJpeg = null
+                liveShotOnError = null
+                liveShotInFlight = false
+                Log.w(TAG, "captureVideoSnapshot failed: ${e.message}")
+                userCbExecutor.execute {
+                    onError(IllegalStateException("captureVideoSnapshot failed: ${e.message}"))
                 }
-                if (attempt++ >= 10) {
-                    userCbExecutor.execute {
-                        onError(IllegalStateException("captureVideoSnapshot: no frame yet"))
-                    }
-                    return@post
-                }
-                try { Thread.sleep(50) } catch (_: InterruptedException) {}
             }
         }
-    }
-
-    /** JPEG-encode an NV21 buffer via the platform YuvImage encoder. Done on
-     *  demand only (not per-frame) so the 30fps stream stays cheap. */
-    private fun encodeNv21ToJpeg(nv21: ByteArray, w: Int, h: Int): ByteArray {
-        val stream = java.io.ByteArrayOutputStream(w * h / 2)
-        YuvImage(nv21, ImageFormat.NV21, w, h, null)
-            .compressToJpeg(Rect(0, 0, w, h), SNAPSHOT_JPEG_QUALITY, stream)
-        return stream.toByteArray()
     }
 
     private fun chooseSnapshotSize(): Size {
@@ -828,13 +813,12 @@ class CameraSession(private val context: Context) {
             val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val chars = manager.getCameraCharacteristics(cameraId)
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val sizes = map?.getOutputSizes(ImageFormat.YUV_420_888)
+            val sizes = map?.getOutputSizes(ImageFormat.JPEG)
             if (sizes.isNullOrEmpty()) Size(SNAPSHOT_W, SNAPSHOT_H)
             else {
-                // Prefer the known-good 1280x720 if the HAL advertises it. The
-                // YUV->NV21 chroma copy assumes even width/height (it walks w/2 x
-                // h/2 chroma), so prefer an exact match. Otherwise fall back to
-                // the largest advertised YUV size not exceeding the cap.
+                // Prefer the known-good 1280x720 if the HAL advertises it for
+                // JPEG. Otherwise fall back to the largest advertised JPEG size
+                // not exceeding the cap (keeps the live-shot fast + small).
                 val exact = sizes.firstOrNull { it.width == SNAPSHOT_W && it.height == SNAPSHOT_H }
                 if (exact != null) exact
                 else {

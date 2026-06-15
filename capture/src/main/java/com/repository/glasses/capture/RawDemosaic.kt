@@ -14,6 +14,102 @@ import android.util.Log
 object RawDemosaic {
     private const val TAG = "RawDemosaic"
 
+    // ---- Local Reinhard tone-mapping (dodge-and-burn) ----
+    //
+    // A SINGLE global tone curve cannot expose a high-dynamic-range scene -- e.g. a
+    // bright screen in a dim room. Any one curve must either roll the bright screen
+    // off (losing the room's lift) or lift the room (washing the screen to flat
+    // white). The bright Gmail screen and the dark room around it cannot both be
+    // exposed by a global mapping.
+    //
+    // The fix is a LOCAL operator (Reinhard local / dodge-and-burn): each pixel is
+    // scaled by 1 / (1 + Llocal), where Llocal is the key-scaled luminance of its
+    // NEIGHBOURHOOD (a box-blur of luma*k). Bright regions have a high local average
+    // -> less gain -> the screen keeps its content instead of clipping. Dark regions
+    // have a low local average -> more gain -> the room is lifted. The overall
+    // exposure is anchored by the geometric-mean (log-average) luminance, not the
+    // median: on a dark scene the median collapses to 0 and pins gain to max, which
+    // was the global path's failure mode.
+
+    /** Target log-average exposure key (geometric-mean Reinhard). Higher = brighter
+     *  overall. 0.18 is the classic photographic mid-grey key, validated locally. */
+    private const val LOCAL_KEY = 0.18f
+    /** Box-blur radius as a FRACTION of the output width, so the locality covers the
+     *  same fraction of the frame at any output resolution. Larger = smoother / more
+     *  global (fewer halos but less local contrast); smaller = more local contrast
+     *  (can introduce halos around high-contrast edges). 0.03 gives radius ~60 at
+     *  outW=2016 (the half-res photo path). */
+    private const val LOCAL_RADIUS_FRAC = 0.03f
+    /** Floor added to luma before the log (and to the log-average denominator) so a
+     *  black pixel doesn't drive ln() to -inf and the key scale stays finite. */
+    private const val LUMA_EPS = 1e-4f
+
+    /**
+     * Geometric mean (exp of the mean of ln) of [luma] over [count] pixels, with a
+     * [LUMA_EPS] floor so black pixels don't send ln() to -inf. This log-average
+     * luminance is the scene's overall exposure anchor: k = LOCAL_KEY / logavg.
+     * Subsamples by [stride] to keep the single ln+sum pass cheap.
+     */
+    private fun logAverageLuma(luma: FloatArray, count: Int, stride: Int): Float {
+        if (count <= 0) return LUMA_EPS
+        var sumLn = 0.0
+        var n = 0
+        var i = 0
+        while (i < count) {
+            var v = luma[i]
+            if (v < 0f) v = 0f
+            sumLn += Math.log((v + LUMA_EPS).toDouble())
+            n++
+            i += stride
+        }
+        if (n <= 0) return LUMA_EPS
+        return Math.exp(sumLn / n).toFloat().coerceAtLeast(LUMA_EPS)
+    }
+
+    /**
+     * Separable O(n) box blur of [src] (an [w]x[h] array) into [dst] with a
+     * (2*radius+1) window, using running sums. Border pixels replicate the edge
+     * value (clamp-extend) so edges aren't darkened/brightened. Two passes:
+     * horizontal then vertical, via a scratch buffer.
+     */
+    private fun boxBlur(src: FloatArray, dst: FloatArray, w: Int, h: Int, radius: Int) {
+        val r = radius.coerceAtLeast(1)
+        val win = 2 * r + 1
+        val tmp = FloatArray(w * h)
+        // Horizontal pass: src -> tmp.
+        for (y in 0 until h) {
+            val row = y * w
+            // Seed the running sum for x=0 with clamp-extended left border.
+            var sum = 0f
+            for (k in -r..r) {
+                val xx = if (k < 0) 0 else if (k >= w) w - 1 else k
+                sum += src[row + xx]
+            }
+            tmp[row] = sum / win
+            for (x in 1 until w) {
+                val add = (x + r).let { if (it >= w) w - 1 else it }
+                val sub = (x - r - 1).let { if (it < 0) 0 else it }
+                sum += src[row + add] - src[row + sub]
+                tmp[row + x] = sum / win
+            }
+        }
+        // Vertical pass: tmp -> dst.
+        for (x in 0 until w) {
+            var sum = 0f
+            for (k in -r..r) {
+                val yy = if (k < 0) 0 else if (k >= h) h - 1 else k
+                sum += tmp[yy * w + x]
+            }
+            dst[x] = sum / win
+            for (y in 1 until h) {
+                val add = (y + r).let { if (it >= h) h - 1 else it }
+                val sub = (y - r - 1).let { if (it < 0) 0 else it }
+                sum += tmp[add * w + x] - tmp[sub * w + x]
+                dst[y * w + x] = sum / win
+            }
+        }
+    }
+
     /**
      * Fast 4x4 grayscale preview: for each 4x4 Bayer super-block, average the
      * 8 green samples into an 8-bit intensity. Output is 1/4 the sensor
@@ -115,7 +211,7 @@ object RawDemosaic {
         val gGain = wbG / range * 0.5f  // x0.5 because we average G1+G2
         val bGain = wbB / range
         val bl = blackLevel
-        val outPx = IntArray(halfW * halfH)
+        val n = halfW * halfH
 
         // CCM: post-WB camera-RGB -> sRGB primary mapping. Each row sums to
         // 1.0 so a neutral grey stays neutral. Diagonal >1 with negative
@@ -129,6 +225,13 @@ object RawDemosaic {
         // Saturation lift in linear space, around BT.601 luma.
         val sat = 1.45f
 
+        // Pass 1: WB-applied linear RGB per pixel (stored) + a luma sample buffer
+        // for the local tone map. Luma uses BT.601 over the post-WB linear RGB; G
+        // dominates so this matches what fastPreview's green-sum approximates.
+        val linR = FloatArray(n)
+        val linG = FloatArray(n)
+        val linB = FloatArray(n)
+        val luma = FloatArray(n)
         for (y in 0 until halfH) {
             val sy0 = 2 * y * width
             val sy1 = (2 * y + 1) * width
@@ -140,35 +243,56 @@ object RawDemosaic {
                 val g1v = ((raw[sy0 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
                 val g2v = ((raw[sy1 + sx0].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
                 val bv = ((raw[sy1 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
-                // Linear, WB-applied [0..1+] camera RGB.
                 val rl = rv * rGain
                 val gl = (g1v + g2v) * gGain
-                val bl2 = bv * bGain
-                // CCM -> linear sRGB.
-                var rc = m00 * rl + m01 * gl + m02 * bl2
-                var gc = m10 * rl + m11 * gl + m12 * bl2
-                var bc = m20 * rl + m21 * gl + m22 * bl2
-                // Saturation around luma.
-                val luma = 0.299f * rc + 0.587f * gc + 0.114f * bc
-                rc = luma + sat * (rc - luma)
-                gc = luma + sat * (gc - luma)
-                bc = luma + sat * (bc - luma)
-                if (rc < 0f) rc = 0f else if (rc > 1f) rc = 1f
-                if (gc < 0f) gc = 0f else if (gc > 1f) gc = 1f
-                if (bc < 0f) bc = 0f else if (bc > 1f) bc = 1f
-                // sRGB encode.
-                val rs = if (rc <= 0.0031308f) 12.92f * rc else 1.055f * Math.pow(rc.toDouble(), 1.0/2.4).toFloat() - 0.055f
-                val gs = if (gc <= 0.0031308f) 12.92f * gc else 1.055f * Math.pow(gc.toDouble(), 1.0/2.4).toFloat() - 0.055f
-                val bs2 = if (bc <= 0.0031308f) 12.92f * bc else 1.055f * Math.pow(bc.toDouble(), 1.0/2.4).toFloat() - 0.055f
-                val ri = (rs * 255f + 0.5f).toInt().coerceIn(0, 255)
-                val gi = (gs * 255f + 0.5f).toInt().coerceIn(0, 255)
-                val bi = (bs2 * 255f + 0.5f).toInt().coerceIn(0, 255)
-                outPx[dstRow + x] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+                val blin = bv * bGain
+                val idx = dstRow + x
+                linR[idx] = rl; linG[idx] = gl; linB[idx] = blin
+                luma[idx] = 0.299f * rl + 0.587f * gl + 0.114f * blin
             }
+        }
+        // LOCAL TONE MAP. Anchor exposure to the log-average luminance (geometric
+        // mean), then box-blur the key-scaled luma into a local-average map so each
+        // pixel's gain depends on its neighbourhood: bright regions get less gain
+        // (screen content survives), dark regions get more (room is lifted).
+        val logavg = logAverageLuma(luma, n, stride = 4)
+        val k = LOCAL_KEY / logavg.coerceAtLeast(LUMA_EPS)
+        val radius = (LOCAL_RADIUS_FRAC * halfW).toInt().coerceAtLeast(1)
+        // lLocal = boxblur(luma * k). Scale luma by k in place; reuse luma's storage.
+        for (i in 0 until n) luma[i] = luma[i] * k
+        val lLocal = FloatArray(n)
+        boxBlur(luma, lLocal, halfW, halfH, radius)
+        Log.i(TAG, "localtonemap [photo]: logavg=${"%.5f".format(logavg)} k=${"%.3f".format(k)} radius=$radius (key=$LOCAL_KEY)")
+
+        // Pass 2: per-pixel local scale = 1/(1+lLocal), applied (with the key k) to
+        // each channel; then CCM, sat, sRGB.
+        val outPx = IntArray(n)
+        for (i in 0 until n) {
+            val scale = k / (1f + lLocal[i])
+            val rl = linR[i] * scale
+            val gl = linG[i] * scale
+            val bl2 = linB[i] * scale
+            var rc = m00 * rl + m01 * gl + m02 * bl2
+            var gc = m10 * rl + m11 * gl + m12 * bl2
+            var bc = m20 * rl + m21 * gl + m22 * bl2
+            val lm = 0.299f * rc + 0.587f * gc + 0.114f * bc
+            rc = lm + sat * (rc - lm)
+            gc = lm + sat * (gc - lm)
+            bc = lm + sat * (bc - lm)
+            if (rc < 0f) rc = 0f else if (rc > 1f) rc = 1f
+            if (gc < 0f) gc = 0f else if (gc > 1f) gc = 1f
+            if (bc < 0f) bc = 0f else if (bc > 1f) bc = 1f
+            val rs = if (rc <= 0.0031308f) 12.92f * rc else 1.055f * Math.pow(rc.toDouble(), 1.0/2.4).toFloat() - 0.055f
+            val gs = if (gc <= 0.0031308f) 12.92f * gc else 1.055f * Math.pow(gc.toDouble(), 1.0/2.4).toFloat() - 0.055f
+            val bs2 = if (bc <= 0.0031308f) 12.92f * bc else 1.055f * Math.pow(bc.toDouble(), 1.0/2.4).toFloat() - 0.055f
+            val ri = (rs * 255f + 0.5f).toInt().coerceIn(0, 255)
+            val gi = (gs * 255f + 0.5f).toInt().coerceIn(0, 255)
+            val bi = (bs2 * 255f + 0.5f).toInt().coerceIn(0, 255)
+            outPx[i] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
         }
 
         val bmp = Bitmap.createBitmap(outPx, halfW, halfH, Bitmap.Config.ARGB_8888)
-        Log.i(TAG, "bin ${width}x${height}->${halfW}x${halfH} ccm+sat durMs=${android.os.SystemClock.elapsedRealtime() - t0}")
+        Log.i(TAG, "bin ${width}x${height}->${halfW}x${halfH} ccm+sat+localtonemap durMs=${android.os.SystemClock.elapsedRealtime() - t0}")
         return bmp
     }
 
@@ -210,6 +334,7 @@ object RawDemosaic {
         val step = (downsample and 1.inv()).coerceAtLeast(2)
         val outW = width / step
         val outH = height / step
+        val n = outW * outH
         val range = whiteLevel - blackLevel
         val rGain = wbR / range
         val gGain = wbG / range * 0.5f  // x0.5 because we average G1+G2
@@ -238,7 +363,14 @@ object RawDemosaic {
         }
         val lutScale = (lutN - 1).toFloat()
 
-        val outPx = IntArray(outW * outH)
+        // Pass 1: WB-applied linear RGB per output pixel + luma for the local tone
+        // map. Same operator as the photo path so the ReID still is as naturally
+        // exposed (and matches the look). Two passes over the downsampled grid is
+        // cheap; the grid is already 1/16 of the sensor.
+        val linR = FloatArray(n)
+        val linG = FloatArray(n)
+        val linB = FloatArray(n)
+        val luma = FloatArray(n)
         for (y in 0 until outH) {
             val sy0 = (y * step) * width
             val sy1 = (y * step + 1) * width
@@ -252,26 +384,49 @@ object RawDemosaic {
                 val bv = ((raw[sy1 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
                 val rl = rv * rGain
                 val gl = (g1v + g2v) * gGain
-                val bl2 = bv * bGain
-                var rc = m00 * rl + m01 * gl + m02 * bl2
-                var gc = m10 * rl + m11 * gl + m12 * bl2
-                var bc = m20 * rl + m21 * gl + m22 * bl2
-                val luma = 0.299f * rc + 0.587f * gc + 0.114f * bc
-                rc = luma + sat * (rc - luma)
-                gc = luma + sat * (gc - luma)
-                bc = luma + sat * (bc - luma)
-                if (rc < 0f) rc = 0f else if (rc > 1f) rc = 1f
-                if (gc < 0f) gc = 0f else if (gc > 1f) gc = 1f
-                if (bc < 0f) bc = 0f else if (bc > 1f) bc = 1f
-                val ri = gammaLut[(rc * lutScale + 0.5f).toInt()]
-                val gi = gammaLut[(gc * lutScale + 0.5f).toInt()]
-                val bi = gammaLut[(bc * lutScale + 0.5f).toInt()]
-                outPx[dstRow + x] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+                val blin = bv * bGain
+                val idx = dstRow + x
+                linR[idx] = rl; linG[idx] = gl; linB[idx] = blin
+                luma[idx] = 0.299f * rl + 0.587f * gl + 0.114f * blin
             }
+        }
+        // LOCAL TONE MAP, same operator as the photo path. Radius derived from this
+        // path's (smaller) output width via the same fraction, so locality covers an
+        // equivalent fraction of the frame.
+        val logavg = logAverageLuma(luma, n, stride = 4)
+        val k = LOCAL_KEY / logavg.coerceAtLeast(LUMA_EPS)
+        val radius = (LOCAL_RADIUS_FRAC * outW).toInt().coerceAtLeast(1)
+        for (i in 0 until n) luma[i] = luma[i] * k
+        val lLocal = FloatArray(n)
+        boxBlur(luma, lLocal, outW, outH, radius)
+        Log.i(TAG, "localtonemap [reid]: logavg=${"%.5f".format(logavg)} k=${"%.3f".format(k)} radius=$radius (key=$LOCAL_KEY)")
+
+        // Pass 2: per-pixel local scale = 1/(1+lLocal) (with key k) + CCM + sat +
+        // LUT-encoded sRGB.
+        val outPx = IntArray(n)
+        for (i in 0 until n) {
+            val scale = k / (1f + lLocal[i])
+            val rl = linR[i] * scale
+            val gl = linG[i] * scale
+            val bl2 = linB[i] * scale
+            var rc = m00 * rl + m01 * gl + m02 * bl2
+            var gc = m10 * rl + m11 * gl + m12 * bl2
+            var bc = m20 * rl + m21 * gl + m22 * bl2
+            val lm = 0.299f * rc + 0.587f * gc + 0.114f * bc
+            rc = lm + sat * (rc - lm)
+            gc = lm + sat * (gc - lm)
+            bc = lm + sat * (bc - lm)
+            if (rc < 0f) rc = 0f else if (rc > 1f) rc = 1f
+            if (gc < 0f) gc = 0f else if (gc > 1f) gc = 1f
+            if (bc < 0f) bc = 0f else if (bc > 1f) bc = 1f
+            val ri = gammaLut[(rc * lutScale + 0.5f).toInt()]
+            val gi = gammaLut[(gc * lutScale + 0.5f).toInt()]
+            val bi = gammaLut[(bc * lutScale + 0.5f).toInt()]
+            outPx[i] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
         }
 
         val bmp = Bitmap.createBitmap(outPx, outW, outH, Bitmap.Config.ARGB_8888)
-        Log.i(TAG, "binFast ${width}x${height}->${outW}x${outH} ds=$downsample ccm+sat+lut durMs=${android.os.SystemClock.elapsedRealtime() - t0}")
+        Log.i(TAG, "binFast ${width}x${height}->${outW}x${outH} ds=$downsample ccm+sat+lut+localtonemap durMs=${android.os.SystemClock.elapsedRealtime() - t0}")
         return bmp
     }
 

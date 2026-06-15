@@ -169,9 +169,15 @@ class CaptureService : Service() {
         }
 
         override fun stopVideo() {
-            Log.i(TAG, "AIDL stopVideo entry recording=${video.isRecording()}")
+            Log.i(TAG, "AIDL stopVideo entry recording=${video.isRecording()} cameraActive=${cameraSession.isRecordingOutputActive()}")
+            // A stop request must ALWAYS clear the camera + LED, even if the
+            // VideoRecorder boolean has desynced from the wedged HAL session
+            // (the binder/HAL storm can read isRecording()==false while the
+            // recorder surface and the white LED are actually up). Without this
+            // the LED-off path is never reached and the LED stays stuck on.
             if (!video.isRecording()) {
-                Log.i(TAG, "stopVideo ignored: not recording")
+                Log.i(TAG, "stopVideo: recorder flag false -- forcing camera + LED teardown")
+                forceTeardown()
                 return
             }
             video.stop { file, durationMs, sizeBytes, err ->
@@ -199,6 +205,7 @@ class CaptureService : Service() {
 
         override fun isRecording(): Boolean = video.isRecording()
         override fun isPaused(): Boolean = video.isPaused()
+        override fun isRecordingActive(): Boolean = cameraSession.isRecordingOutputActive()
 
         override fun captureReidFrame(cb: ICaptureCallback) {
             Log.i(TAG, "AIDL captureReidFrame recording=${video.isRecording()}")
@@ -249,6 +256,30 @@ class CaptureService : Service() {
     }
 
     private val reidFrameId = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /**
+     * Unconditionally tear the camera + LED down. Called by any stop entrypoint
+     * when the VideoRecorder flag reads false but the camera/LED may still be up
+     * (state desync / HAL wedge). Idempotent and crash-safe: clears the recorder
+     * surface (a no-op when already cleared) and force-cancels the Rokid
+     * CAMERA_OPEN(2014) event + turns the white LED off, so a stop request always
+     * darkens the LED even when isRecording() has desynced to false. Also resets
+     * the VideoRecorder so a half-completed start can't strand state.
+     */
+    private fun forceTeardown() {
+        try { cameraSession.clearRecorderSurface() } catch (e: Exception) {
+            Log.w(TAG, "forceTeardown clearRecorderSurface failed: ${e.message}")
+        }
+        try { video.forceStop() } catch (e: Exception) {
+            Log.w(TAG, "forceTeardown video.forceStop failed: ${e.message}")
+        }
+        try {
+            LedController.cancelCameraOpenEvent()
+            LedController.turnOffWhite()
+        } catch (e: Exception) {
+            Log.w(TAG, "forceTeardown LED-off failed: ${e.message}")
+        }
+    }
 
     /**
      * Func-button photo WHILE RECORDING. Grabs the latest JPEG from the record
@@ -526,7 +557,7 @@ class CaptureService : Service() {
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_ADB_STOP_VIDEO) {
-            Log.i(TAG, "ADB STOP_VIDEO entry recording=${video.isRecording()}")
+            Log.i(TAG, "ADB STOP_VIDEO entry recording=${video.isRecording()} cameraActive=${cameraSession.isRecordingOutputActive()}")
             if (video.isRecording()) {
                 video.stop { file, durMs, bytes, err ->
                     Log.i(TAG, "ADB STOP_VIDEO callback err=${err?.message} file=${file?.absolutePath} durMs=$durMs bytes=$bytes")
@@ -535,6 +566,11 @@ class CaptureService : Service() {
                     if (err != null) broadcast { it.onCaptureError(ERR_CAMERA, err.message ?: "video stop failed") }
                     if (file != null) broadcast { it.onVideoStopped(file.absolutePath, durMs, bytes) }
                 }
+            } else {
+                // Desynced/wedged: recorder flag false but camera/LED may be up.
+                // Always force the camera + LED down on a stop request.
+                Log.i(TAG, "ADB STOP_VIDEO: recorder flag false -- forcing camera + LED teardown")
+                forceTeardown()
             }
             return START_NOT_STICKY
         }
