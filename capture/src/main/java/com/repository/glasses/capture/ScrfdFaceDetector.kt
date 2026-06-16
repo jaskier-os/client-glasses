@@ -79,14 +79,93 @@ class ScrfdFaceDetector private constructor(
         }
     }
 
+    /**
+     * Detect faces in a JPEG, returning score + box + the 5 SCRFD keypoints per
+     * face (vs [detect], which drops keypoints). Used by the rPPG path to place a
+     * forehead ROI. Empty on no faces or a transient HTP failure. Mirrors
+     * [detect]'s bitmap lifecycle and [execLock] serialization.
+     */
+    fun detectFull(jpeg: ByteArray): List<FaceDet> {
+        val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return emptyList()
+        val argb = if (bmp.config == Bitmap.Config.ARGB_8888) bmp
+                   else bmp.copy(Bitmap.Config.ARGB_8888, false)
+        val recycleArgb = argb !== bmp
+        try {
+            val raw = synchronized(execLock) {
+                ScrfdQnnNative.nativeDetect(handle, argb)
+            } ?: return emptyList()
+            return decodeFull(raw, bmp.width, bmp.height)
+        } finally {
+            if (recycleArgb && !argb.isRecycled) argb.recycle()
+            if (!bmp.isRecycled) bmp.recycle()
+        }
+    }
+
     fun close() {
         try { ScrfdQnnNative.nativeClose(handle) } catch (e: Throwable) {
             Log.w(TAG, "SCRFD close failed: ${e.message}")
         }
     }
 
+    /**
+     * One detected face: confidence [score], bounding box [x0,y0,x1,y1] in JPEG
+     * pixel coordinates, and 5 keypoints [kps] (10 floats, also in JPEG pixels).
+     *
+     * [kps] layout is 5 (x,y) pairs in standard SCRFD order:
+     *   kps[0],kps[1] = right eye
+     *   kps[2],kps[3] = left eye
+     *   kps[4],kps[5] = nose
+     *   kps[6],kps[7] = right mouth corner
+     *   kps[8],kps[9] = left mouth corner
+     *
+     * A plain class (not a data class) on purpose: the [FloatArray] field has no
+     * value-equality, so a data class would give a misleading reference-equals.
+     */
+    class FaceDet(
+        val score: Float,
+        val x0: Int,
+        val y0: Int,
+        val x1: Int,
+        val y1: Int,
+        val kps: FloatArray,
+    )
+
     companion object {
         private const val TAG = "Cap:Scrfd"
+
+        /**
+         * Pure parser for the native [count, then per-face 15 floats] layout:
+         * score,x0,y0,x1,y1, kx0,ky0,...kx4,ky4 (all in original pixel coords).
+         * Box coords are clamped to [0,imgW]/[0,imgH] and keypoint x/y likewise
+         * (matching [detect]'s clamping); degenerate boxes (x1<=x0 or y1<=y0) are
+         * skipped. Empty/short/count<=0 raw yields an empty list; a truncated
+         * trailing face is dropped, complete faces still returned. No Android deps
+         * so it is JVM-unit-testable.
+         */
+        internal fun decodeFull(raw: FloatArray, imgW: Int, imgH: Int): List<FaceDet> {
+            if (raw.isEmpty()) return emptyList()
+            val n = raw[0].toInt()
+            if (n <= 0) return emptyList()
+            val wf = imgW.toFloat()
+            val hf = imgH.toFloat()
+            val out = ArrayList<FaceDet>(n)
+            for (i in 0 until n) {
+                val o = 1 + i * 15
+                if (o + 15 > raw.size) break
+                val x0 = raw[o + 1].coerceIn(0f, wf).toInt()
+                val y0 = raw[o + 2].coerceIn(0f, hf).toInt()
+                val x1 = raw[o + 3].coerceIn(0f, wf).toInt()
+                val y1 = raw[o + 4].coerceIn(0f, hf).toInt()
+                if (x1 <= x0 || y1 <= y0) continue
+                val kps = FloatArray(10)
+                for (k in 0 until 5) {
+                    kps[k * 2] = raw[o + 5 + k * 2].coerceIn(0f, wf)
+                    kps[k * 2 + 1] = raw[o + 5 + k * 2 + 1].coerceIn(0f, hf)
+                }
+                out.add(FaceDet(raw[o], x0, y0, x1, y1, kps))
+            }
+            return out
+        }
 
         private const val DLC_ASSET = "ml/qnn/scrfd_10g_w8a8.dlc"
         private const val DLC_FILE = "scrfd_10g_w8a8.dlc"

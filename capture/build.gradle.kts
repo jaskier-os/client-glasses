@@ -99,4 +99,5 @@ dependencies {
     // the GPU delegate fails class resolution and silently falls back to CPU.
     implementation("org.tensorflow:tensorflow-lite-gpu-api:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-gpu-delegate-plugin:0.4.4")
+    testImplementation("junit:junit:4.13.2")
 }
