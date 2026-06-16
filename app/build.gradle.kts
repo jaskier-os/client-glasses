@@ -143,6 +143,9 @@ dependencies {
     // ML Kit face detection (for ReID)
     implementation("com.google.mlkit:face-detection:16.1.7")
 
+    // Local JVM unit tests (src/test)
+    testImplementation("junit:junit:4.13.2")
+
     // Instrumented tests (androidTest)
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test:runner:1.5.2")
