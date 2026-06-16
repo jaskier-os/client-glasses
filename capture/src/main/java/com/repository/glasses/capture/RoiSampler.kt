@@ -52,10 +52,10 @@ import kotlin.math.sqrt
 object RoiSampler {
 
     /** Minimum inter-ocular distance in pixels for a face to be sampled. */
-    const val minInterOcular: Float = 12f
+    const val MIN_INTER_OCULAR: Float = 12f
 
     /** Minimum number of kept skin pixels for a reliable mean. */
-    const val minSkinPixels: Int = 10
+    const val MIN_SKIN_PIXELS: Int = 10
 
     private const val FOREHEAD_UP = 0.6 // ROI center offset along uax, in units of d
     private const val HALF_R = 0.6 // half-extent along rax, in units of d
@@ -100,7 +100,7 @@ object RoiSampler {
         val eyeDy = ley - rey
         val d = sqrt(eyeDx * eyeDx + eyeDy * eyeDy)
         // Min-size gate.
-        if (d < minInterOcular) return null
+        if (d < MIN_INTER_OCULAR) return null
 
         // Right axis: unit vector along the eye line.
         val raxX = eyeDx / d
@@ -124,21 +124,17 @@ object RoiSampler {
         val halfR = HALF_R * d
         val halfU = HALF_U * d
 
-        // Axis-aligned bounding box of the oriented rectangle (4 corners).
-        var minX = Double.MAX_VALUE
-        var minY = Double.MAX_VALUE
-        var maxX = -Double.MAX_VALUE
-        var maxY = -Double.MAX_VALUE
-        for (sr in intArrayOf(-1, 1)) {
-            for (su in intArrayOf(-1, 1)) {
-                val px = cx + raxX * (sr * halfR) + uaxX * (su * halfU)
-                val py = cy + raxY * (sr * halfR) + uaxY * (su * halfU)
-                minX = min(minX, px)
-                minY = min(minY, py)
-                maxX = max(maxX, px)
-                maxY = max(maxY, py)
-            }
-        }
+        // Axis-aligned bounding box of the oriented rectangle. The 4 corners are
+        // cx +/- raxX*halfR +/- uaxX*halfU (and likewise for y), so the AABB is
+        // symmetric about the center with half-widths = sum of the absolute
+        // per-axis contributions. This is exactly what the 4-corner min/max scan
+        // computed, but branch-free and allocation-free.
+        val halfBBx = abs(raxX * halfR) + abs(uaxX * halfU)
+        val halfBBy = abs(raxY * halfR) + abs(uaxY * halfU)
+        val minX = cx - halfBBx
+        val maxX = cx + halfBBx
+        val minY = cy - halfBBy
+        val maxY = cy + halfBBy
 
         val x0 = max(0, floor(minX).toInt())
         val y0 = max(0, floor(minY).toInt())
@@ -171,7 +167,7 @@ object RoiSampler {
             }
         }
 
-        if (kept < minSkinPixels) return null
+        if (kept < MIN_SKIN_PIXELS) return null
         return RoiSample(
             (sumR / kept).toFloat(),
             (sumG / kept).toFloat(),
