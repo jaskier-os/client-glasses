@@ -51,14 +51,14 @@ class SpectralBpmTest {
         val rng = Random(42)
         val signal = FloatArray(150) { (rng.nextFloat() * 2f - 1f) }
         val est = SpectralBpm.estimate(signal, 15f)
-        assertTrue("noise snr should be low, got ${est.snr}", est.snr < 0.3f)
+        assertTrue("noise bandRatio should be low, got ${est.bandRatio}", est.bandRatio < 0.3f)
     }
 
     @Test
     fun cleanSinusoid_hasHighSnr() {
         val signal = sinusoid(1.2f, 15f, 10f)
         val est = SpectralBpm.estimate(signal, 15f)
-        assertTrue("clean snr should be high, got ${est.snr}", est.snr > 0.5f)
+        assertTrue("clean bandRatio should be high, got ${est.bandRatio}", est.bandRatio > 0.5f)
     }
 
     @Test
@@ -76,9 +76,22 @@ class SpectralBpmTest {
     @Test
     fun emptyOrInvalid_returnsZero() {
         assertEquals(0f, SpectralBpm.estimate(FloatArray(0), 15f).bpm, 0f)
-        assertEquals(0f, SpectralBpm.estimate(FloatArray(0), 15f).snr, 0f)
+        assertEquals(0f, SpectralBpm.estimate(FloatArray(0), 15f).bandRatio, 0f)
         assertEquals(0f, SpectralBpm.estimate(FloatArray(50), 0f).bpm, 0f)
         assertEquals(0f, SpectralBpm.estimate(FloatArray(2), 15f).bpm, 0f)
+    }
+
+    @Test
+    fun nonFiniteInputReturnsZero() {
+        val withNaN = sinusoid(1.2f, 15f, 10f).also { it[10] = Float.NaN }
+        val nanEst = SpectralBpm.estimate(withNaN, 15f)
+        assertEquals(0f, nanEst.bpm, 0f)
+        assertEquals(0f, nanEst.bandRatio, 0f)
+
+        val withInf = sinusoid(1.2f, 15f, 10f).also { it[10] = Float.POSITIVE_INFINITY }
+        val infEst = SpectralBpm.estimate(withInf, 15f)
+        assertEquals(0f, infEst.bpm, 0f)
+        assertEquals(0f, infEst.bandRatio, 0f)
     }
 
     /**

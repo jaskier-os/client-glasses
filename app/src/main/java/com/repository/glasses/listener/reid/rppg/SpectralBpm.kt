@@ -2,16 +2,17 @@ package com.repository.glasses.listener.reid.rppg
 
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
  * Heart-rate estimate produced by [SpectralBpm].
  *
  * @property bpm beats per minute, clamped to the plausible [42, 240] range; 0 when no estimate.
- * @property snr signal quality in [0, 1]: power in a narrow band around the chosen peak
- *               divided by total in-band power. Callers gate on this to reject noise.
+ * @property bandRatio fraction of in-band power concentrated within +/-0.1 Hz of the peak
+ *               (0..1); higher = cleaner/more periodic; callers gate on this.
  */
-data class BpmEstimate(val bpm: Float, val snr: Float)
+data class BpmEstimate(val bpm: Float, val bandRatio: Float)
 
 /**
  * Spectral heart-rate estimator for a uniformly-sampled 1-D pulse signal.
@@ -31,7 +32,7 @@ data class BpmEstimate(val bpm: Float, val snr: Float)
  *   6. Harmonic disambiguation -- if a strong peak sits at ~half the detected
  *      frequency and is still in-band, prefer that lower fundamental (a strong 2nd
  *      harmonic must not be mistaken for the heart rate).
- *   7. snr -- power within +/-0.1 Hz of the chosen peak over total [0.7, 4] Hz power.
+ *   7. bandRatio -- power within +/-0.1 Hz of the chosen peak over total [0.7, 4] Hz power.
  *
  * This object does spectral estimation only: no resampling (Resampler), no POS/CHROM
  * (RppgSignal), no temporal smoothing.
@@ -54,6 +55,7 @@ object SpectralBpm {
      */
     fun estimate(signal: FloatArray, fps: Float): BpmEstimate {
         if (fps <= 0f || signal.size < 4) return BpmEstimate(0f, 0f)
+        if (signal.any { !it.isFinite() }) return BpmEstimate(0f, 0f)
 
         val detrended = linearDetrend(signal)
         applyHann(detrended)
@@ -90,8 +92,8 @@ object SpectralBpm {
         }
 
         val bpm = (refinedHz * 60f).coerceIn(MIN_BPM, MAX_BPM)
-        val snr = bandSnr(power, chosenBin, binHz, loBin, hiBin)
-        return BpmEstimate(bpm, snr)
+        val bandRatio = bandRatio(power, chosenBin, binHz, loBin, hiBin)
+        return BpmEstimate(bpm, bandRatio)
     }
 
     /** Subtract the least-squares line fitted over sample index. */
@@ -169,7 +171,7 @@ object SpectralBpm {
         while (len <= n) {
             val ang = -2.0 * PI / len
             val wRe = cos(ang)
-            val wIm = kotlin.math.sin(ang)
+            val wIm = sin(ang)
             var i = 0
             while (i < n) {
                 var curRe = 1.0
@@ -222,7 +224,7 @@ object SpectralBpm {
     }
 
     /** Power within +/-0.1 Hz of the [peak] bin over total in-band power, in [0, 1]. */
-    private fun bandSnr(
+    private fun bandRatio(
         power: FloatArray,
         peak: Int,
         binHz: Float,
