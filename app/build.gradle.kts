@@ -121,9 +121,6 @@ android {
 dependencies {
     implementation(project(":glasses-tracing"))
 
-    // CXR-S (glasses-side BT bridge)
-    implementation("com.rokid.cxr:cxr-service-bridge:1.0-20250519.061355-45")
-
     // AndroidX
     implementation("androidx.dynamicanimation:dynamicanimation:1.0.0")
     implementation("androidx.core:core-ktx:1.12.0")

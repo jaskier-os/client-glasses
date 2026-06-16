@@ -345,6 +345,22 @@ class BtManagerService : Service() {
         bleWakeService.setClassicMacAddress(realMac)
         Log.i(TAG, "event=service.realMac mac=$realMac")
         bleWakeService.setOnRxCallback { code, _, epoch ->
+            // Cold-start relaunch: phone asks bt-manager (priv-app) to bring the
+            // listener foreground service back up after it was force-stopped/killed.
+            if (code == BleWakeEvent.LAUNCH_LISTENER) {
+                try {
+                    val intent = android.content.Intent()
+                        .setComponent(android.content.ComponentName(
+                            "com.repository.glasses.listener",
+                            "com.repository.glasses.listener.service.ListenerService"))
+                        .addFlags(android.content.Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+                    startForegroundService(intent)
+                    Log.i(TAG, "event=ble_wake.rx.launchListener epoch=$epoch")
+                } catch (e: Exception) {
+                    Log.w(TAG, "event=ble_wake.rx.launchListenerFail err=${e.message}")
+                }
+                return@setOnRxCallback
+            }
             // Phone wrote an event to CHAR_RX; promote to an active session so
             // bt-manager keeps RFCOMM alive while the upcoming traffic arrives.
             // Safety timeout (~30 s) auto-clears if nothing actually flows.

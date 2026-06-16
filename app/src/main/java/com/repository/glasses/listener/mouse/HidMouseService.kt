@@ -97,6 +97,7 @@ class HidMouseService : Service(), BluetoothHidMouse.Listener, HeadTracker.Liste
         btMouse.init()
 
         headTracker = HeadTracker(this)
+        headTracker.callbackHandler = mainHandler
         headTracker.listener = this
 
         Log.i(TAG, "HidMouseService started")

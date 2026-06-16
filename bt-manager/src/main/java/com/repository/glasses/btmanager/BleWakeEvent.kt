@@ -14,6 +14,11 @@ object BleWakeEvent {
     // either direction (generic)
     const val RFCOMM_REQUEST: Byte       = 0x10
 
+    // phone -> glasses: cold-start relaunch of the listener foreground service
+    // when it has been force-stopped/killed. bt-manager (priv-app) starts the
+    // listener cross-package on receipt. 0x07 is the next free phone->glasses code.
+    const val LAUNCH_LISTENER: Byte      = 0x07
+
     // phone -> glasses
     const val TTS_PENDING: Byte          = 0x11
     const val NOTIFICATION_PENDING: Byte = 0x12
