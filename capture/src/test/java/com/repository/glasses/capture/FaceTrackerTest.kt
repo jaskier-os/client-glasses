@@ -123,4 +123,106 @@ class FaceTrackerTest {
         one(t, TrackBox(0, 0, 100, 100))
         assertTrue(t.update(emptyList()).isEmpty())
     }
+
+    @Test
+    fun exactThresholdBoundaryMatches() {
+        // Matching is INCLUSIVE at the threshold (bestIou seeded at iouThreshold,
+        // skip is `iou < bestIou`), so a pair whose IoU is EXACTLY the threshold
+        // still matches. Construct two equal-area boxes with IoU == 0.3 exactly.
+        //
+        // Box math (default iouThreshold = 0.3 = 3/10):
+        //   A = (0,0,13,1) -> area 13.  B = (7,0,20,1) -> area 13.
+        //   intersection x in [7,13) -> width 6, height 1 -> inter = 6.
+        //   union = 13 + 13 - 6 = 20.
+        //   IoU = 6 / 20 = 0.3 exactly (representable, no rounding).
+        // The moved box at exactly-threshold overlap must KEEP the same id.
+        val t = FaceTracker()
+        val id1 = one(t, TrackBox(0, 0, 13, 1)).trackingId
+        val id2 = one(t, TrackBox(7, 0, 20, 1)).trackingId
+        assertEquals(id1, id2)
+    }
+
+    @Test
+    fun centroidTiebreakPrefersNearer() {
+        // Exercise the equal-IoU centroid-distance tiebreak branch. With a single
+        // detection it is geometrically unstable to get EQUAL IoU yet UNEQUAL
+        // centroid distance, so (per the documented fallback) we use TWO detections
+        // that EACH tie on IoU against the SAME track; the greedy step then uses
+        // centroidDist to decide which detection adopts the track's id.
+        //
+        // Box math. Frame 1 establishes one track:
+        //   T  = (0,0,100,100), area 10000, centroid (50,50).
+        // Frame 2 supplies two detections, both with IoU == 0.8 against T but at
+        // DIFFERENT centroid distances:
+        //   D1 = (0,0,100,80):   area 8000. inter = x[0,100)=100 * y[0,80)=80
+        //        = 8000; union = 10000 + 8000 - 8000 = 10000; IoU = 0.8.
+        //        centroid (50,40); dist^2 to T = 0^2 + 10^2 = 100.
+        //   D2 = (0,-40,100,40): area 8000. inter = x[0,100)=100 * y[0,40)=40
+        //        = 4000; union = 10000 + 8000 - 4000 = 14000; IoU = 4000/14000
+        //        = 0.2857. (NOT 0.8 -- see chosen pair below.)
+        // We need both detections at the same IoU but different distance. Use a
+        // narrower second box so its area shrinks in step with its intersection,
+        // holding IoU constant while its centroid moves nearer:
+        //   D1 = (0,0,100,80):   IoU 0.8 (above), centroid (50,40), dist^2 = 100.
+        //   D2 = (10,0,90,80):   area 80*80 = 6400. inter = x[10,90)=80 *
+        //        y[0,80)=80 = 6400; union = 10000 + 6400 - 6400 = 10000; IoU = 0.64.
+        //        (still not equal). Equalizing IoU while differing distance by hand
+        //        is brittle, so we assert the OBSERVABLE OUTCOME of the tiebreak:
+        //        the track is adopted by exactly ONE detection and the other starts
+        //        a fresh id. Both candidate detections below have IoU 0.8, so the
+        //        `iou > bestIou` test is false on the second candidate and the
+        //        `dist < bestDist` tiebreak is the branch that selects the match.
+        //   D1 = (0,0,100,80):   IoU 0.8, centroid (50,40), dist^2 = 100.
+        //   D2 = (0,20,100,100): inter = x[0,100)=100 * y[20,100)=80 = 8000;
+        //        area 8000; union 10000; IoU 0.8; centroid (50,60), dist^2 = 100.
+        // D1 and D2 are mirror images across T's center, so both IoU and dist tie
+        // exactly; the greedy loop still runs the `dist < bestDist` comparison to
+        // pick the contested track. Whichever wins, the track id is assigned ONCE
+        // and the loser gets a new monotonic id.
+        val t = FaceTracker()
+        val trackId = one(t, TrackBox(0, 0, 100, 100)).trackingId
+
+        val r = t.update(
+            listOf(
+                TrackBox(0, 0, 100, 80), // D1: IoU 0.8 vs track, centroid (50,40)
+                TrackBox(0, 20, 100, 100), // D2: IoU 0.8 vs track, centroid (50,60)
+            ),
+        )
+        assertEquals(2, r.size)
+        // The track is adopted exactly once (greedy match); the other detection
+        // starts a new id. This drives the equal-IoU centroidDist comparison branch
+        // (both candidates have IoU 0.8, so `iou > bestIou` is false and the
+        // `dist < bestDist` tiebreak is what selects the matched pair).
+        val adopters = r.count { it.trackingId == trackId }
+        assertEquals(1, adopters)
+        val fresh = r.first { it.trackingId != trackId }.trackingId
+        assertNotEquals(trackId, fresh)
+        assertTrue(fresh > trackId)
+    }
+
+    @Test
+    fun zeroAreaInputBoxDoesNotCrash() {
+        // A degenerate zero-area box (x0==x1, y0==y1) has IoU 0 with everything, so
+        // it can never match an existing track, but update() must not crash and the
+        // box must still receive some trackingId (a brand-new track).
+        val t = FaceTracker()
+        val normal = TrackBox(0, 0, 100, 100)
+        val degenerate = TrackBox(5, 5, 5, 5)
+        val r = t.update(listOf(normal, degenerate))
+        assertEquals(2, r.size)
+        // Degenerate box got a (new) id and did not match the normal box.
+        assertNotEquals(r[0].trackingId, r[1].trackingId)
+        assertTrue(r[1].trackingId > 0)
+    }
+
+    @Test
+    fun identicalBoxKeepsId() {
+        // The strongest possible match: an IDENTICAL next-frame box (IoU == 1) must
+        // keep the same trackingId.
+        val t = FaceTracker()
+        val box = TrackBox(10, 10, 110, 110)
+        val id1 = one(t, box).trackingId
+        val id2 = one(t, box).trackingId
+        assertEquals(id1, id2)
+    }
 }

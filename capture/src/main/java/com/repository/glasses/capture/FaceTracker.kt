@@ -22,7 +22,7 @@ data class TrackedBox(val trackingId: Long, val box: TrackBox)
  * Association is greedy IoU matching with a centroid-distance tiebreak:
  *  - Every [update] call ages all existing tracks by one frame.
  *  - IoU is computed between each detection and each active track's last box.
- *  - The highest-IoU pair above [iouThreshold] is matched (detection adopts the
+ *  - The highest-IoU pair at or above [iouThreshold] is matched (detection adopts the
  *    track's id, the track's box is updated and its age reset); both are removed
  *    from consideration and the step repeats. On an exact IoU tie the pair with
  *    the smaller centroid distance wins, which keeps two equally-overlapping
@@ -64,7 +64,7 @@ class FaceTracker(
         val detMatched = BooleanArray(detections.size)
         val trackMatched = BooleanArray(tracks.size)
 
-        // 2 + 3. Greedy: repeatedly take the best (det, track) pair over threshold.
+        // 2 + 3. Greedy: repeatedly take the best (det, track) pair at or above threshold.
         while (true) {
             var bestDet = -1
             var bestTrack = -1
@@ -134,7 +134,7 @@ class FaceTracker(
         return w * h
     }
 
-    /** Euclidean distance between box centroids (squared-root, for tiebreak). */
+    /** Euclidean distance between box centroids (squared, for tiebreak). */
     private fun centroidDist(a: TrackBox, b: TrackBox): Double {
         val acx = (a.x0 + a.x1) / 2.0
         val acy = (a.y0 + a.y1) / 2.0
