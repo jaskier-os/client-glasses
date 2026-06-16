@@ -80,6 +80,12 @@ class CameraSession(private val context: Context) {
         // so the on-device log shows whether AE converges and what exposure it
         // lands on, without spamming a line per frame.
         private const val AE_LOG_EVERY_N = 30L
+        // Silent rPPG preview stream: a continuous YUV_420_888 reader at this
+        // size on a repeating TEMPLATE_PREVIEW request. 640x480 is the
+        // empirically-proven sustainable single-YUV combo on this HAL (see
+        // capture/camprobe-test/FINDINGS.md): ~15fps, LED dark, no buffer storm.
+        private const val RPPG_W = 640
+        private const val RPPG_H = 480
     }
 
     /** Sink for fatal camera errors. Implemented by CaptureService. */
@@ -112,6 +118,26 @@ class CameraSession(private val context: Context) {
     @Volatile private var device: CameraDevice? = null
     @Volatile private var session: CameraCaptureSession? = null
     @Volatile private var frameReader: ImageReader? = null
+
+    // Silent rPPG stream: a continuous YUV_420_888 640x480 reader on a repeating
+    // TEMPLATE_PREVIEW request. Distinct from the one-shot JPEG frameReader and
+    // the record path. Owned + (re)configured on the handler thread. The reader
+    // exists only while [rppgEnabled] is true AND no recorder surface / pending
+    // still is active (the rPPG stream YIELDS to recording and photos: the HAL
+    // will not sustain a streamed YUV second target alongside a record/JPEG
+    // combo, see captureVideoSnapshot's ZSLPreviewRawYUV note). Frames are
+    // delivered to [rppgOnYuv] on the dedicated [rppgWorker] thread so the
+    // camera handler is never blocked by per-frame face detection.
+    @Volatile private var rppgReader: ImageReader? = null
+    @Volatile private var rppgEnabled = false
+    private var rppgOnYuv: ((android.media.Image) -> Unit)? = null
+    private var rppgSize = Size(RPPG_W, RPPG_H)
+    // Single-thread worker for rPPG per-frame processing. Heavy work (YUV->JPEG,
+    // SCRFD, ROI sampling) runs here, NEVER on the camera `handler`. A bounded
+    // "one frame in flight" guard drops frames if processing falls behind rather
+    // than queueing unbounded latency.
+    @Volatile private var rppgWorker: java.util.concurrent.ExecutorService? = null
+    private val rppgFrameInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
     // Live-shot reader: a JPEG (BLOB) ImageReader configured into the
     // TEMPLATE_RECORD session as a SECOND output alongside the MediaRecorder
@@ -163,7 +189,23 @@ class CameraSession(private val context: Context) {
 
     fun isOpen(): Boolean = device != null
 
-    private fun holderCount(): Int = if (recorderSurface != null) 1 else 0
+    private fun holderCount(): Int {
+        var n = 0
+        if (recorderSurface != null) n++
+        // The rPPG stream keeps the camera open, but ONLY while it is actually
+        // allowed to run (it yields to recording + pending stills). When it is
+        // suppressed it must not count as a holder, or a transient still would
+        // leave the camera open with no live output.
+        if (rppgActive()) n++
+        return n
+    }
+
+    /** True when the silent rPPG stream is enabled AND allowed to run right now
+     *  (no recorder surface, no pending still). The stream yields to those paths
+     *  because the HAL cannot sustain a streamed YUV target alongside a
+     *  record/JPEG combo. */
+    private fun rppgActive(): Boolean =
+        rppgEnabled && recorderSurface == null && pendingStill == null && !transientStillOpen
 
     // ---- Recorder surface (video) ----
 
@@ -263,6 +305,88 @@ class CameraSession(private val context: Context) {
 
     @Volatile private var transientStillOpen = false
 
+    // ---- Silent rPPG YUV preview stream ----
+
+    /**
+     * Start the silent continuous rPPG preview stream: a repeating
+     * TEMPLATE_PREVIEW request with a single YUV_420_888 640x480 ImageReader.
+     * Writes NO file. The white privacy LED is gated OFF (vendor camera LED
+     * property) for the lifetime of the stream and restored on stop. Frames are
+     * delivered to [onYuvFrame] on a dedicated worker thread (NOT the camera
+     * handler); the callback MUST close the Image it receives. Frames are dropped
+     * when processing falls behind (one frame in flight at a time).
+     *
+     * Yields to recording + photos: if a recorder surface or pending still is
+     * active the stream is suppressed (no YUV reader configured) and resumes
+     * automatically once they clear. Idempotent: a second start replaces the
+     * callback. Runs the config on the handler thread.
+     */
+    fun startRppgStream(onYuvFrame: (android.media.Image) -> Unit) {
+        runOnHandlerBlocking("startRppgStream") {
+            rppgOnYuv = onYuvFrame
+            if (rppgWorker == null) {
+                rppgWorker = Executors.newSingleThreadExecutor { r -> Thread(r, "CamSession-rppg") }
+            }
+            if (!rppgEnabled) {
+                rppgEnabled = true
+                // Gate the firmware privacy LED off at its source for the whole
+                // silent stream, mirroring the ReID silent-capture contract.
+                try { LedController.setCameraLedEnabled(false) } catch (_: Exception) {}
+                Log.i(TAG, "startRppgStream enabled holders=${holderCount()} active=${rppgActive()}")
+            }
+            reconfigure()
+        }
+    }
+
+    /** Stop the silent rPPG stream and restore the privacy LED. Closes the YUV
+     *  reader, rebuilds to the remaining output set (or closes the camera if no
+     *  holders remain). Handler thread. Idempotent. */
+    fun stopRppgStream() {
+        runOnHandlerBlocking("stopRppgStream") {
+            if (!rppgEnabled) return@runOnHandlerBlocking
+            rppgEnabled = false
+            rppgOnYuv = null
+            try { rppgReader?.close() } catch (_: Exception) {}
+            rppgReader = null
+            try { LedController.setCameraLedEnabled(true) } catch (_: Exception) {}
+            Log.i(TAG, "stopRppgStream holders=${holderCount()}")
+            if (holderCount() == 0) closeInternal() else reconfigure()
+        }
+        rppgWorker?.shutdown()
+        rppgWorker = null
+        rppgFrameInFlight.set(false)
+    }
+
+    private fun onRppgFrameAvailable(reader: ImageReader) {
+        // Drop frames while suppressed or with no consumer.
+        if (!rppgActive()) { reader.acquireLatestImage()?.close(); return }
+        val cb = rppgOnYuv
+        if (cb == null) { reader.acquireLatestImage()?.close(); return }
+        // Backpressure: only one frame in flight. If the worker is still busy,
+        // drop this frame (close it) rather than queueing latency.
+        if (!rppgFrameInFlight.compareAndSet(false, true)) {
+            reader.acquireLatestImage()?.close(); return
+        }
+        val image = reader.acquireLatestImage()
+        if (image == null) { rppgFrameInFlight.set(false); return }
+        val worker = rppgWorker
+        if (worker == null) { image.close(); rppgFrameInFlight.set(false); return }
+        try {
+            worker.execute {
+                try { cb(image) } catch (e: Throwable) {
+                    Log.w(TAG, "rppg frame callback threw: ${e.message}")
+                    try { image.close() } catch (_: Exception) {}
+                } finally {
+                    rppgFrameInFlight.set(false)
+                }
+            }
+        } catch (e: Throwable) {
+            // Worker rejected (shutting down): close + clear in-flight.
+            try { image.close() } catch (_: Exception) {}
+            rppgFrameInFlight.set(false)
+        }
+    }
+
     // ---- Exclusive device borrow (RAW / incompatible-format one-shots) ----
 
     /**
@@ -295,8 +419,10 @@ class CameraSession(private val context: Context) {
                 try { session?.stopRepeating() } catch (_: Exception) {}
                 try { session?.close() } catch (_: Exception) {}
                 try { frameReader?.close() } catch (_: Exception) {}
+                try { rppgReader?.close() } catch (_: Exception) {}
                 session = null
                 frameReader = null
+                rppgReader = null
                 configuredSurfaces = emptyList()
 
                 ensureDeviceOpen()
@@ -403,6 +529,22 @@ class CameraSession(private val context: Context) {
             frameReader = null
         }
 
+        // Silent rPPG YUV reader: present only while the stream is active (and
+        // not suppressed by recording / a pending still). MAX_IMAGES 3 gives the
+        // worker headroom; the in-flight guard still drops if it falls behind.
+        if (rppgActive() && rppgReader == null) {
+            rppgSize = chooseRppgSize()
+            rppgReader = ImageReader.newInstance(
+                rppgSize.width, rppgSize.height, ImageFormat.YUV_420_888, 3
+            ).apply {
+                setOnImageAvailableListener({ reader -> onRppgFrameAvailable(reader) }, handler)
+            }
+            Log.i(TAG, "rppg YUV reader ${rppgSize.width}x${rppgSize.height}")
+        } else if (!rppgActive() && rppgReader != null) {
+            rppgReader?.close()
+            rppgReader = null
+        }
+
         // Output set (what is CONFIGURED into the session):
         //  - RECORDING: recorder surface + live-shot JPEG reader (exactly two).
         //    Both are configured so the JPEG reader can receive a one-shot
@@ -418,6 +560,11 @@ class CameraSession(private val context: Context) {
             snapshotReader?.surface?.let { outputs.add(it) }
         } else {
             frameReader?.surface?.let { outputs.add(it) }
+            // Silent rPPG YUV stream (non-recording only). It is its own
+            // continuously-streamed preview target; a transient JPEG still and
+            // the rPPG stream never coexist because a pending still suppresses
+            // rppgActive() (see holderCount / rppgActive).
+            if (rppgActive()) rppgReader?.surface?.let { outputs.add(it) }
         }
 
         if (outputs.isEmpty()) return
@@ -644,6 +791,11 @@ class CameraSession(private val context: Context) {
             if (transientStillOpen) {
                 transientStillOpen = false
                 if (holderCount() == 0) closeInternal() else reconfigure()
+            } else if (rppgEnabled) {
+                // The still ran on top of an active rPPG stream (which was
+                // suppressed while pendingStill != null). Now that the still is
+                // delivered, rebuild so the silent YUV stream resumes.
+                reconfigure()
             }
         }
     }
@@ -886,10 +1038,12 @@ class CameraSession(private val context: Context) {
         try { session?.stopRepeating() } catch (_: Exception) {}
         try { session?.close() } catch (_: Exception) {}
         try { frameReader?.close() } catch (_: Exception) {}
+        try { rppgReader?.close() } catch (_: Exception) {}
         closeSnapshotReader()
         try { device?.close() } catch (_: Exception) {}
         session = null
         frameReader = null
+        rppgReader = null
         device = null
         configuredSurfaces = emptyList()
     }
@@ -899,6 +1053,30 @@ class CameraSession(private val context: Context) {
         handlerThread.quitSafely()
         cbExecutor.shutdown()
         userCbExecutor.shutdown()
+    }
+
+    /** Pick the YUV_420_888 output size for the rPPG stream. Prefer the proven
+     *  640x480; else the advertised YUV size closest to that area (keeps the
+     *  stream cheap + the proven combo). */
+    private fun chooseRppgSize(): Size {
+        return try {
+            val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val chars = manager.getCameraCharacteristics(cameraId)
+            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val sizes = map?.getOutputSizes(ImageFormat.YUV_420_888)
+            if (sizes.isNullOrEmpty()) Size(RPPG_W, RPPG_H)
+            else {
+                sizes.firstOrNull { it.width == RPPG_W && it.height == RPPG_H }
+                    ?: run {
+                        val target = RPPG_W * RPPG_H
+                        sizes.minByOrNull { Math.abs(it.width * it.height - target) }
+                            ?: Size(RPPG_W, RPPG_H)
+                    }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "chooseRppgSize failed: ${e.message}")
+            Size(RPPG_W, RPPG_H)
+        }
     }
 
     private fun chooseFrameSize(chars: CameraCharacteristics): Size {

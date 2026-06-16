@@ -52,6 +52,12 @@ class CaptureService : Service() {
         // and write the boxes + latency to adb_results/<id>.json. Validates the live
         // detection path end-to-end with a known face image.
         const val ACTION_ADB_DETECT_FACES = "com.repository.glasses.capture.ADB_DETECT_FACES"
+
+        // Test hook: run the silent rPPG YUV stream + per-frame ROI pipeline for
+        // (--ei seconds N, default 20). Appends every per-track forehead sample to
+        // adb_results/rppg_probe.csv (header tMs,trackingId,r,g,b,pixelCount), then
+        // stops the stream and logs measured stream fps + SCRFD-processed fps.
+        const val ACTION_ADB_RPPG_PROBE = "com.repository.glasses.capture.ADB_RPPG_PROBE"
     }
 
     private lateinit var cameraSession: CameraSession
@@ -360,6 +366,69 @@ class CaptureService : Service() {
         )
     }
 
+    /** Guards against two overlapping rPPG probes sharing the one stream. */
+    private val rppgProbeRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * ADB rPPG probe: start the silent YUV stream + per-frame ROI pipeline for
+     * [seconds], append every per-track forehead sample to rppg_probe.csv, then
+     * stop the stream. Non-recording only (the stream yields to recording/photos);
+     * the privacy LED is gated dark by CameraSession for the stream's lifetime.
+     */
+    private fun startRppgProbe(seconds: Int) {
+        if (isRecordingForCapture()) {
+            Log.w(TAG, "rPPG probe refused: recording active")
+            return
+        }
+        if (!rppgProbeRunning.compareAndSet(false, true)) {
+            Log.w(TAG, "rPPG probe refused: already running")
+            return
+        }
+        val resultsDir = java.io.File(getExternalFilesDir(null), "adb_results").apply { mkdirs() }
+        val csv = java.io.File(resultsDir, "rppg_probe.csv")
+        val csvLock = Any()
+        val rowCount = java.util.concurrent.atomic.AtomicLong(0L)
+        try {
+            csv.writeText("tMs,trackingId,r,g,b,pixelCount\n")
+        } catch (e: Exception) {
+            Log.w(TAG, "rPPG probe csv header write failed: ${e.message}")
+        }
+
+        val pipeline = RppgPipeline(applicationContext) { s ->
+            synchronized(csvLock) {
+                try {
+                    csv.appendText("${s.tMs},${s.trackingId},${"%.2f".format(s.r)},${"%.2f".format(s.g)},${"%.2f".format(s.b)},${s.pixelCount}\n")
+                    rowCount.incrementAndGet()
+                } catch (e: Exception) {
+                    Log.w(TAG, "rPPG csv append failed: ${e.message}")
+                }
+            }
+        }
+        pipeline.reset()
+
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        Log.i(TAG, "rPPG probe START seconds=$seconds csv=${csv.absolutePath}")
+        cameraSession.startRppgStream { image -> pipeline.onYuvFrame(image) }
+
+        // Stop after [seconds] on the worker pool so onStartCommand returns now.
+        workerPool.execute {
+            try {
+                Thread.sleep(seconds.toLong() * 1000L)
+            } catch (_: InterruptedException) {}
+            try { cameraSession.stopRppgStream() } catch (e: Exception) {
+                Log.w(TAG, "rPPG probe stopRppgStream failed: ${e.message}")
+            }
+            val durS = (android.os.SystemClock.elapsedRealtime() - t0) / 1000.0
+            val streamFps = if (durS > 0) pipeline.framesSeen / durS else 0.0
+            val procFps = if (durS > 0) pipeline.framesProcessed / durS else 0.0
+            Log.i(TAG, "rPPG probe DONE durS=${"%.1f".format(durS)} " +
+                "framesSeen=${pipeline.framesSeen} (${"%.1f".format(streamFps)}fps) " +
+                "scrfdProcessed=${pipeline.framesProcessed} (${"%.1f".format(procFps)}fps) " +
+                "facesSeen=${pipeline.facesSeen} csvRows=${rowCount.get()} csv=${csv.absolutePath}")
+            rppgProbeRunning.set(false)
+        }
+    }
+
     /**
      * Decode the snapshot JPEG, rotate it by [rotationDeg] so the image is
      * upright (matches the RAW path's baked-rotation convention), re-encode, and
@@ -543,6 +612,12 @@ class CaptureService : Service() {
                     Log.w(TAG, "ADB detectFaces failed id=$id: ${e.message}")
                 }
             }
+            return START_NOT_STICKY
+        }
+
+        if (intent?.action == ACTION_ADB_RPPG_PROBE) {
+            val seconds = intent.getIntExtra("seconds", 20)
+            startRppgProbe(seconds)
             return START_NOT_STICKY
         }
 
