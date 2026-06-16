@@ -95,4 +95,42 @@ class BpmSmootherTest {
         // After reset a gated estimate must return null (no last-good retained).
         assertNull(s.update(lo(70f)))
     }
+
+    @Test
+    fun nonFiniteEstimateIgnored() {
+        // Warmed smoother: NaN bpm and Inf bandRatio must not change the display.
+        val s = BpmSmoother()
+        repeat(5) { s.update(hi(72f)) }
+        val before = s.update(hi(72f))!!
+        assertEquals(72f, before, 1.5f)
+        assertEquals(before, s.update(BpmEstimate(Float.NaN, 0.9f))!!, 1e-3f)
+        assertEquals(before, s.update(BpmEstimate(72f, Float.POSITIVE_INFINITY))!!, 1e-3f)
+        // A following good estimate still works (state not corrupted).
+        val after = s.update(hi(72f))!!
+        assertEquals(72f, after, 1.5f)
+
+        // Fresh smoother: non-finite returns null and does not corrupt state.
+        val f = BpmSmoother()
+        assertNull(f.update(BpmEstimate(Float.NaN, 0.9f)))
+        assertNull(f.update(BpmEstimate(72f, Float.POSITIVE_INFINITY)))
+        assertNotNull(f.update(hi(72f)))
+    }
+
+    @Test
+    fun alternatingSpikesNeverWedge() {
+        val s = BpmSmoother()
+        floatArrayOf(72f, 140f, 72f, 145f, 72f, 138f, 72f).forEach { s.update(hi(it)) }
+        val d = s.update(hi(72f))!!
+        // Alternating spikes never persist (counter keeps resetting), display stays ~72.
+        assertTrue("alternating spikes leaked into display: $d", d < 90f)
+    }
+
+    @Test
+    fun evenRingMedianExact() {
+        // historySize=2 -> even ring; emaAlpha=1f -> EMA returns the median directly.
+        val s = BpmSmoother(historySize = 2, emaAlpha = 1f)
+        s.update(hi(70f))
+        val d = s.update(hi(72f))!!
+        assertEquals(71.0f, d, 1e-3f)
+    }
 }

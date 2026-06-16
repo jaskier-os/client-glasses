@@ -25,7 +25,9 @@ import kotlin.math.abs
  *      candidate that is close to the display again, or that breaks away from the
  *      pending cluster, resets the pending counter -- so a one-off outlier (a single
  *      140 amid 70s) is discarded while a genuine held change (85 for 3+ samples)
- *      is taken.
+ *      is taken. Drift within [maxJumpBpm] of the current display is always accepted
+ *      each step, so a genuine gradually-climbing heart rate tracks normally; only
+ *      large one-off jumps require persistence.
  *   4. Median + EMA -- accepted bpms enter a ring of the last [historySize]; the
  *      ring MEDIAN is EMA-blended into the display:
  *      `displayed = emaAlpha*median + (1-emaAlpha)*displayedPrev`
@@ -37,6 +39,8 @@ import kotlin.math.abs
  * good sample locks the display.
  *
  * Dependency-free (kotlin.math only).
+ *
+ * Not thread-safe; call update/reset from a single thread per instance.
  */
 class BpmSmoother(
     val gateBandRatio: Float = 0.5f,
@@ -59,6 +63,14 @@ class BpmSmoother(
      * still warming (see class KDoc for the exact gate/warm-up return rule).
      */
     fun update(e: BpmEstimate): Float? {
+        // 0. Non-finite guard -- NaN/Inf bpm or bandRatio would poison the ring and
+        //    median/EMA forever (NaN.coerceIn returns NaN) and slip past the gate
+        //    (`NaN < gate` is false). Treat exactly like a gated estimate: never
+        //    mutate state, return the current displayed value (last-good or null).
+        if (!e.bpm.isFinite() || !e.bandRatio.isFinite()) {
+            return displayed
+        }
+
         // 1. Confidence gate -- ignore noisy estimates without touching state.
         if (e.bandRatio < gateBandRatio) {
             return displayed
