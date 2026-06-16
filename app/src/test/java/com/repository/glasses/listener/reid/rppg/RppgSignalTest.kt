@@ -70,6 +70,33 @@ class RppgSignalTest {
     }
 
     @Test
+    fun chromRecoversSinusoidInGreen() {
+        val n = 300
+        val fps = 30.0
+        val hz = 1.2
+        val ref = FloatArray(n) { i -> sin(2 * PI * hz * i / fps).toFloat() }
+        // CHROM weights R/G/B differently than POS (Xs=3Rn-2Gn, Ys=1.5Rn+Gn-1.5Bn).
+        // A pure-green-only sinusoid (flat R/B) is recovered, but with a slightly
+        // lower correlation than POS, so we add the rPPG-typical small in-phase
+        // intensity variation in R and B (skin reflects the same pulse across
+        // channels) so CHROM tracks the periodicity cleanly.
+        val r = FloatArray(n) { i -> (0.4 + 0.005 * sin(2 * PI * hz * i / fps)).toFloat() }
+        val g = FloatArray(n) { i -> (0.5 + 0.02 * sin(2 * PI * hz * i / fps)).toFloat() }
+        val b = FloatArray(n) { i -> (0.5 + 0.005 * sin(2 * PI * hz * i / fps)).toFloat() }
+        val p = RppgSignal.chrom(r, g, b)
+        assertEquals(n, p.size)
+        val corr = abs(pearson(p, ref))
+        assertTrue("|corr| with injected sinusoid must exceed 0.9, was $corr", corr > 0.9)
+    }
+
+    @Test
+    fun posSingleSampleIsZeroNotNaN() {
+        val p = RppgSignal.pos(floatArrayOf(0.4f), floatArrayOf(0.6f), floatArrayOf(0.5f))
+        assertEquals(1, p.size)
+        assertTrue("single-sample pos must be ~0 with no NaN, was ${p[0]}", abs(p[0]) < 1e-6f)
+    }
+
+    @Test
     fun mismatchedLengthsThrow() {
         try {
             RppgSignal.pos(FloatArray(4), FloatArray(4), FloatArray(3))

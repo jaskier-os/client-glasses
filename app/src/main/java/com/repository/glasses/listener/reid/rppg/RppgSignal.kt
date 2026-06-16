@@ -87,7 +87,8 @@ object RppgSignal {
 
     /** Cn = C / mean(C). Returns all-zeros when mean == 0 to avoid divide-by-zero. */
     private fun normalize(c: FloatArray): FloatArray {
-        val mean = c.sum() / c.size
+        if (c.isEmpty()) return FloatArray(0)
+        val mean = (c.fold(0.0) { a, v -> a + v } / c.size).toFloat()
         if (mean == 0f) return FloatArray(c.size)
         return FloatArray(c.size) { c[it] / mean }
     }
@@ -96,17 +97,18 @@ object RppgSignal {
     private fun std(x: FloatArray): Float {
         val n = x.size
         if (n == 0) return 0f
-        val mean = x.sum() / n
-        var acc = 0f
+        val mean = x.fold(0.0) { a, v -> a + v } / n
+        var acc = 0.0
         for (v in x) {
             val d = v - mean
             acc += d * d
         }
-        return sqrt(acc / n)
+        return sqrt(acc / n).toFloat()
     }
 
     private fun meanSubtract(x: FloatArray): FloatArray {
-        val mean = x.sum() / x.size
+        if (x.isEmpty()) return FloatArray(0)
+        val mean = (x.fold(0.0) { a, v -> a + v } / x.size).toFloat()
         return FloatArray(x.size) { x[it] - mean }
     }
 }
