@@ -24,7 +24,9 @@ package com.repository.glasses.listener.reid.rppg
  *     buffer.
  *
  * Precondition: timestamps passed to [addSample] are monotonically non-decreasing
- * (the camera frame clock). Out-of-order timestamps are not handled.
+ * (the camera frame clock). Out-of-order (backwards) samples -- a [addSample] whose
+ * timestamp is smaller than the previous one -- are dropped defensively without
+ * mutating buffer state.
  *
  * compute() channel order: each of r, g, b is resampled onto the SAME uniform grid
  * derived from the shared timestamps first, so POS receives all three channels on a
@@ -48,6 +50,11 @@ class TrackBuffer(
      */
     fun addSample(tMs: Long, r: Float, g: Float, b: Float) {
         val last = this.tMs.lastOrNull()
+        if (last != null && tMs < last) {
+            // Out-of-order (backwards) timestamp: drop it untouched so the forward
+            // gap-reset check and the window anchor never operate on a regression.
+            return
+        }
         if (last != null && tMs - last >= gapResetMs) {
             // Discontinuity: drop the old window and the stale smoother phase.
             clearSamples()
@@ -101,7 +108,7 @@ class TrackBuffer(
         val fps = ru.fps
         if (fps <= 0f || ru.values.isEmpty()) return null
         val m = minOf(ru.values.size, gu.values.size, bu.values.size)
-        if (m < 4) return null
+        if (m < MIN_RESAMPLED_POINTS) return null
 
         val rc = ru.values.copyOf(m)
         val gc = gu.values.copyOf(m)
@@ -143,5 +150,10 @@ class TrackBuffer(
     private companion object {
         const val READY_SPAN_FRACTION = 0.9f
         const val MIN_READY_SAMPLES = 30
+
+        // Minimum resampled-point count to attempt a BPM estimate; mirrors
+        // SpectralBpm.estimate's `size < 4` guard so compute() short-circuits
+        // before handing too short a signal downstream.
+        const val MIN_RESAMPLED_POINTS = 4
     }
 }

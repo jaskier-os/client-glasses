@@ -101,6 +101,42 @@ class TrackBufferTest {
     }
 
     @Test
+    fun backwardsTimestampDropped() {
+        val buf = TrackBuffer()
+        buf.addSample(0L, 0.4f, 0.5f, 0.3f)
+        buf.addSample(50L, 0.4f, 0.5f, 0.3f)
+        buf.addSample(100L, 0.4f, 0.5f, 0.3f)
+        val sizeBefore = buf.size()
+        val oldestBefore = buf.oldestTMs()
+        // A backwards (out-of-order) timestamp must be dropped without mutating state.
+        buf.addSample(40L, 0.9f, 0.9f, 0.9f)
+        assertEquals("backwards sample must not change size", sizeBefore, buf.size())
+        assertEquals("backwards sample must not change oldest tMs", oldestBefore, buf.oldestTMs())
+    }
+
+    @Test
+    fun duplicateTimestampsComputeReturnsNull() {
+        // Build a buffer that passes isReady() (>= 30 samples spanning >= 0.9 * window)
+        // but whose timestamps are duplicate clusters: 30 samples all at t=0 plus one at
+        // t=windowMs. The only positive consecutive dt is the single 10 s jump, so the
+        // resampler's median dt is 10_000 ms and the uniform grid is only 2 points -- far
+        // below MIN_RESAMPLED_POINTS (4). compute() must hit that guard and return null,
+        // never crashing on the degenerate (sub-4-point) resample.
+        //
+        // gapResetMs is raised above windowMs so the single 10 s jump does NOT trip the
+        // discontinuity reset (which would clear the t=0 cluster and leave one sample).
+        // (Note: an *empty* resample is unreachable once isReady() holds, because a
+        // non-zero span forces at least one positive dt -> a non-zero median step; this
+        // test instead exercises the named MIN_RESAMPLED_POINTS short-circuit. Reaching
+        // m < 4 needs a large step, which needs a large dt that would otherwise gap-reset.)
+        val buf = TrackBuffer(windowMs = 10_000L, gapResetMs = 20_000L)
+        repeat(30) { buf.addSample(0L, 0.4f, 0.5f, 0.3f) }
+        buf.addSample(buf.windowMs, 0.4f, 0.5f, 0.3f)
+        assertTrue("expected the duplicate-cluster buffer to be ready", buf.isReady())
+        assertNull("degenerate resample must return null, not crash", buf.compute())
+    }
+
+    @Test
     fun compute_endToEnd_recovers72Bpm() {
         val buf = TrackBuffer()
         val fps = 15.0
