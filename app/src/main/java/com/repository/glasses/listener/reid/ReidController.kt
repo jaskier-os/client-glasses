@@ -129,7 +129,7 @@ class ReidController {
             try { onActiveSessionEnter?.invoke() } catch (_: Throwable) {}
         }
 
-        frameConsumer = ReidFrameConsumer().apply {
+        frameConsumer = ReidFrameConsumer(captureBridge).apply {
             remoteLog = this@ReidController.remoteLog
             callback = frameCallback
         }
@@ -165,7 +165,7 @@ class ReidController {
      * upright (pixels physically rotated, EXIF NORMAL), so callers decoding that file pass 0.
      */
     fun detectPhotoOneShot(jpeg: ByteArray, rotationDeg: Int) {
-        val consumer = ReidFrameConsumer().apply {
+        val consumer = ReidFrameConsumer(captureBridge).apply {
             remoteLog = this@ReidController.remoteLog
             callback = frameCallback
         }

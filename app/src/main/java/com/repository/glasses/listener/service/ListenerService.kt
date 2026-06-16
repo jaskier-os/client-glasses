@@ -1700,37 +1700,33 @@ class ListenerService : LifecycleService(),
         return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
     }
 
+    /**
+     * Crop the largest face out of a still image for the BT -> server identify path.
+     * Detection runs on the SCRFD-10G NPU detector (the same engine the ReID loop
+     * uses) when the HTP is available, falling back to ML Kit CPU otherwise. The
+     * crop + thumbnail geometry (100% / 15% padding, 100px thumb) is unchanged, so
+     * the BT payload contract is identical. Runs synchronously off the caller's
+     * thread (callers already treat this as async).
+     */
     private fun extractFaceFromImage(
         imageBase64: String,
         callback: (faceCropBase64: String?, thumbBase64: String?) -> Unit
     ) {
-        val bytes = Base64.decode(imageBase64, Base64.DEFAULT)
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-        if (bitmap == null) {
-            btLog("extractFace: failed to decode bitmap")
-            callback(null, null)
-            return
-        }
-
-        val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
-            .setMinFaceSize(0.1f)
-            .build()
-        val detector = FaceDetection.getClient(options)
-        val inputImage = InputImage.fromBitmap(bitmap, 0)
-
-        detector.process(inputImage)
-            .addOnSuccessListener { faces ->
-                if (faces.isEmpty()) {
+        Thread({
+            val bytes = Base64.decode(imageBase64, Base64.DEFAULT)
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            if (bitmap == null) {
+                btLog("extractFace: failed to decode bitmap")
+                callback(null, null)
+                return@Thread
+            }
+            try {
+                val box = detectLargestFaceBox(bytes, bitmap)
+                if (box == null) {
                     btLog("extractFace: no faces detected, sending resized full image")
-                    val resized = resizeImageForBt(bitmap, maxDim = 640, quality = 80)
-                    bitmap.recycle()
-                    detector.close()
-                    callback(resized, null)
-                    return@addOnSuccessListener
+                    callback(resizeImageForBt(bitmap, maxDim = 640, quality = 80), null)
+                    return@Thread
                 }
-                val face = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }!!
-                val box = face.boundingBox
 
                 // Crop with 100% padding (matches ReidFrameConsumer.cropAndCompressJpeg)
                 val padX = (box.width() * 1.0f).toInt()
@@ -1743,10 +1739,8 @@ class ListenerService : LifecycleService(),
                 )
                 if (cropRect.width() <= 0 || cropRect.height() <= 0) {
                     btLog("extractFace: invalid crop rect")
-                    bitmap.recycle()
-                    detector.close()
                     callback(null, null)
-                    return@addOnSuccessListener
+                    return@Thread
                 }
 
                 val crop = Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
@@ -1775,17 +1769,54 @@ class ListenerService : LifecycleService(),
                 val thumbB64 = Base64.encodeToString(thumbStream.toByteArray(), Base64.NO_WRAP)
 
                 btLog("extractFace: crop=${faceCropB64.length} chars, thumb=${thumbB64.length} chars")
-                bitmap.recycle()
-                detector.close()
                 callback(faceCropB64, thumbB64)
+            } catch (e: Throwable) {
+                btErr("extractFace: detection failed: ${e.message}, sending resized")
+                callback(resizeImageForBt(bitmap, maxDim = 640, quality = 80), null)
+            } finally {
+                if (!bitmap.isRecycled) bitmap.recycle()
             }
-            .addOnFailureListener { e ->
-                btLog("extractFace: ML Kit failed: ${e.message}, sending resized")
-                val resized = resizeImageForBt(bitmap, maxDim = 640, quality = 80)
-                bitmap.recycle()
-                detector.close()
-                callback(resized, null)
+        }, "ExtractFace").start()
+    }
+
+    /**
+     * Largest face box for the still-image identify path. Detection runs on the
+     * SCRFD-10G NPU in the CAPTURE process (via the capture bridge, passing the raw
+     * [jpeg] -- the same upright JPEG [bitmap] was decoded from, so the returned
+     * JPEG-space box maps 1:1 onto [bitmap]); ML Kit CPU is the fallback when the
+     * NPU is unavailable. The listener priv-app cannot run the NPU itself (no CDSP
+     * namespace access), which is why detection is delegated to capture.
+     */
+    private fun detectLargestFaceBox(jpeg: ByteArray, bitmap: Bitmap): Rect? {
+        val bridge = if (this::captureBridge.isInitialized) captureBridge else null
+        val flat = bridge?.detectFaces(jpeg)
+        if (flat != null) {
+            val n = if (flat.isNotEmpty()) flat[0] else 0
+            var best: Rect? = null
+            var bestArea = 0
+            for (i in 0 until n) {
+                val o = 1 + i * 4
+                if (o + 4 > flat.size) break
+                val r = Rect(flat[o], flat[o + 1], flat[o + 2], flat[o + 3])
+                val area = r.width() * r.height()
+                if (area > bestArea) { bestArea = area; best = r }
             }
+            // A non-null result (even empty) means the NPU path answered; trust it.
+            return best
+        }
+        // ML Kit CPU fallback (capture binder unreachable).
+        val options = FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+            .setMinFaceSize(0.1f)
+            .build()
+        val detector = FaceDetection.getClient(options)
+        return try {
+            val faces = com.google.android.gms.tasks.Tasks.await(
+                detector.process(InputImage.fromBitmap(bitmap, 0)))
+            faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }?.boundingBox
+        } finally {
+            detector.close()
+        }
     }
 
     private fun getRecentDcimPhoto(maxAgeMs: Long): String? {

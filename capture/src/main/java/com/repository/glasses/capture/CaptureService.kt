@@ -48,6 +48,10 @@ class CaptureService : Service() {
 
         const val ACTION_ADB_START_VIDEO = "com.repository.glasses.capture.ADB_START_VIDEO"
         const val ACTION_ADB_STOP_VIDEO = "com.repository.glasses.capture.ADB_STOP_VIDEO"
+        // Test hook: run the SCRFD-10G NPU detector on a JPEG file (--es jpeg <path>)
+        // and write the boxes + latency to adb_results/<id>.json. Validates the live
+        // detection path end-to-end with a known face image.
+        const val ACTION_ADB_DETECT_FACES = "com.repository.glasses.capture.ADB_DETECT_FACES"
     }
 
     private lateinit var cameraSession: CameraSession
@@ -256,6 +260,27 @@ class CaptureService : Service() {
                 },
             )
         }
+
+        override fun detectFaces(jpeg: ByteArray): IntArray {
+            val det = ScrfdFaceDetector.shared(applicationContext)
+            if (det == null) {
+                // HTP unavailable -> signal "no faces" so the listener falls back
+                // to its ML Kit CPU detector. Logged once at init by ScrfdFaceDetector.
+                return intArrayOf(0)
+            }
+            return try {
+                val t0 = android.os.SystemClock.elapsedRealtime()
+                val boxes = det.detect(jpeg)
+                val ms = android.os.SystemClock.elapsedRealtime() - t0
+                if (boxes.isNotEmpty() && boxes[0] > 0) {
+                    Log.i(TAG, "SCRFD detectFaces: ${boxes[0]} face(s) in ${ms}ms (NPU)")
+                }
+                boxes
+            } catch (e: Throwable) {
+                Log.w(TAG, "detectFaces failed: ${e.message}")
+                intArrayOf(0)
+            }
+        }
     }
 
     private val reidFrameId = java.util.concurrent.atomic.AtomicLong(0L)
@@ -420,6 +445,23 @@ class CaptureService : Service() {
         }
 
         FileNamer.ensureRoot()
+
+        // Eagerly warm the SCRFD-10G NPU detector on a background thread so the
+        // one-time on-device HTP graph finalize (~12-13s on first execute) is paid
+        // at service start, NOT on the first detectFaces() binder call from the
+        // listener's ReID worker (which would otherwise stall the first detection).
+        // ScrfdFaceDetector.shared is idempotent + caches the engine.
+        Thread({
+            try {
+                val t = android.os.SystemClock.elapsedRealtime()
+                val det = ScrfdFaceDetector.shared(applicationContext)
+                Log.i(TAG, "SCRFD eager warmup done engaged=${det != null} " +
+                    "ms=${android.os.SystemClock.elapsedRealtime() - t}")
+            } catch (e: Throwable) {
+                Log.w(TAG, "SCRFD eager warmup threw: ${e.message}")
+            }
+        }, "ScrfdWarmup").start()
+
         cameraSession = CameraSession(this).apply {
             emitter = object : CameraSession.FrameEmitter {
                 override fun onCameraError(msg: String) {
@@ -468,6 +510,42 @@ class CaptureService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(TAG, "onStartCommand flags=$flags startId=$startId action=${intent?.action}")
+        if (intent?.action == ACTION_ADB_DETECT_FACES) {
+            val id = intent.getStringExtra("id") ?: "det_${System.currentTimeMillis()}"
+            val jpegPath = intent.getStringExtra("jpeg")
+            val resultsDir = java.io.File(getExternalFilesDir(null), "adb_results").apply { mkdirs() }
+            val resultFile = java.io.File(resultsDir, "$id.json")
+            workerPool.execute {
+                try {
+                    val bytes = java.io.File(jpegPath ?: "").readBytes()
+                    val det = ScrfdFaceDetector.shared(applicationContext)
+                    if (det == null) {
+                        resultFile.writeText("""{"id":"$id","status":"error","error":"SCRFD NPU unavailable"}""")
+                        return@execute
+                    }
+                    val t0 = android.os.SystemClock.elapsedRealtime()
+                    val boxes = det.detect(bytes)
+                    val ms = android.os.SystemClock.elapsedRealtime() - t0
+                    val n = if (boxes.isNotEmpty()) boxes[0] else 0
+                    val sb = StringBuilder()
+                    sb.append("""{"id":"$id","status":"ok","faces":$n,"detectMs":$ms,"boxes":[""")
+                    for (i in 0 until n) {
+                        val o = 1 + i * 4
+                        if (i > 0) sb.append(",")
+                        sb.append("[${boxes[o]},${boxes[o+1]},${boxes[o+2]},${boxes[o+3]}]")
+                    }
+                    sb.append("]}")
+                    resultFile.writeText(sb.toString())
+                    Log.i(TAG, "ADB detectFaces id=$id faces=$n detectMs=$ms")
+                } catch (e: Throwable) {
+                    val msg = (e.message ?: "unknown").replace("\"", "'").take(300)
+                    runCatching { resultFile.writeText("""{"id":"$id","status":"error","error":"$msg"}""") }
+                    Log.w(TAG, "ADB detectFaces failed id=$id: ${e.message}")
+                }
+            }
+            return START_NOT_STICKY
+        }
+
         if (intent?.action == ACTION_ADB_TAKE_PHOTO) {
             val id = intent.getStringExtra("id") ?: "adb_${System.currentTimeMillis()}"
             // (burst_n override unused for RAW path — fixed to RawStillCapturer.BURST_N)

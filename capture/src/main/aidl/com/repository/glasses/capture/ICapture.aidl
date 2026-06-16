@@ -42,4 +42,13 @@ interface ICapture {
      *  drives this PERIODICALLY; the capture serializes through CameraSession's
      *  exclusive device borrow so it never races video/photo. */
     void captureReidFrame(in ICaptureCallback cb);
+
+    /** Run the SCRFD-10G face detector (Hexagon V73 NPU) on a ReID JPEG and
+     *  return face boxes. The capture process hosts the QNN HTP detector because
+     *  it is a /data/app install whose namespace can reach the CDSP (libcdsprpc),
+     *  unlike the privileged listener. Returns a flat int[]: [count, then per
+     *  face x0,y0,x1,y1] in JPEG pixel coordinates. Returns [0] (no faces) if the
+     *  NPU is unavailable, so the listener can fall back to its ML Kit CPU path.
+     *  Synchronous (~11ms on HTP); the listener calls this off its worker thread. */
+    int[] detectFaces(in byte[] jpeg);
 }

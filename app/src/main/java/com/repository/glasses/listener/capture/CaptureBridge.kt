@@ -255,6 +255,21 @@ class CaptureBridge(private val context: Context) {
     fun captureReidFrame() = GT.section("cap.bridge.capture_reid_frame") {
         try { api?.captureReidFrame(callback) } catch (e: Exception) { logMsg("captureReidFrame failed: ${e.message}") }
     }
+
+    /**
+     * Run the SCRFD-10G face detector (Hexagon V73 NPU, in the capture process) on
+     * a ReID JPEG. Returns a flat int[]: [count, then per face x0,y0,x1,y1] in JPEG
+     * pixel coordinates, or null if the capture binder is unreachable (caller then
+     * uses its ML Kit CPU fallback). A [0] result means the NPU ran but found no
+     * faces, OR the NPU was unavailable in the capture process (it also falls back).
+     * Synchronous binder call (~11ms HTP); the ReID worker invokes it off its own
+     * thread, never the binder/main thread.
+     */
+    fun detectFaces(jpeg: ByteArray): IntArray? = GT.section("cap.bridge.detect_faces") {
+        try { api?.detectFaces(jpeg) } catch (e: Exception) {
+            logMsg("detectFaces failed: ${e.message}"); null
+        }
+    }
     fun isRecording(): Boolean = try { api?.isRecording ?: false } catch (_: Exception) { false }
     fun isPaused(): Boolean = try { api?.isPaused ?: false } catch (_: Exception) { false }
 
