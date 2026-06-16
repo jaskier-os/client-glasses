@@ -122,6 +122,47 @@ class ResamplerTest {
     }
 
     @Test
+    fun duplicateTimestampsResampleWithoutCrash() {
+        // Duplicate interior timestamp at 100. dts: 100, 0, 100 -> positive {100,100} -> median 100.
+        // Grid: t0=0, tLast=200, step=100 -> floor(200/100)+1 = 3 points (0,100,200).
+        val tMs = longArrayOf(0L, 100L, 100L, 200L)
+        val v = floatArrayOf(0f, 10f, 99f, 30f)
+
+        val out = Resampler.resampleUniform(tMs, v)
+
+        assertEquals(3, out.values.size)
+        for (x in out.values) {
+            assertTrue("unexpected NaN", !x.isNaN())
+        }
+        // Endpoints clamp to first/last sample values.
+        assertEquals(0f, out.values.first(), 1e-4f)
+        assertEquals(30f, out.values.last(), 1e-4f)
+    }
+
+    @Test
+    fun gridTimeOnInteriorSampleEqualsSampleValue() {
+        // dts: 100, 150, 50 -> positive {100,150,50} sorted {50,100,150} -> median 100.
+        // Grid: t0=0, tLast=300, step=100 -> 0,100,200,300. Grid time 100 == tMs[1].
+        val tMs = longArrayOf(0L, 100L, 250L, 300L)
+        val v = floatArrayOf(0f, 42f, 80f, 90f)
+
+        val out = Resampler.resampleUniform(tMs, v)
+
+        // out.values[1] corresponds to grid time 100, exactly on sample tMs[1].
+        assertEquals(42f, out.values[1], 1e-4f)
+    }
+
+    @Test
+    fun singleHugeOutlierDtDoesNotSkewMedian() {
+        // dts: 100, 100, 5000, 100 -> sorted {100,100,100,5000} -> median (100+100)/2 = 100.
+        val tMs = longArrayOf(0L, 100L, 200L, 5200L, 5300L)
+        val v = FloatArray(tMs.size) { it.toFloat() }
+
+        val out = Resampler.resampleUniform(tMs, v)
+        assertEquals(10.0f, out.fps, 1e-4f) // 1000 / 100
+    }
+
+    @Test
     fun gridLengthFollowsFloorRule() {
         // t0=0, tLast=250, step=100 -> floor(250/100)+1 = 3 grid points (0,100,200).
         val tMs = longArrayOf(0L, 100L, 200L, 250L)

@@ -1,12 +1,14 @@
 package com.repository.glasses.listener.reid.rppg
 
+import kotlin.math.floor
+
 /**
  * Resampled signal on a uniform time grid plus its effective sampling rate.
  *
  * @property values resampled amplitudes, one per uniform grid point.
  * @property fps    effective sample rate in Hz (1000 / stepMs); 0 when empty.
  */
-data class Resampled(val values: FloatArray, val fps: Float)
+class Resampled(val values: FloatArray, val fps: Float)
 
 /**
  * Resamples a non-uniformly-sampled signal onto a uniform time grid.
@@ -32,6 +34,8 @@ object Resampler {
      *         [t0, tLast] clamp to the nearest endpoint value (no extrapolation).
      * fps: 1000 / stepMs.
      *
+     * Input [v] must be finite; NaN/Inf are not handled and will propagate.
+     *
      * @return Resampled(empty, 0f) when size < 2 or no positive dt exists.
      * @throws IllegalArgumentException if tMs.size != v.size.
      */
@@ -48,7 +52,7 @@ object Resampler {
         val t0 = tMs.first()
         val tLast = tMs.last()
         val span = (tLast - t0).toDouble()
-        val count = Math.floor(span / stepMs).toInt() + 1
+        val count = floor(span / stepMs).toInt() + 1
 
         val out = FloatArray(count)
         var lo = 0 // left bracket index, advanced monotonically as gt increases
