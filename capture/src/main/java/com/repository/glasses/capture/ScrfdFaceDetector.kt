@@ -87,6 +87,21 @@ class ScrfdFaceDetector private constructor(
      */
     fun detectFull(jpeg: ByteArray): List<FaceDet> {
         val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return emptyList()
+        try {
+            return detectFullBitmap(bmp)
+        } finally {
+            if (!bmp.isRecycled) bmp.recycle()
+        }
+    }
+
+    /**
+     * Detect faces directly from an in-memory [bmp] (score + box + 5 keypoints),
+     * skipping the JPEG encode/decode round-trip. Used by the rPPG per-frame path
+     * which already has a YUV->ARGB bitmap. [bmp] is NOT recycled here (the caller
+     * owns it). Coerces to ARGB_8888 if needed (recycling only its own copy).
+     * Mirrors [detect]'s [execLock] serialization.
+     */
+    fun detectFullBitmap(bmp: Bitmap): List<FaceDet> {
         val argb = if (bmp.config == Bitmap.Config.ARGB_8888) bmp
                    else bmp.copy(Bitmap.Config.ARGB_8888, false)
         val recycleArgb = argb !== bmp
@@ -97,7 +112,6 @@ class ScrfdFaceDetector private constructor(
             return decodeFull(raw, bmp.width, bmp.height)
         } finally {
             if (recycleArgb && !argb.isRecycled) argb.recycle()
-            if (!bmp.isRecycled) bmp.recycle()
         }
     }
 

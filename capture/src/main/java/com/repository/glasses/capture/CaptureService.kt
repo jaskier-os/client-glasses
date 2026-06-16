@@ -420,10 +420,12 @@ class CaptureService : Service() {
             }
             val durS = (android.os.SystemClock.elapsedRealtime() - t0) / 1000.0
             val streamFps = if (durS > 0) pipeline.framesSeen / durS else 0.0
-            val procFps = if (durS > 0) pipeline.framesProcessed / durS else 0.0
+            val rgbFps = if (durS > 0) pipeline.framesProcessed / durS else 0.0
+            val scrfdFps = if (durS > 0) pipeline.scrfdProcessed / durS else 0.0
             Log.i(TAG, "rPPG probe DONE durS=${"%.1f".format(durS)} " +
                 "framesSeen=${pipeline.framesSeen} (${"%.1f".format(streamFps)}fps) " +
-                "scrfdProcessed=${pipeline.framesProcessed} (${"%.1f".format(procFps)}fps) " +
+                "rgbConverted=${pipeline.framesProcessed} (${"%.1f".format(rgbFps)}fps) " +
+                "scrfdProcessed=${pipeline.scrfdProcessed} (${"%.1f".format(scrfdFps)}fps) " +
                 "facesSeen=${pipeline.facesSeen} csvRows=${rowCount.get()} csv=${csv.absolutePath}")
             rppgProbeRunning.set(false)
         }
