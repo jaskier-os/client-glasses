@@ -51,4 +51,11 @@ interface ICapture {
      *  NPU is unavailable, so the listener can fall back to its ML Kit CPU path.
      *  Synchronous (~11ms on HTP); the listener calls this off its worker thread. */
     int[] detectFaces(in byte[] jpeg);
+
+    /** Start the silent rPPG YUV stream + per-frame ROI pipeline; samples arrive via
+     *  ICaptureCallback.onRppgSamples. No-op if already running or if recording/photo
+     *  owns the camera (the stream yields). */
+    void startRppg();
+    /** Stop the rPPG stream. */
+    void stopRppg();
 }

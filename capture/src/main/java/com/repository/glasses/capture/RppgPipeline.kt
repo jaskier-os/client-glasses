@@ -35,10 +35,20 @@ import android.util.Log
  *
  * Single-threaded by construction: [CameraSession] guarantees one frame in flight,
  * so the tracker + per-track box cache (not thread-safe) are only touched here.
+ *
+ * Two emission callbacks, both fired from [onYuvFrame] on the same thread:
+ *   - [onSample] fires ONCE PER FACE (per-sample). The ADB probe uses this to append
+ *     each forehead reading to a CSV.
+ *   - [onFrameSamples] fires ONCE PER PROCESSED FRAME with the full list of that
+ *     frame's samples (one per active face; empty list frames are skipped -- the
+ *     callback is only invoked when the list is non-empty). The AIDL stream path
+ *     uses this to ship one batched onRppgSamples per frame. All samples in a batch
+ *     share the same frame tMs.
  */
 class RppgPipeline(
     private val context: Context,
-    private val onSample: (Sample) -> Unit,
+    private val onSample: (Sample) -> Unit = {},
+    private val onFrameSamples: (List<Sample>) -> Unit = {},
 ) {
     /** One forehead skin-color reading for one tracked face on one frame. */
     data class Sample(
@@ -144,19 +154,21 @@ class RppgPipeline(
             // conversion on non-detection frames.
             if (state == State.ACTIVE && trackKps.isNotEmpty()) {
                 val src = RoiSampler.RgbImage { x, y -> rgbAtSnapshot(x, y, w) }
+                val batch = ArrayList<Sample>(trackKps.size)
                 for ((id, kps) in trackKps) {
                     val sample = RoiSampler.sampleForehead(src, w, h, kps) ?: continue
-                    onSample(
-                        Sample(
-                            tMs = now,
-                            trackingId = id,
-                            r = sample.r,
-                            g = sample.g,
-                            b = sample.b,
-                            pixelCount = sample.pixelCount,
-                        )
+                    val s = Sample(
+                        tMs = now,
+                        trackingId = id,
+                        r = sample.r,
+                        g = sample.g,
+                        b = sample.b,
+                        pixelCount = sample.pixelCount,
                     )
+                    batch.add(s)
+                    onSample(s)
                 }
+                if (batch.isNotEmpty()) onFrameSamples(batch)
             }
         } catch (e: Throwable) {
             Log.w(TAG, "rppg frame processing threw: ${e.message}")

@@ -48,6 +48,13 @@ class CaptureBridge(private val context: Context) {
          * past this call. rotationDeg is 0 (the capture side bakes rotation into the pixels).
          */
         fun onFrame(jpeg: ByteArray, width: Int, height: Int, rotationDeg: Int, frameId: Long) {}
+        /**
+         * One batch of rPPG forehead skin-color samples from the capture process, one
+         * batch per processed frame. Arrays are parallel by face: trackingIds[i] has
+         * mean RGB at rgb[i*3..i*3+2]; tMs is the frame timestamp (elapsedRealtime ms).
+         * Delivered on the binder thread (oneway); consumers must not block.
+         */
+        fun onRppgSamples(trackingIds: LongArray, rgb: FloatArray, tMs: Long) {}
     }
 
     /**
@@ -110,6 +117,9 @@ class CaptureBridge(private val context: Context) {
         }
         override fun onFrame(jpeg: ByteArray, width: Int, height: Int, rotationDeg: Int, frameId: Long) = GT.section("cap.cb.frame") {
             listeners.forEach { it.onFrame(jpeg, width, height, rotationDeg, frameId) }
+        }
+        override fun onRppgSamples(trackingIds: LongArray, rgb: FloatArray, tMs: Long) = GT.section("cap.cb.rppg_samples") {
+            listeners.forEach { it.onRppgSamples(trackingIds, rgb, tMs) }
         }
     }
 
@@ -269,6 +279,14 @@ class CaptureBridge(private val context: Context) {
         try { api?.detectFaces(jpeg) } catch (e: Exception) {
             logMsg("detectFaces failed: ${e.message}"); null
         }
+    }
+    /** Start the silent rPPG stream; samples arrive via Listener.onRppgSamples. */
+    fun startRppg() = GT.section("cap.bridge.start_rppg") {
+        try { api?.startRppg() } catch (e: Exception) { logMsg("Capture: startRppg failed: ${e.message}") }
+    }
+    /** Stop the rPPG stream. */
+    fun stopRppg() = GT.section("cap.bridge.stop_rppg") {
+        try { api?.stopRppg() } catch (e: Exception) { logMsg("Capture: stopRppg failed: ${e.message}") }
     }
     fun isRecording(): Boolean = try { api?.isRecording ?: false } catch (_: Exception) { false }
     fun isPaused(): Boolean = try { api?.isPaused ?: false } catch (_: Exception) { false }

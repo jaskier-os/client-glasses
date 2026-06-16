@@ -287,6 +287,16 @@ class CaptureService : Service() {
                 intArrayOf(0)
             }
         }
+
+        override fun startRppg() {
+            Log.i(TAG, "AIDL startRppg entry recording=${isRecordingForCapture()}")
+            startRppgStream()
+        }
+
+        override fun stopRppg() {
+            Log.i(TAG, "AIDL stopRppg entry")
+            stopRppgStream()
+        }
     }
 
     private val reidFrameId = java.util.concurrent.atomic.AtomicLong(0L)
@@ -370,6 +380,67 @@ class CaptureService : Service() {
     private val rppgProbeRunning = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /**
+     * Guards the AIDL-driven rPPG stream (startRppg/stopRppg). Distinct from
+     * [rppgProbeRunning] but mutually exclusive with it: there is only ONE camera
+     * rPPG stream, so the probe and the stream must never run at once. Each start
+     * path checks BOTH flags before claiming the stream.
+     */
+    private val rppgStreamRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Start the silent rPPG YUV stream driving a per-frame batched pipeline; each
+     * processed frame's samples are shipped as ONE [ICaptureCallback.onRppgSamples]
+     * batch. No-op if recording owns the camera, or if the probe or stream is
+     * already running (shared single-stream guard).
+     */
+    private fun startRppgStream() {
+        if (isRecordingForCapture()) {
+            Log.w(TAG, "rPPG stream refused: recording active")
+            return
+        }
+        if (rppgProbeRunning.get()) {
+            Log.w(TAG, "rPPG stream refused: probe running")
+            return
+        }
+        if (!rppgStreamRunning.compareAndSet(false, true)) {
+            Log.w(TAG, "rPPG stream refused: already running")
+            return
+        }
+        val pipeline = RppgPipeline(
+            applicationContext,
+            onFrameSamples = { batch ->
+                if (batch.isEmpty()) return@RppgPipeline
+                val ids = LongArray(batch.size)
+                val rgb = FloatArray(batch.size * 3)
+                for (i in batch.indices) {
+                    val s = batch[i]
+                    ids[i] = s.trackingId
+                    rgb[i * 3] = s.r
+                    rgb[i * 3 + 1] = s.g
+                    rgb[i * 3 + 2] = s.b
+                }
+                val tMs = batch.first().tMs
+                broadcast { it.onRppgSamples(ids, rgb, tMs) }
+            },
+        )
+        pipeline.reset()
+        Log.i(TAG, "rPPG stream START")
+        cameraSession.startRppgStream { image -> pipeline.onYuvFrame(image) }
+    }
+
+    /** Stop the AIDL-driven rPPG stream. No-op if not running. */
+    private fun stopRppgStream() {
+        if (!rppgStreamRunning.compareAndSet(true, false)) {
+            Log.w(TAG, "rPPG stream stop ignored: not running")
+            return
+        }
+        try { cameraSession.stopRppgStream() } catch (e: Exception) {
+            Log.w(TAG, "rPPG stream stopRppgStream failed: ${e.message}")
+        }
+        Log.i(TAG, "rPPG stream STOP")
+    }
+
+    /**
      * ADB rPPG probe: start the silent YUV stream + per-frame ROI pipeline for
      * [seconds], append every per-track forehead sample to rppg_probe.csv, then
      * stop the stream. Non-recording only (the stream yields to recording/photos);
@@ -378,6 +449,10 @@ class CaptureService : Service() {
     private fun startRppgProbe(seconds: Int) {
         if (isRecordingForCapture()) {
             Log.w(TAG, "rPPG probe refused: recording active")
+            return
+        }
+        if (rppgStreamRunning.get()) {
+            Log.w(TAG, "rPPG probe refused: stream running")
             return
         }
         if (!rppgProbeRunning.compareAndSet(false, true)) {
@@ -394,7 +469,7 @@ class CaptureService : Service() {
             Log.w(TAG, "rPPG probe csv header write failed: ${e.message}")
         }
 
-        val pipeline = RppgPipeline(applicationContext) { s ->
+        val pipeline = RppgPipeline(applicationContext, onSample = { s ->
             synchronized(csvLock) {
                 try {
                     csv.appendText("${s.tMs},${s.trackingId},${"%.2f".format(s.r)},${"%.2f".format(s.g)},${"%.2f".format(s.b)},${s.pixelCount}\n")
@@ -403,7 +478,7 @@ class CaptureService : Service() {
                     Log.w(TAG, "rPPG csv append failed: ${e.message}")
                 }
             }
-        }
+        })
         pipeline.reset()
 
         val t0 = android.os.SystemClock.elapsedRealtime()
