@@ -51,7 +51,6 @@ class CaptureService : Service() {
     }
 
     private lateinit var cameraSession: CameraSession
-    private lateinit var photo: PhotoCapturer
     private lateinit var rawStill: RawStillCapturer
     private lateinit var video: VideoRecorder
     private lateinit var notifier: SyncNotifier
@@ -84,14 +83,14 @@ class CaptureService : Service() {
         override fun unregisterCallback(cb: ICaptureCallback) { callbacks.unregister(cb) }
 
         override fun warmUp() {
-            Log.i(TAG, "AIDL warmUp entry recording=${video.isRecording()}")
-            if (video.isRecording()) return
-            photo.warmUp()
+            Log.i(TAG, "AIDL warmUp entry recording=${isRecordingForCapture()}")
+            if (isRecordingForCapture()) return
+            rawStill.warmUp()
         }
 
         override fun takePhoto() {
-            Log.i(TAG, "AIDL takePhoto entry recording=${video.isRecording()}")
-            if (video.isRecording()) {
+            Log.i(TAG, "AIDL takePhoto entry recording=${isRecordingForCapture()}")
+            if (isRecordingForCapture()) {
                 // RECORDING: the full RAW archival path is unavailable (camera is
                 // held by the recorder). Produce a 1080p video-grade still from
                 // the live record session's snapshot reader instead, written to
@@ -99,15 +98,19 @@ class CaptureService : Service() {
                 takeSnapshotPhoto()
                 return
             }
-            // YUV preview-tap path. Two decoupled flows:
-            //   1. onPreview fires the moment the un-denoised JPEG hits disk
-            //      (~500ms warm). Drives the on-glasses preview overlay +
-            //      LED pulse via the AIDL onPhotoTaken broadcast. Pure UX.
-            //   2. onDenoised fires after a background SplitterDenoiser pass
-            //      overwrites the file with cleaner bytes. Pushes the
-            //      denoised version to the phone via filesync. The on-glasses
-            //      preview never waits for this.
-            photo.takePhoto(
+            // Non-recording func-button photo. Routes through the SAME
+            // RawStillCapturer two-phase path as the ADB_TAKE_PHOTO hook (see
+            // onStartCommand) so the func button and the test harness can never
+            // diverge: one capture engine, one warmup/AE/demosaic/denoise
+            // pipeline, one output format (full-res RAW, not an unwarmed preview
+            // frame). Two decoupled flows:
+            //   onPreview fires the moment the un-denoised JPEG hits disk
+            //     (~few s). Drives the on-glasses preview overlay + LED pulse via
+            //     the onPhotoTaken broadcast. Pure UX.
+            //   onFinal fires after the background denoise overwrites the file;
+            //     push the denoised version to the phone via filesync. The
+            //     on-glasses preview never waits for this.
+            rawStill.takePhoto(
                 onPreview = onPrev@ { file, err ->
                     Log.i(TAG, "takePhoto preview err=${err?.message} file=${file?.absolutePath} size=${file?.length()}")
                     if (err != null || file == null) {
@@ -117,8 +120,8 @@ class CaptureService : Service() {
                     try { LedController.pulseWhite() } catch (_: Exception) {}
                     broadcast { it.onPhotoTaken(file.absolutePath, file.length()) }
                 },
-                onDenoised = { file ->
-                    Log.i(TAG, "takePhoto denoised; pushing to phone $file size=${file.length()}")
+                onFinal = { file, _ ->
+                    Log.i(TAG, "takePhoto final; pushing to phone $file size=${file.length()}")
                     notifyPhotoSync(file)
                 },
             )
@@ -208,8 +211,8 @@ class CaptureService : Service() {
         override fun isRecordingActive(): Boolean = cameraSession.isRecordingOutputActive()
 
         override fun captureReidFrame(cb: ICaptureCallback) {
-            Log.i(TAG, "AIDL captureReidFrame recording=${video.isRecording()}")
-            if (video.isRecording()) {
+            Log.i(TAG, "AIDL captureReidFrame recording=${isRecordingForCapture()}")
+            if (isRecordingForCapture()) {
                 // RECORDING: the RAW borrow is refused, but the record session
                 // exposes a snapshot JPEG reader. Pull the latest video frame and
                 // deliver it as a ReID frame. The LED is already on for video
@@ -256,6 +259,23 @@ class CaptureService : Service() {
     }
 
     private val reidFrameId = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /**
+     * Authoritative "is the snapshot-while-recording path usable" check for the
+     * photo/ReID/warmUp entrypoints. The snapshot branch (takeSnapshotPhoto /
+     * captureVideoSnapshot) reads a still off the LIVE record session, so it is
+     * only valid when the recorder SURFACE is actually attached to the camera
+     * session -- the same authoritative signal the FN button routes on
+     * (CaptureBridge.isRecordingActive -> isRecordingOutputActive). The
+     * VideoRecorder.isRecording() boolean alone is NOT sufficient: it can stick
+     * `true` after a non-clean teardown (surface cleared by a session rebuild /
+     * forceStop path without a normal stop()), and routing on it then sends a
+     * plain func-button photo into captureVideoSnapshot against a dead session,
+     * which returns a black 1280x720 frame. Requiring the surface to be present
+     * keeps the photo path's branch decision identical to the FN button's, so
+     * the two can never disagree.
+     */
+    private fun isRecordingForCapture(): Boolean = cameraSession.isRecordingOutputActive()
 
     /**
      * Unconditionally tear the camera + LED down. Called by any stop entrypoint
@@ -376,9 +396,6 @@ class CaptureService : Service() {
         val tOnCreate = android.os.SystemClock.elapsedRealtime()
         super.onCreate()
 
-        // LED state heal moved into PhotoCapturer.init (single owner of
-        // the LED state machine). PhotoCapturer is constructed below.
-
         val channel = NotificationChannel(CHANNEL_ID, "Capture", NotificationManager.IMPORTANCE_MIN)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         val notification: Notification = Notification.Builder(this, CHANNEL_ID)
@@ -426,7 +443,6 @@ class CaptureService : Service() {
             }
         }
         lowLight = LowLightCapturer(this, cameraSession)
-        photo = PhotoCapturer(this, cameraSession, lowLight = lowLight)
         // onResumedPhotoProcessed: a photo recovered from a leftover RAW sidecar
         // (e.g. after an OOM kill mid-queue) has had its gray preview overwritten
         // with the full-res color JPEG. Re-notify filesync so the phone -- which
@@ -463,7 +479,7 @@ class CaptureService : Service() {
                 resultFile.writeText("""{"id":"$id","status":"pending"}""")
             }.onFailure { Log.w(TAG, "adb pending write failed: ${it.message}") }
 
-            if (video.isRecording()) {
+            if (isRecordingForCapture()) {
                 // RECORDING: same snapshot-while-recording branch as the AIDL
                 // takePhoto. Grab a video-grade still, write the adb result JSON.
                 cameraSession.captureVideoSnapshot(
@@ -622,7 +638,6 @@ class CaptureService : Service() {
             LedController.cancelCameraOpenEvent()
             LedController.turnOffWhite()
         } catch (_: Exception) {}
-        try { photo.shutdown() } catch (_: Exception) {}
         try { rawStill.shutdown() } catch (_: Exception) {}
         try { video.shutdown() } catch (_: Exception) {}
         try { lowLight.close() } catch (_: Exception) {}

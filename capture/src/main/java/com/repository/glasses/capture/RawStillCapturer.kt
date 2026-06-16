@@ -1110,6 +1110,12 @@ class RawStillCapturer(
         }
     }
 
+    /** No-op warmup. The RAW capture path opens the device + runs its own AE
+     *  warmup transparently per [takePhoto], so there is nothing to pre-warm
+     *  here. Kept so the AIDL warmUp() entrypoint has a single capture engine
+     *  to call (mirrors takePhoto routing through this class). */
+    fun warmUp() {}
+
     fun shutdown() {
         handlerThread.quitSafely()
         executor.shutdown()
