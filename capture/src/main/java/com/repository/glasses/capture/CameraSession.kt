@@ -81,11 +81,22 @@ class CameraSession(private val context: Context) {
         // lands on, without spamming a line per frame.
         private const val AE_LOG_EVERY_N = 30L
         // Silent rPPG preview stream: a continuous YUV_420_888 reader at this
-        // size on a repeating TEMPLATE_PREVIEW request. 640x480 is the
-        // empirically-proven sustainable single-YUV combo on this HAL (see
-        // capture/camprobe-test/FINDINGS.md): ~15fps, LED dark, no buffer storm.
-        private const val RPPG_W = 640
-        private const val RPPG_H = 480
+        // size on a repeating TEMPLATE_PREVIEW request. The probe (camprobe-test/
+        // FINDINGS.md) proved both 640x480 (~15fps) and 1280x720 (~16fps) are
+        // sustainable single-YUV combos on this HAL (LED dark, no buffer storm).
+        // We use 1280x960 (4:3, 4x the pixels of 640x480): at normal distance a
+        // face is only ~18-21 px inter-ocular at 640x480 -- too small for a stable
+        // forehead ROI / good pulse SNR. 1280x960 ~doubles the face size in pixels
+        // (longer pulsometer reach, more skin pixels, stronger signal). The ROI
+        // sampler only scans the small forehead bbox, so per-frame cost scales with
+        // ROI size, not frame size.
+        private const val RPPG_W = 1280
+        private const val RPPG_H = 960
+        // rPPG AE/AWB auto-converge frames before the 3A lock is armed (~1s at
+        // ~15-24fps). After this the repeating request is re-issued with
+        // AE_LOCK + AWB_LOCK so photometry stops drifting and only the cardiac
+        // skin-colour modulation remains frame-to-frame.
+        private const val RPPG_AE_WARMUP_FRAMES = 20L
     }
 
     /** Sink for fatal camera errors. Implemented by CaptureService. */
@@ -132,12 +143,20 @@ class CameraSession(private val context: Context) {
     @Volatile private var rppgEnabled = false
     private var rppgOnYuv: ((android.media.Image) -> Unit)? = null
     private var rppgSize = Size(RPPG_W, RPPG_H)
-    // Single-thread worker for rPPG per-frame processing. Heavy work (YUV->JPEG,
-    // SCRFD, ROI sampling) runs here, NEVER on the camera `handler`. A bounded
-    // "one frame in flight" guard drops frames if processing falls behind rather
-    // than queueing unbounded latency.
+    // Single-thread worker for rPPG per-frame processing. Only the CHEAP per-frame
+    // work (plane snapshot + forehead ROI sampling, ~8-15ms) runs here; the heavy
+    // SCRFD face detection (~150ms) is offloaded by RppgPipeline to its OWN thread,
+    // so it never holds this worker. The "one frame in flight" guard now only
+    // protects against an occasional cheap-frame overrun (it almost never drops at
+    // 15fps with ~10ms work) rather than gating the whole detection.
     @Volatile private var rppgWorker: java.util.concurrent.ExecutorService? = null
     private val rppgFrameInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    // 3A lock for the rPPG stream: false during warmup (AE/AWB converge), flipped
+    // true after RPPG_AE_WARMUP_FRAMES so the repeating request is re-issued with
+    // CONTROL_AE_LOCK + CONTROL_AWB_LOCK -- freezing exposure/gain/WB so the only
+    // frame-to-frame skin-colour change left is the cardiac pulse.
+    @Volatile private var rppgLockArmed = false
+    private val rppgWarmupFrames = java.util.concurrent.atomic.AtomicLong(0L)
 
     // Live-shot reader: a JPEG (BLOB) ImageReader configured into the
     // TEMPLATE_RECORD session as a SECOND output alongside the MediaRecorder
@@ -324,6 +343,8 @@ class CameraSession(private val context: Context) {
     fun startRppgStream(onYuvFrame: (android.media.Image) -> Unit) {
         runOnHandlerBlocking("startRppgStream") {
             rppgOnYuv = onYuvFrame
+            rppgLockArmed = false
+            rppgWarmupFrames.set(0L)
             if (rppgWorker == null) {
                 rppgWorker = Executors.newSingleThreadExecutor { r -> Thread(r, "CamSession-rppg") }
             }
@@ -346,6 +367,8 @@ class CameraSession(private val context: Context) {
             if (!rppgEnabled) return@runOnHandlerBlocking
             rppgEnabled = false
             rppgOnYuv = null
+            rppgLockArmed = false
+            rppgWarmupFrames.set(0L)
             try { rppgReader?.close() } catch (_: Exception) {}
             rppgReader = null
             try { LedController.setCameraLedEnabled(true) } catch (_: Exception) {}
@@ -362,8 +385,27 @@ class CameraSession(private val context: Context) {
         if (!rppgActive()) { reader.acquireLatestImage()?.close(); return }
         val cb = rppgOnYuv
         if (cb == null) { reader.acquireLatestImage()?.close(); return }
-        // Backpressure: only one frame in flight. If the worker is still busy,
-        // drop this frame (close it) rather than queueing latency.
+        // 3A warmup -> lock: after RPPG_AE_WARMUP_FRAMES of auto AE/AWB the photometry
+        // has converged; arm the lock and re-issue the repeating request ONCE with
+        // AE_LOCK + AWB_LOCK so exposure/gain/WB stop drifting (the dominant rPPG
+        // noise source). This runs on the handler thread (the ImageReader listener
+        // handler), so reconfigure()/startRepeating() is safe here.
+        if (!rppgLockArmed && rppgWarmupFrames.incrementAndGet() >= RPPG_AE_WARMUP_FRAMES) {
+            rppgLockArmed = true
+            try {
+                val outs = configuredSurfaces
+                if (outs.isNotEmpty()) {
+                    startRepeating(outs)
+                    Log.i(TAG, "rppg 3A locked (AE+AWB) after warmup")
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "rppg 3A lock re-issue failed: ${e.message}")
+            }
+        }
+        // Backpressure: only one CHEAP frame in flight on the worker. With
+        // detection offloaded to RppgPipeline's own thread, the worker work is
+        // ~8-15ms so this rarely drops at the ~15fps stream rate -- it just guards
+        // against an occasional overrun rather than serializing detection.
         if (!rppgFrameInFlight.compareAndSet(false, true)) {
             reader.acquireLatestImage()?.close(); return
         }
@@ -626,6 +668,12 @@ class CameraSession(private val context: Context) {
         } else {
             outputs
         }
+        // rPPG needs STABLE photometry: the pulse modulates skin colour by ~0.5%,
+        // but per-frame AE/AWB adjustments swing the mean by 10-100x that and bury
+        // the signal. So once the rPPG stream's AE/AWB have converged we LOCK them
+        // (rppgLockArmed, set by the rPPG warmup below). Until then they run auto
+        // to converge to a good exposure/white balance.
+        val rppgStream = rppgActive() && !recording
         val builder = cam.createCaptureRequest(template).apply {
             for (out in repeatingTargets) addTarget(out)
             set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
@@ -633,6 +681,11 @@ class CameraSession(private val context: Context) {
             // Match the func-button photo path (PhotoCapturer warmup): let AWB
             // run automatically so colour/exposure converge like a normal photo.
             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            if (rppgStream && rppgLockArmed) {
+                // Freeze exposure, gain and white balance for a steady rPPG signal.
+                set(CaptureRequest.CONTROL_AE_LOCK, true)
+                set(CaptureRequest.CONTROL_AWB_LOCK, true)
+            }
             // Fixed-focus AR camera: continuous AF wastes HAL CPU on a lens that
             // does not move. Lock to infinity (matches the old VideoRecorder).
             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)

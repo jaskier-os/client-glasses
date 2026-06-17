@@ -60,7 +60,12 @@ object RoiSampler {
     private const val FOREHEAD_UP = 0.6 // ROI center offset along uax, in units of d
     private const val HALF_R = 0.6 // half-extent along rax, in units of d
     private const val HALF_U = 0.25 // half-extent along uax, in units of d
-    private const val YAW_FRAC = 0.25 // max abs(noseProjR)/d for a frontal face
+    // max abs(noseProjR)/d for a frontal face. Loosened from 0.25 -> 0.6: at the
+    // small face sizes the glasses see (inter-ocular d ~= 18-25 px at normal
+    // distance), SCRFD's 5-keypoint localization is noisy enough that the eye-axis
+    // estimate jitters and noseProjR runs 2-3x over a tight gate for genuinely
+    // frontal faces (observed on-device). 0.6 still rejects clear profile turns.
+    private const val YAW_FRAC = 0.6 // max abs(noseProjR)/d for a frontal face
 
     private const val CB_LO = 77
     private const val CB_HI = 127

@@ -145,15 +145,15 @@ class RoiSamplerTest {
 
     @Test
     fun yawedFaceReturnsNull() {
-        // Nose pushed far off the eye-center axis -> noseProjR > 0.25 d -> not frontal.
+        // Nose pushed far off the eye-center axis -> noseProjR > YAW_FRAC d -> not frontal.
         val w = 400
         val h = 400
         val eyeCx = 200.0
         val eyeCy = 220.0
         val d = 80.0
         val kps = uprightKps(eyeCx, eyeCy, d)
-        // Move nose x far to the right of E along rax: offset = 0.5 d > 0.25 d.
-        kps[4] = (eyeCx + 0.5 * d).toFloat()
+        // Move nose x far to the right of E along rax: offset = 0.8 d > 0.6 d (YAW_FRAC).
+        kps[4] = (eyeCx + 0.8 * d).toFloat()
         // Fill forehead with skin so only the gate (not skin scarcity) can cause null.
         val cx = eyeCx
         val cy = eyeCy - 0.6 * d
