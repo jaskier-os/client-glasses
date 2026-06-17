@@ -58,6 +58,13 @@ class CaptureService : Service() {
         // adb_results/rppg_probe.csv (header tMs,trackingId,r,g,b,pixelCount), then
         // stops the stream and logs measured stream fps + SCRFD-processed fps.
         const val ACTION_ADB_RPPG_PROBE = "com.repository.glasses.capture.ADB_RPPG_PROBE"
+
+        // Test hook: run the rPPG pipeline for (--ei seconds N, default 15) AND
+        // render a face-MASKED annotated JPEG per processed frame (face box
+        // pixelated for privacy; forehead ROI rectangle + 5 keypoints drawn) into
+        // adb_results/rppg_debug/frame_*.jpg, so the geometry it samples can be
+        // inspected as a video. Heavier than the plain probe (full-frame render).
+        const val ACTION_ADB_RPPG_DEBUG = "com.repository.glasses.capture.ADB_RPPG_DEBUG"
     }
 
     private lateinit var cameraSession: CameraSession
@@ -507,6 +514,121 @@ class CaptureService : Service() {
     }
 
     /**
+     * ADB rPPG DEBUG: like [startRppgProbe] but ALSO renders a face-MASKED
+     * annotated JPEG per processed frame (face pixelated for privacy; forehead ROI
+     * rectangle + 5 keypoints drawn) into adb_results/rppg_debug/frame_NNNNN.jpg.
+     * The frames are assembled into a video off-device. Heavier than the plain
+     * probe; debug only.
+     */
+    private fun startRppgDebug(seconds: Int) {
+        if (isRecordingForCapture()) { Log.w(TAG, "rPPG debug refused: recording"); return }
+        if (rppgStreamRunning.get()) { Log.w(TAG, "rPPG debug refused: stream running"); return }
+        if (!rppgProbeRunning.compareAndSet(false, true)) { Log.w(TAG, "rPPG debug refused: already running"); return }
+        val resultsDir = java.io.File(getExternalFilesDir(null), "adb_results").apply { mkdirs() }
+        val dir = java.io.File(resultsDir, "rppg_debug").apply {
+            // Clear any prior run's frames so the assembled video is just this run.
+            if (exists()) listFiles()?.forEach { it.delete() } else mkdirs()
+            mkdirs()
+        }
+        // Same-run CSV: the analysis MUST come from the identical frames as the
+        // video, so the debug hook writes BOTH the masked frames AND the per-sample
+        // CSV from one pipeline.
+        val csv = java.io.File(resultsDir, "rppg_debug.csv")
+        val csvLock = Any()
+        try { csv.writeText("tMs,trackingId,r,g,b,pixelCount\n") } catch (_: Exception) {}
+        val frameIdx = java.util.concurrent.atomic.AtomicInteger(0)
+        val pipeline = RppgPipeline(
+            applicationContext,
+            onSample = { s ->
+                synchronized(csvLock) {
+                    try { csv.appendText("${s.tMs},${s.trackingId},${"%.2f".format(s.r)},${"%.2f".format(s.g)},${"%.2f".format(s.b)},${s.pixelCount}\n") }
+                    catch (_: Exception) {}
+                }
+            },
+            onDebugFrame = { df ->
+                try {
+                    val n = frameIdx.getAndIncrement()
+                    val bmp = renderRppgDebugFrame(df)
+                    val out = java.io.File(dir, "frame_${"%05d".format(n)}.jpg")
+                    java.io.FileOutputStream(out).use { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, it) }
+                    bmp.recycle()
+                } catch (e: Throwable) {
+                    Log.w(TAG, "rppg debug frame render failed: ${e.message}")
+                }
+            },
+        )
+        pipeline.reset()
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        Log.i(TAG, "rPPG debug START seconds=$seconds dir=${dir.absolutePath}")
+        cameraSession.startRppgStream { image -> pipeline.onYuvFrame(image) }
+        workerPool.execute {
+            try { Thread.sleep(seconds.toLong() * 1000L) } catch (_: InterruptedException) {}
+            try { cameraSession.stopRppgStream() } catch (e: Exception) { Log.w(TAG, "rppg debug stop failed: ${e.message}") }
+            val durS = (android.os.SystemClock.elapsedRealtime() - t0) / 1000.0
+            val fps = if (durS > 0) frameIdx.get() / durS else 0.0
+            Log.i(TAG, "rPPG debug DONE durS=${"%.1f".format(durS)} frames=${frameIdx.get()} (${"%.1f".format(fps)}fps) " +
+                "facesSeen=${pipeline.facesSeen} dir=${dir.absolutePath} csv=${csv.absolutePath}")
+            rppgProbeRunning.set(false)
+        }
+    }
+
+    /**
+     * Render one [RppgPipeline.DebugFrame] to an annotated bitmap that VISUALISES
+     * THE SKIN MASK (the chroma-key the pulse mean is averaged over): inside each
+     * track's oriented forehead ROI, pixels the skin mask KEEPS are tinted bright
+     * green, pixels it REJECTS are tinted red. The ROI outline + 5 keypoints are
+     * drawn on top. No privacy blur -- the point is to see exactly which pixels the
+     * average samples (Saved Messages only).
+     */
+    private fun renderRppgDebugFrame(df: RppgPipeline.DebugFrame): android.graphics.Bitmap {
+        val w = df.width; val h = df.height
+        // createBitmap(int[]) is IMMUTABLE -> copy to a mutable bitmap for Canvas.
+        val bmp = android.graphics.Bitmap.createBitmap(df.rgb, w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            .copy(android.graphics.Bitmap.Config.ARGB_8888, true)
+        val canvas = android.graphics.Canvas(bmp)
+        val invDs = 1f / df.ds  // box/keypoints are full-res; this frame is downscaled by ds
+        for (tk in df.tracks) {
+            // Face box in this frame's coords, inset 12% to match sampleFaceSkin.
+            val bx0 = tk.x0 * invDs; val by0 = tk.y0 * invDs
+            val bx1 = tk.x1 * invDs; val by1 = tk.y1 * invDs
+            val bw = bx1 - bx0; val bh = by1 - by0
+            if (bw < 4 || bh < 4) continue
+            val ix0 = (bx0 + bw * 0.12f).toInt().coerceIn(0, w - 1)
+            val iy0 = (by0 + bh * 0.12f).toInt().coerceIn(0, h - 1)
+            val ix1 = (bx1 - bw * 0.12f).toInt().coerceIn(0, w - 1)
+            val iy1 = (by1 - bh * 0.12f).toInt().coerceIn(0, h - 1)
+            // Tint every pixel in the inset box by the skin mask: green=kept (averaged),
+            // red=rejected. This is exactly what the pulse mean sees.
+            var yy = iy0
+            while (yy <= iy1) {
+                var xx = ix0
+                while (xx <= ix1) {
+                    val p = df.rgb[yy * w + xx]
+                    val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
+                    val tinted = if (RoiSampler.isSkin(r, g, b)) {
+                        (0xFF shl 24) or ((r / 2) shl 16) or (((g + 255) / 2) shl 8) or (b / 2)
+                    } else {
+                        (0xFF shl 24) or (((r + 255) / 2) shl 16) or ((g / 2) shl 8) or (b / 2)
+                    }
+                    bmp.setPixel(xx, yy, tinted)
+                    xx++
+                }
+                yy++
+            }
+            // Inset face box outline + keypoints on top.
+            val paintBox = android.graphics.Paint().apply {
+                style = android.graphics.Paint.Style.STROKE; strokeWidth = 2f
+                color = if (tk.sampled) 0xFF00FF00.toInt() else 0xFFFFAA00.toInt()
+            }
+            canvas.drawRect(ix0.toFloat(), iy0.toFloat(), ix1.toFloat(), iy1.toFloat(), paintBox)
+            val paintKp = android.graphics.Paint().apply { style = android.graphics.Paint.Style.FILL; color = 0xFF3030FF.toInt() }
+            var i = 0
+            while (i < 10) { canvas.drawCircle(tk.kps[i] * invDs, tk.kps[i + 1] * invDs, 4f, paintKp); i += 2 }
+        }
+        return bmp
+    }
+
+    /**
      * Decode the snapshot JPEG, rotate it by [rotationDeg] so the image is
      * upright (matches the RAW path's baked-rotation convention), re-encode, and
      * stamp EXIF orientation NORMAL so downstream viewers do not re-rotate.
@@ -695,6 +817,12 @@ class CaptureService : Service() {
         if (intent?.action == ACTION_ADB_RPPG_PROBE) {
             val seconds = intent.getIntExtra("seconds", 20)
             startRppgProbe(seconds)
+            return START_NOT_STICKY
+        }
+
+        if (intent?.action == ACTION_ADB_RPPG_DEBUG) {
+            val seconds = intent.getIntExtra("seconds", 15)
+            startRppgDebug(seconds)
             return START_NOT_STICKY
         }
 

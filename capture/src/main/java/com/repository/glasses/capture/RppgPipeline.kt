@@ -51,7 +51,31 @@ class RppgPipeline(
     private val context: Context,
     private val onSample: (Sample) -> Unit = {},
     private val onFrameSamples: (List<Sample>) -> Unit = {},
+    // Optional debug sink: when set, EVERY ACTIVE frame hands over the full-res
+    // YUV->RGB pixels + the per-track forehead geometry so a caller can render a
+    // face-masked annotated frame (ROI rect + 5 keypoints) for visual debugging.
+    // Heavy (full-frame conversion + callback per frame) -- only wire it for the
+    // debug-video probe, never the live stream.
+    private val onDebugFrame: ((DebugFrame) -> Unit)? = null,
 ) {
+    /** Per-frame debug payload: DOWNSCALED RGB (0xFFRRGGBB, [width]x[height]) plus
+     *  the scale factor [ds] relating it to full-res keypoints (full = down * ds).
+     *  Downscaled via the fast bulk converter so the per-frame debug render does not
+     *  starve the sample stream. */
+    class DebugFrame(
+        val rgb: IntArray,
+        val width: Int,
+        val height: Int,
+        val ds: Int,
+        val tMs: Long,
+        /** Per track: the 5 keypoints (10 floats, FULL-RES) used this frame. */
+        val tracks: List<TrackDebug>,
+    )
+    class TrackDebug(
+        val trackingId: Long, val kps: FloatArray,
+        val x0: Int, val y0: Int, val x1: Int, val y1: Int,
+        val sampled: Boolean, val bpmHintR: Float, val bpmHintG: Float, val bpmHintB: Float,
+    )
     /** One forehead skin-color reading for one tracked face on one frame. */
     data class Sample(
         val tMs: Long,
@@ -65,12 +89,15 @@ class RppgPipeline(
     // Tracker lives on the DETECT thread only (FaceTracker is not thread-safe).
     private val tracker = FaceTracker()
 
+    /** Latest face geometry for an active track: full-res box + 5 keypoints. */
+    class TrackGeom(val x0: Int, val y0: Int, val x1: Int, val y1: Int, val kps: FloatArray)
+
     /**
      * Latest SCRFD box+kps for each currently-active tracking id, published as an
      * immutable map behind a @Volatile reference. Writer: detect thread (swaps a
      * fresh map). Reader: frame thread (iterates the snapshot it reads once).
      */
-    @Volatile private var trackKps: Map<Long, FloatArray> = emptyMap()
+    @Volatile private var trackKps: Map<Long, TrackGeom> = emptyMap()
 
     private enum class State { IDLE, ACTIVE }
     // state/lastScrfdMs/lastFaceMs are written by the detect thread and read by the
@@ -79,6 +106,8 @@ class RppgPipeline(
     @Volatile private var state = State.IDLE
     @Volatile private var lastScrfdMs = 0L
     @Volatile private var lastFaceMs = 0L
+    // Frame-thread only: last time a ROI sample batch was taken (sample-rate throttle).
+    private var lastSampleMs = 0L
 
     // Detection offload. ONE detection at a time; re-detect requests are dropped
     // while one is in flight (detectInFlight). Cleared in the detect task's finally.
@@ -125,6 +154,7 @@ class RppgPipeline(
         state = State.IDLE
         lastScrfdMs = 0L
         lastFaceMs = 0L
+        lastSampleMs = 0L
         trackKps = emptyMap()
         detectInFlight.set(false)
     }
@@ -181,32 +211,37 @@ class RppgPipeline(
                     "scrfd=$scrfdProcessed inFlight=${detectInFlight.get()} tracks=${trackKps.size}")
             }
 
-            // --- Cheap per-frame ROI sampling (EVERY frame) ---------------------
-            // Read the published kps snapshot once; iterate it against THIS frame's
-            // plane snapshot. Never blocked by / waiting on detection.
+            // --- Throttled ROI sampling (~SAMPLE_INTERVAL_MS) -------------------
+            // Sample at ~10Hz, NOT every stream frame: a head rate maxes ~4Hz so
+            // 10Hz is ample (Nyquist 5Hz), and matching the sample rate closer to
+            // the detection rate keeps every sample on a FRESH box -- sampling at the
+            // full ~24fps put samples on boxes up to ~7 frames stale, raising the
+            // ROI wobble and dropping SNR (measured: 24fps SNR ~0.2 vs matched-rate
+            // SNR ~0.7 at the same BPM). Read the published kps snapshot once.
             val kpsSnap = trackKps
-            if (state == State.ACTIVE && kpsSnap.isNotEmpty()) {
+            val dueToSample = now - lastSampleMs >= SAMPLE_INTERVAL_MS
+            if (state == State.ACTIVE && kpsSnap.isNotEmpty() && dueToSample) {
+                lastSampleMs = now
                 roiAttempts++
                 val src = RoiSampler.RgbImage { x, y -> rgbAtSnapshot(x, y, w) }
                 val batch = ArrayList<Sample>(kpsSnap.size)
-                for ((id, kps) in kpsSnap) {
-                    val sample = RoiSampler.sampleForehead(src, w, h, kps)
+                val dbgSink = onDebugFrame
+                val dbgTracks = if (dbgSink != null) ArrayList<TrackDebug>(kpsSnap.size) else null
+                for ((id, geom) in kpsSnap) {
+                    // Full-FACE skin sampling (rotation-robust): average all skin-mask
+                    // pixels in the face box, not a fixed forehead patch.
+                    val sample = RoiSampler.sampleFaceSkin(src, w, h, geom.x0, geom.y0, geom.x1, geom.y1)
+                    if (dbgTracks != null) {
+                        dbgTracks.add(
+                            TrackDebug(
+                                id, geom.kps.copyOf(), geom.x0, geom.y0, geom.x1, geom.y1, sample != null,
+                                sample?.r ?: 0f, sample?.g ?: 0f, sample?.b ?: 0f,
+                            )
+                        )
+                    }
                     if (sample == null) {
-                        if (framesSeen % 15L == 0L) {
-                            // Diagnostic: why is a tracked frontal face rejected?
-                            val rex = kps[0]; val rey = kps[1]; val lex = kps[2]; val ley = kps[3]
-                            val nx = kps[4]; val ny = kps[5]
-                            val d = Math.hypot((lex - rex).toDouble(), (ley - rey).toDouble())
-                            val ex = (rex + lex) / 2f; val ey = (rey + ley) / 2f
-                            val raxX = if (d > 0) (lex - rex) / d.toFloat() else 0f
-                            val raxY = if (d > 0) (ley - rey) / d.toFloat() else 0f
-                            val noseProjR = (nx - ex) * raxX + (ny - ey) * raxY
-                            val cx = (ex + (ey - ny) * 0.0f).toInt().coerceIn(0, w - 1)
-                            val cy = ey.toInt().coerceIn(0, h - 1)
-                            val px = rgbAtSnapshot(cx, cy, w)
-                            Log.i(TAG, "ROI-reject d=${"%.0f".format(d)} noseProjR=${"%.1f".format(noseProjR)} " +
-                                "(yawGate=${"%.1f".format(0.25 * d)}) eyeC=($ex,$ey) nose=($nx,$ny) w=$w h=$h " +
-                                "centerRGB=${(px shr 16) and 0xFF},${(px shr 8) and 0xFF},${px and 0xFF}")
+                        if (framesSeen % 30L == 0L) {
+                            Log.i(TAG, "face-skin reject box=(${geom.x0},${geom.y0},${geom.x1},${geom.y1}) w=$w h=$h")
                         }
                         continue
                     }
@@ -222,6 +257,18 @@ class RppgPipeline(
                     onSample(s)
                 }
                 if (batch.isNotEmpty()) onFrameSamples(batch)
+                // Debug: hand over a DOWNSCALED frame (fast bulk converter) + geometry
+                // so the caller can render a face-masked annotated frame WITHOUT the
+                // slow full-res per-pixel conversion that starved the stream. Only
+                // when a debug sink is wired.
+                if (dbgSink != null && dbgTracks != null) {
+                    val ds = DBG_DS
+                    val dw = w / ds; val dh = h / ds
+                    val small = IntArray(dw * dh)
+                    argbFromSnapshotScaled(dw, dh, ds, small)
+                    try { dbgSink(DebugFrame(small, dw, dh, ds, now, dbgTracks)) }
+                    catch (e: Throwable) { Log.w(TAG, "debug sink threw: ${e.message}") }
+                }
             }
         } catch (e: Throwable) {
             Log.w(TAG, "rppg frame processing threw: ${e.message}")
@@ -267,12 +314,34 @@ class RppgPipeline(
             val tracked = tracker.update(boxes)
             // detectFullBitmap and tracker.update both preserve input order, so
             // tracked[i] corresponds to faces[i] -- a direct index map.
-            val fresh = HashMap<Long, FloatArray>(faces.size * 2)
+            // Keypoint EMA per track: SCRFD's 5 keypoints jitter several px between
+            // detections, which moves/resizes the forehead ROI every frame and was
+            // the dominant rPPG noise (pixelCount swinging +/-33% -> AC/DC ~15% while
+            // exposure was provably constant). Blend each new keypoint with the prior
+            // smoothed value: kps_smooth = a*kps_new + (1-a)*kps_prev. This pins the
+            // ROI onto the same physical skin patch frame-to-frame.
+            val prev = trackKps
+            val fresh = HashMap<Long, TrackGeom>(faces.size * 2)
             for (i in faces.indices) {
+                val id = tracked[i].trackingId
                 val srcKps = faces[i].kps
                 val scaled = FloatArray(srcKps.size)
                 for (k in srcKps.indices) scaled[k] = srcKps[k] * DET_DS
-                fresh[tracked[i].trackingId] = scaled
+                val tb = tracked[i].box  // full-res box (FaceTracker boxes are already *DET_DS)
+                var bx0 = tb.x0; var by0 = tb.y0; var bx1 = tb.x1; var by1 = tb.y1
+                val prior = prev[id]
+                if (prior != null && prior.kps.size == scaled.size) {
+                    // EMA-smooth keypoints AND the box so the sampling region stops
+                    // jittering between detections (the dominant rPPG noise source).
+                    for (k in scaled.indices) {
+                        scaled[k] = KPS_EMA_ALPHA * scaled[k] + (1f - KPS_EMA_ALPHA) * prior.kps[k]
+                    }
+                    bx0 = (KPS_EMA_ALPHA * bx0 + (1f - KPS_EMA_ALPHA) * prior.x0).toInt()
+                    by0 = (KPS_EMA_ALPHA * by0 + (1f - KPS_EMA_ALPHA) * prior.y0).toInt()
+                    bx1 = (KPS_EMA_ALPHA * bx1 + (1f - KPS_EMA_ALPHA) * prior.x1).toInt()
+                    by1 = (KPS_EMA_ALPHA * by1 + (1f - KPS_EMA_ALPHA) * prior.y1).toInt()
+                }
+                fresh[id] = TrackGeom(bx0, by0, bx1, by1, scaled)
             }
             // Publish atomically. Replaces (not mutates) so the frame thread always
             // sees a consistent map. Stale ids simply drop out -- the linger that
@@ -402,13 +471,18 @@ class RppgPipeline(
 
     companion object {
         private const val TAG = "Cap:Rppg"
-        // Detection runs on the full-resolution stream frame (DET_DS=1). Detection
-        // is now offloaded to its own thread (see detectExecutor), so the
-        // conversion + setPixels cost no longer competes with per-frame ROI
-        // sampling -- there is no reason to downscale and lose detection range.
-        // (DET_DS>1 starved SCRFD: at 213x160 a normally-distanced face is too
-        // small to detect, collapsing facesSeen to ~1/30s.)
-        private const val DET_DS = 1
+        // Detection downscale. The stream is now 1280x960, so DET_DS=2 feeds SCRFD
+        // a 640x480 frame -- a normally-distanced face is ~40px inter-ocular on the
+        // 1280 stream, so ~20px at half-scale, which SCRFD still detects. Halving
+        // each axis cuts the full-frame YUV->RGB conversion ~4x, so detection
+        // actually keeps its ~5fps cadence instead of collapsing to ~1fps (which it
+        // did at DET_DS=1 on 1280x960: the ~250ms full-res conversion throttled it).
+        // Box/keypoint coords are scaled back up by DET_DS for full-res ROI placement.
+        private const val DET_DS = 3
+        // Keypoint EMA smoothing factor (detect thread). Lower = smoother/stickier ROI
+        // but slower to follow real head motion. 0.4 keeps the ROI on the same skin
+        // patch across SCRFD's per-detection keypoint jitter while still tracking.
+        private const val KPS_EMA_ALPHA = 0.6f
         private const val IDLE_SCRFD_INTERVAL_MS = 1000L
         // ACTIVE re-detect cadence. Detection is now ASYNC on its own thread, so
         // this is a pure box-freshness interval -- it does NOT trade off against the
@@ -416,6 +490,16 @@ class RppgPipeline(
         // delivery or ROI sampling). ~200ms refreshes the box ~5x/s, plenty for a
         // slowly-moving head while ROI samples run at the full ~15Hz stream rate.
         private const val ACTIVE_SCRFD_INTERVAL_MS = 200L
+        // ROI sampling cadence (~10Hz). Heart rate maxes ~4Hz so 10Hz is ample, and
+        // keeping it near the detection rate keeps each sample on a fresh (non-stale)
+        // box -- the key to a clean signal (full-frame-rate sampling on a stale box
+        // wobbled the ROI and tanked SNR).
+        private const val SAMPLE_INTERVAL_MS = 100L
         private const val ACTIVE_LINGER_MS = 3000L
+        // Debug-render downscale: the masked debug frame is rendered at 1/DBG_DS so
+        // the JPEG encode + canvas work keeps up with the stream (full-res 1280x960
+        // per-frame render was ~2s/frame). Keypoints are full-res; the renderer
+        // divides them by DebugFrame.ds.
+        private const val DBG_DS = 2
     }
 }

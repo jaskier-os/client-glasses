@@ -84,6 +84,49 @@ object RoiSampler {
     data class RoiSample(val r: Float, val g: Float, val b: Float, val pixelCount: Int)
 
     /**
+     * Sample ALL skin pixels inside a face bounding box (the SCRFD box, slightly
+     * inset to avoid the hair/background fringe), averaging only pixels that pass
+     * the [isSkin] chroma-key. This is the rotation-robust alternative to the fixed
+     * forehead ROI: on a head-worn camera the subject turns 70-90deg and the
+     * forehead leaves frame, but SOME skin (cheek/jaw/neck) is almost always
+     * visible. Averaging the whole skin surface also yields far more pixels -> a
+     * stronger, lower-variance pulse signal. No pose gate -- works at any angle.
+     *
+     * To bound cost the box is scanned with a stride so at most ~a few thousand
+     * pixels are tested regardless of face size. Returns null if too few skin
+     * pixels are found.
+     */
+    fun sampleFaceSkin(img: RgbImage, width: Int, height: Int, x0: Int, y0: Int, x1: Int, y1: Int): RoiSample? {
+        if (width <= 0 || height <= 0) return null
+        // Inset the box ~12% on each side: SCRFD boxes include hairline/jaw edge +
+        // background corners; the inner region is dominated by facial skin.
+        val bw = x1 - x0; val bh = y1 - y0
+        if (bw < 8 || bh < 8) return null
+        val ix0 = (x0 + bw * 0.12f).toInt().coerceIn(0, width - 1)
+        val iy0 = (y0 + bh * 0.12f).toInt().coerceIn(0, height - 1)
+        val ix1 = (x1 - bw * 0.12f).toInt().coerceIn(0, width - 1)
+        val iy1 = (y1 - bh * 0.12f).toInt().coerceIn(0, height - 1)
+        if (ix1 <= ix0 || iy1 <= iy0) return null
+        // Stride so a large box samples ~<=3000 points (cost bound); >=1.
+        val area = (ix1 - ix0) * (iy1 - iy0)
+        val stride = maxOf(1, sqrt(area / 3000.0).toInt())
+        var sumR = 0L; var sumG = 0L; var sumB = 0L; var kept = 0
+        var y = iy0
+        while (y <= iy1) {
+            var x = ix0
+            while (x <= ix1) {
+                val p = img.rgbAt(x, y)
+                val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
+                if (isSkin(r, g, b)) { sumR += r; sumG += g; sumB += b; kept++ }
+                x += stride
+            }
+            y += stride
+        }
+        if (kept < MIN_SKIN_PIXELS) return null
+        return RoiSample((sumR.toDouble() / kept).toFloat(), (sumG.toDouble() / kept).toFloat(), (sumB.toDouble() / kept).toFloat(), kept)
+    }
+
+    /**
      * Compute the forehead skin mean for one face. Returns null when the face is
      * not frontal, too small, the ROI is fully out of bounds, or too few skin
      * pixels are kept.
@@ -181,8 +224,10 @@ object RoiSampler {
         )
     }
 
-    /** BT.601 YCbCr skin test: Cb in [77,127] and Cr in [133,173]. */
-    private fun isSkin(r: Int, g: Int, b: Int): Boolean {
+    /** BT.601 YCbCr skin test: Cb in [77,127] and Cr in [133,173]. Public so the
+     *  debug renderer can visualise exactly which pixels the mask keeps (the same
+     *  chroma-key the mean is averaged over). */
+    fun isSkin(r: Int, g: Int, b: Int): Boolean {
         val cb = 128.0 - 0.168736 * r - 0.331264 * g + 0.5 * b
         val cr = 128.0 + 0.5 * r - 0.418688 * g - 0.081312 * b
         return cb >= CB_LO && cb <= CB_HI && cr >= CR_LO && cr <= CR_HI
