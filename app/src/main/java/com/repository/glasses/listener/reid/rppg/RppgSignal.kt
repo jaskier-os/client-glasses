@@ -20,6 +20,21 @@ import kotlin.math.sqrt
 object RppgSignal {
 
     /**
+     * Selectable pulse-extraction method. GREEN is the production default (the green
+     * channel carries the cleanest cardiac signal on this camera); POS and CHROM are
+     * the classic multi-channel methods, kept selectable for comparison/diagnostics.
+     */
+    enum class Method { GREEN, POS, CHROM }
+
+    /** Extract the 1-D pulse from per-frame RGB means using [method]. */
+    fun extract(method: Method, r: FloatArray, g: FloatArray, b: FloatArray): FloatArray =
+        when (method) {
+            Method.GREEN -> green(r, g, b)
+            Method.POS -> pos(r, g, b)
+            Method.CHROM -> chrom(r, g, b)
+        }
+
+    /**
      * POS pulse extraction.
      *
      * 1. Temporal normalization per channel: Cn = C / mean(C).
@@ -30,6 +45,26 @@ object RppgSignal {
      *
      * @return pulse signal, length == input length.
      */
+    /**
+     * Green-channel pulse extraction -- the canonical rPPG signal.
+     *
+     * Hemoglobin absorbs green light most strongly, so the cardiac volume change
+     * modulates the green channel with the highest contrast of the three. On this
+     * head-worn camera the green channel empirically tracks the true heart rate while
+     * the R/B-combining POS/CHROM methods inject a spurious low-frequency component
+     * that pulls the estimate ~10 bpm low (measured on-device). We therefore use
+     * green alone: normalize by its mean (so the result is a relative fluctuation
+     * independent of absolute brightness) and mean-subtract to a DC-free pulse.
+     *
+     * @return pulse signal, length == input length.
+     */
+    fun green(r: FloatArray, g: FloatArray, @Suppress("UNUSED_PARAMETER") b: FloatArray): FloatArray {
+        val n = g.size
+        if (n == 0) return FloatArray(0)
+        val gn = normalize(g)
+        return meanSubtract(gn)
+    }
+
     fun pos(r: FloatArray, g: FloatArray, b: FloatArray): FloatArray {
         requireSameLength(r, g, b)
         val n = r.size

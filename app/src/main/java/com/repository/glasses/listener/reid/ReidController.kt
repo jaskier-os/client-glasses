@@ -86,7 +86,60 @@ class ReidController {
      *  thread; recomputed about once per second on [captureHandler]. UI reads via
      *  [bpmFor]. The trackingId<->verified-uid link is a later task; this only keeps
      *  BPM keyed by trackingId. */
-    val rppgEngine = RppgEngine()
+    val rppgEngine = RppgEngine(
+        // Longer than the default 2s: detection can miss the face for a few seconds
+        // (turn away / brief occlusion) without dropping the buffer, so the 10s
+        // window can actually fill on a head-worn camera.
+        trackTimeoutMs = 5_000L,
+        bufferFactory = {
+            com.repository.glasses.listener.reid.rppg.TrackBuffer(
+                // 15s window (vs the 10s default). The green-channel pulse is
+                // phase-coherent across the whole hold while the residual drift/motion
+                // noise is not, so a longer FFT window concentrates the true-rate peak
+                // and averages the noise down: on-device, 10s windows scattered
+                // 42-72 bpm but 15-20s windows locked onto the true ~68-72.
+                windowMs = 15_000L,
+                // Tolerate longer sample gaps before resetting the buffer. When SCRFD
+                // briefly loses the face the capture side stops emitting ROI samples
+                // for up to the ~3s ACTIVE linger; a 3s gapReset wiped the buffer at
+                // ~4.4s span every time so it never reached the 9s readiness. 6s rides
+                // over those droughts (the resampler interpolates across the gap).
+                gapResetMs = 6_000L,
+                // Flicker-robust smoothing. On-device the live SNR splits cleanly now
+                // that SpectralBpm zeros the bandRatio of floor/ceiling-collapse
+                // estimates (face lost): real pulse reads ~0.37-0.46, garbage is
+                // forced to 0. The params below stop a transient face-loss from ever
+                // dragging the displayed rate toward the 42 floor:
+                //   - gate 0.30 drops the remaining low-confidence sliver without
+                //     clipping good 0.37+ reads.
+                //   - maxJumpBpm 8: a real heart rate drifts only a few BPM/sec, so an
+                //     abrupt >8 BPM collapse is forced through the persistence path
+                //     instead of being accepted instantly as "drift" (the old 25 let a
+                //     62->44 floor drop through on the first sample -- the root cause).
+                //   - jumpPersistCount 4: a 1-3s flicker (<=3 once-per-sec samples) can
+                //     never move the display; a genuine sustained shift held ~4s is
+                //     still followed.
+                //   - historySize 7 (odd -> true median, no manufactured midpoint): a
+                //     7-deep median outvotes up to 3 transient garbage samples.
+                //   - emaAlpha 0.20 damps any single accepted outlier while still
+                //     converging on a clean rate within a few seconds.
+                smoother = com.repository.glasses.listener.reid.rppg.BpmSmoother(
+                    gateBandRatio = 0.30f,
+                    // maxJump/persist no longer have to be ultra-tight to block flicker:
+                    // SpectralBpm now zeros the bandRatio of floor/ceiling collapse, so
+                    // pure face-loss garbage (raw pinned at 42/240) is killed by the gate
+                    // before it ever reaches the jump logic. That frees these to be
+                    // responsive: 12 BPM/step + 3-sample persistence still rejects a 1-2s
+                    // mid-band outlier, but lets a genuine sustained climb to the true
+                    // rate arrive in ~2-3s instead of creeping.
+                    maxJumpBpm = 12f,
+                    jumpPersistCount = 3,
+                    historySize = 7,
+                    emaAlpha = 0.30f,
+                ),
+            )
+        },
+    )
 
     private val rppgListener = object : com.repository.glasses.listener.capture.CaptureBridge.Listener {
         override fun onRppgSamples(trackingIds: LongArray, rgb: FloatArray, tMs: Long) {
@@ -106,6 +159,10 @@ class ReidController {
 
     /** Latest smoothed BPM for a face track, or null while measuring / unknown / dropped. */
     fun bpmFor(trackingId: Long): Float? = rppgEngine.bpmFor(trackingId)
+
+    /** Live BPM of the face currently in view (one face at conversational distance),
+     *  or null while measuring / no face. Drives the heart-rate readout in the UI. */
+    fun currentBpm(): Float? = rppgEngine.currentBpm()
 
     private val frameListener = object : com.repository.glasses.listener.capture.CaptureBridge.Listener {
         override fun onFrame(jpeg: ByteArray, width: Int, height: Int, rotationDeg: Int, frameId: Long) {

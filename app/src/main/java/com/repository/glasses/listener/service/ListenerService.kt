@@ -164,6 +164,13 @@ class ListenerService : LifecycleService(),
         const val EXTRA_RESPONSE_META = "response_meta"
         const val ACTION_REID_FACES = "com.repository.glasses.listener.REID_FACES"
         const val ACTION_REID_STATS = "com.repository.glasses.listener.REID_STATS"
+        const val ACTION_REID_BPM = "com.repository.glasses.listener.REID_BPM"
+        const val EXTRA_REID_BPM = "reid_bpm"
+        // Diagnostic: dump last 60s of rPPG colour signal + pulse + beats to CSV.
+        const val ACTION_RPPG_DUMP = "com.repository.glasses.listener.RPPG_DUMP"
+        // Hold the last measured BPM through brief dropouts; only fall back to "--"
+        // (0) after this long with no fresh reading.
+        private const val REID_BPM_STALE_MS = 10_000L
         const val ACTION_REID_STATUS = "com.repository.glasses.listener.REID_STATUS"
         const val ACTION_REID_START = "com.repository.glasses.listener.REID_START"
         const val ACTION_REID_STOP = "com.repository.glasses.listener.REID_STOP"
@@ -3193,6 +3200,14 @@ class ListenerService : LifecycleService(),
             reidStopReceiver,
             IntentFilter(ACTION_REID_STOP),
             Context.RECEIVER_NOT_EXPORTED
+        )
+        // Diagnostic: dump the last 60s of rPPG colour signal + POS pulse + beat
+        // marks to CSV on demand. EXPORTED so `adb shell am broadcast` (shell uid)
+        // can trigger it during signal-quality debugging.
+        registerReceiver(
+            rppgDumpReceiver,
+            IntentFilter(ACTION_RPPG_DUMP),
+            Context.RECEIVER_EXPORTED
         )
         registerReceiver(
             cameraPermGrantedReceiver,
@@ -8463,13 +8478,53 @@ class ListenerService : LifecycleService(),
     // ReID start/stop wrappers. The listener no longer owns the camera (frames are streamed
     // from the capture process over AIDL), so there is no camera LED to gate here -- the capture
     // process owns the privacy light for its own camera session.
+    // ~1Hz timer that pushes the live heart rate to the UI process while ReID runs.
+    // The rPPG stream drives detection independently of the old per-frame stats
+    // callback, so the BPM needs its own steady ticker rather than piggybacking on
+    // onStatsUpdated (which does not fire in the streamed-frame mode).
+    private val reidBpmHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    // Hold-last-value policy: once a real BPM has been measured, keep displaying it
+    // across brief signal dropouts rather than flashing "--". Only emit 0 ("--")
+    // before the first reading, or after the reading goes stale (no fresh value for
+    // REID_BPM_STALE_MS).
+    private var lastReidBpm: Int = 0
+    private var lastReidBpmAt: Long = 0L
+    private val reidBpmTick = object : Runnable {
+        override fun run() {
+            if (reidController?.isRunning != true) return
+            val now = android.os.SystemClock.elapsedRealtime()
+            val fresh = reidController?.currentBpm()?.toInt() ?: 0
+            if (fresh > 0) {
+                lastReidBpm = fresh
+                lastReidBpmAt = now
+            }
+            val bpm = when {
+                fresh > 0 -> fresh
+                lastReidBpm > 0 && now - lastReidBpmAt <= REID_BPM_STALE_MS -> lastReidBpm
+                else -> 0
+            }
+            sendBroadcast(Intent(ACTION_REID_BPM).apply {
+                putExtra(EXTRA_REID_BPM, bpm)
+                setPackage(packageName)
+            })
+            reidBpmHandler.postDelayed(this, 1000L)
+        }
+    }
+
     private fun startReid() {
         reidController?.start(this@ListenerService)
+        com.repository.glasses.listener.reid.rppg.RppgSignalRecorder.clear()
+        lastReidBpm = 0
+        lastReidBpmAt = 0L
+        reidBpmHandler.removeCallbacks(reidBpmTick)
+        reidBpmHandler.postDelayed(reidBpmTick, 1000L)
     }
 
     private fun stopReid(reason: String) {
         val wasRunning = reidController?.isRunning == true
         if (wasRunning) btLog("Reid stop: reason=$reason")
+        reidBpmHandler.removeCallbacks(reidBpmTick)
+        sendBroadcast(Intent(ACTION_REID_BPM).apply { putExtra(EXTRA_REID_BPM, 0); setPackage(packageName) })
         reidController?.stop()
     }
 
@@ -8498,6 +8553,21 @@ class ListenerService : LifecycleService(),
         override fun onReceive(context: Context?, intent: Intent?) {
             btLog("Reid stop requested by activity")
             stopReid("user")
+        }
+    }
+
+    private val rppgDumpReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            try {
+                val dir = java.io.File(getExternalFilesDir(null), "rppg_signal")
+                if (!dir.exists()) dir.mkdirs()
+                val f = java.io.File(dir, "rppg_signal_${System.currentTimeMillis()}.csv")
+                val rows = com.repository.glasses.listener.reid.rppg.RppgSignalRecorder.dumpCsv(f)
+                android.util.Log.i("RppgDump", "wrote $rows rows -> ${f.absolutePath}")
+                btLog("rPPG signal dump: $rows rows -> ${f.absolutePath}")
+            } catch (e: Throwable) {
+                android.util.Log.w("RppgDump", "dump failed: ${e.message}")
+            }
         }
     }
 
@@ -8718,6 +8788,7 @@ class ListenerService : LifecycleService(),
         try { unregisterReceiver(reidStartReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(reidPersonRequestReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(reidStopReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(rppgDumpReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(cameraPermGrantedReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(todoListRequestReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(todoToggleReceiver) } catch (_: Exception) {}

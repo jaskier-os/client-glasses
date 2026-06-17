@@ -376,11 +376,11 @@
                         android:layout_weight="1"
                         android:background="#000000" />
 
-                    <!-- Face thumbnail bar -->
+                    <!-- Face thumbnail bar (height wraps the thumbnail + pulse row beneath it) -->
                     <LinearLayout
                         android:id="@+id/reidFaceBar"
                         android:layout_width="match_parent"
-                        android:layout_height="56dp"
+                        android:layout_height="wrap_content"
                         android:orientation="horizontal"
                         android:gravity="start"
                         android:background="#000000"

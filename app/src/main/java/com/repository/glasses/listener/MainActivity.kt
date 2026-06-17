@@ -582,6 +582,9 @@ class MainActivity : AppCompatActivity() {
     private var reidRunning = false
     private var reidSelectedFaceIndex = -1
     private var reidVerifiedFaces = listOf<JSONObject>()
+    // Live heart rate (BPM) of the face in view, pushed at ~1Hz from ListenerService
+    // (which owns RppgEngine). <=0 = measuring / no confident reading.
+    private var reidLiveBpm: Int = 0
     private var reidFaceDetectedAnimating = false
     private var reidFocusedElement = 0 // 0 = start/stop, 1 = face bar
     private var reidLastPersonIntel: JSONObject? = null // Last fetched intel (not cached across persons)
@@ -3937,6 +3940,7 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(rfcommMouseTrackingReceiver, IntentFilter(ListenerService.ACTION_RFCOMM_MOUSE_TRACKING))
             registerReceiver(reidFacesReceiver, IntentFilter(ListenerService.ACTION_REID_FACES))
             registerReceiver(reidStatsReceiver, IntentFilter(ListenerService.ACTION_REID_STATS))
+            registerReceiver(reidBpmReceiver, IntentFilter(ListenerService.ACTION_REID_BPM))
             registerReceiver(reidStatusReceiver, IntentFilter(ListenerService.ACTION_REID_STATUS))
             registerReceiver(reidPersonResponseReceiver, IntentFilter(ListenerService.ACTION_REID_PERSON_RESPONSE))
             registerReceiver(reidBestThumbReceiver, IntentFilter(ListenerService.ACTION_REID_BEST_THUMB))
@@ -8826,6 +8830,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val reidBpmReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val bpm = intent?.getIntExtra(ListenerService.EXTRA_REID_BPM, 0) ?: 0
+            runOnUiThread {
+                if (reidLiveBpm == bpm) return@runOnUiThread
+                reidLiveBpm = bpm
+                if (reidRunning) updateReidFaceBar()
+            }
+        }
+    }
+
     private val reidStatsReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val stats = intent?.getStringExtra(ListenerService.EXTRA_REID_STATS) ?: return
@@ -8902,6 +8917,13 @@ class MainActivity : AppCompatActivity() {
         }
         var end = (start + maxVisible).coerceAtMost(faces.size)
 
+        // Live heart rate of the face in view (one face at conversational distance).
+        // Shown under the selected face's thumbnail: heart icon on the left, BPM on
+        // the right. <=0 means measuring/unknown -> "--". Fed from ListenerService
+        // (the backend process owns ReidController/RppgEngine) via the REID_FACES
+        // broadcast extra; MainActivity cannot call across the process boundary.
+        val liveBpm: Int = reidLiveBpm
+
         for (i in start until end) {
             val face = faces[i]
             val iv = ImageView(this).apply {
@@ -8943,7 +8965,64 @@ class MainActivity : AppCompatActivity() {
                 iv.foreground = border
             }
 
-            reidFaceBar.addView(iv)
+            // Per-face vertical container: thumbnail on top, pulse row beneath.
+            val item = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = android.view.Gravity.CENTER_HORIZONTAL
+                setBackgroundColor(Color.BLACK)
+                isFocusable = false
+                defaultFocusHighlightEnabled = false
+                val lp = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                )
+                layoutParams = lp
+            }
+            item.addView(iv)
+
+            // Pulse row: heart icon (left) + BPM number (right). Shown under EVERY
+            // verified face without requiring selection -- the glasses see one face
+            // at conversational distance, so the single live reading applies to it.
+            // "--" while measuring / low-confidence.
+            val pulseRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL or android.view.Gravity.CENTER_HORIZONTAL
+                setBackgroundColor(Color.BLACK)
+                isFocusable = false
+                defaultFocusHighlightEnabled = false
+                val lp = LinearLayout.LayoutParams(thumbSize, LinearLayout.LayoutParams.WRAP_CONTENT)
+                lp.topMargin = (2 * density + 0.5f).toInt()
+                layoutParams = lp
+            }
+            val heartSize = (12 * density + 0.5f).toInt()
+            val heart = ImageView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(heartSize, heartSize)
+                setImageResource(R.drawable.ic_heart)
+                isFocusable = false
+                defaultFocusHighlightEnabled = false
+            }
+            val bpmText = TextView(this).apply {
+                text = if (liveBpm > 0) "$liveBpm" else "--"
+                setTextColor(0xFF00FF00.toInt())
+                textSize = 11f
+                typeface = android.graphics.Typeface.MONOSPACE
+                setBackgroundColor(Color.BLACK)
+                val lp = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                )
+                lp.leftMargin = (3 * density + 0.5f).toInt()
+                layoutParams = lp
+                isFocusable = false
+                defaultFocusHighlightEnabled = false
+            }
+            pulseRow.addView(heart)
+            pulseRow.addView(bpmText)
+            // Always visible under every verified face; the number reads "--" while
+            // measuring / low-confidence and the live BPM once locked.
+            item.addView(pulseRow)
+
+            reidFaceBar.addView(item)
         }
 
         // Update label based on state
@@ -9217,7 +9296,7 @@ class MainActivity : AppCompatActivity() {
             debugStatusReceiver, btStateReceiver, orchestratorStateReceiver,
             weatherUpdateReceiver, loneIndicatorReceiver, recordingStateReceiver,
             translationResultReceiver, translationConfigReceiver,
-            translationStateReceiver, reidFacesReceiver, reidStatsReceiver,
+            translationStateReceiver, reidFacesReceiver, reidStatsReceiver, reidBpmReceiver,
             reidStatusReceiver, reidPersonResponseReceiver, reidBestThumbReceiver, cameraPermRequestReceiver,
             todoListReceiver, alarmListReceiver, jobListReceiver,
             batteryReceiver, timeTickReceiver, bottomPaddingReceiver, chatFontSizeReceiver,

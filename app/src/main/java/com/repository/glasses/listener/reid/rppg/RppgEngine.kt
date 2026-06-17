@@ -54,6 +54,13 @@ class RppgEngine(
                 lastSeenMs[id] = tMs
             }
         }
+        // Diagnostic recorder: capture the FIRST track's raw RGB means (the glasses
+        // see one face at conversational distance, so track 0 is the subject). This
+        // is the exact colour signal fed to the detector; the CSV dump re-derives the
+        // POS pulse + beats from it so amplitude bumps can be checked against beats.
+        if (trackingIds.isNotEmpty()) {
+            RppgSignalRecorder.add(tMs, rgb[0], rgb[1], rgb[2])
+        }
     }
 
     /**
@@ -84,6 +91,21 @@ class RppgEngine(
 
     /** Latest smoothed BPM for a track, or null if measuring / unknown / dropped. */
     fun bpmFor(trackingId: Long): Float? = synchronized(lock) { bpm[trackingId] }
+
+    /**
+     * The single most-recently-seen track's BPM, or null while measuring / no face.
+     * The glasses see essentially one face at conversational distance, so the UI
+     * shows this one live reading rather than trying to map per-face. Picks the
+     * track with the newest sample so a passing second face does not steal it.
+     */
+    fun currentBpm(): Float? = synchronized(lock) {
+        var bestId: Long? = null
+        var bestSeen = Long.MIN_VALUE
+        for ((id, seen) in lastSeenMs) {
+            if (seen > bestSeen) { bestSeen = seen; bestId = id }
+        }
+        bestId?.let { bpm[it] }
+    }
 
     /** Live track ids (diagnostics / UI). */
     fun activeTrackIds(): Set<Long> = synchronized(lock) { buffers.keys.toSet() }

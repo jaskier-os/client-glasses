@@ -9,7 +9,7 @@ package com.repository.glasses.listener.reid.rppg
  * [compute] (typically about once per second) to obtain the displayed BPM.
  *
  * Pipeline glued here (the Phase-0 siblings):
- *   per-channel [Resampler.resampleUniform] -> [RppgSignal.pos] -> [SpectralBpm.estimate] -> [BpmSmoother.update]
+ *   per-channel [Resampler.resampleUniform] -> [RppgSignal.extract] -> [SpectralBpm.estimate] -> [BpmSmoother.update]
  *
  * Window / readiness / discontinuity rules:
  *   - Window: only the most recent [windowMs] of samples (by timestamp) are kept;
@@ -38,6 +38,9 @@ class TrackBuffer(
     val windowMs: Long = 10_000L,
     val gapResetMs: Long = 1_500L,
     private val smoother: BpmSmoother = BpmSmoother(),
+    /** Pulse-extraction method. GREEN (default) is the cleanest on this camera;
+     *  POS/CHROM are selectable for comparison. */
+    private val pulseMethod: RppgSignal.Method = RppgSignal.Method.GREEN,
 ) {
     private val tMs = ArrayDeque<Long>()
     private val rs = ArrayDeque<Float>()
@@ -114,7 +117,10 @@ class TrackBuffer(
         val gc = gu.values.copyOf(m)
         val bc = bu.values.copyOf(m)
 
-        val pulse = RppgSignal.pos(rc, gc, bc)
+        // Pulse extraction via the selected method (GREEN default: green hemoglobin
+        // absorbance carries the cleanest pulse on this camera; POS/CHROM mix in R/B
+        // and injected a spurious low peak that biased the rate ~10 bpm low on-device).
+        val pulse = RppgSignal.extract(pulseMethod, rc, gc, bc)
         val estimate = SpectralBpm.estimate(pulse, fps)
         return smoother.update(estimate)
     }

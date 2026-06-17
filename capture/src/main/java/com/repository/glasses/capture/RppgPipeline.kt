@@ -87,7 +87,12 @@ class RppgPipeline(
     )
 
     // Tracker lives on the DETECT thread only (FaceTracker is not thread-safe).
-    private val tracker = FaceTracker()
+    // maxAgeFrames here counts DETECTION cycles (not stream frames): detection runs
+    // ~4fps, so 20 cycles ~= 5s of tolerated misses before a track id is dropped and
+    // re-acquired with a NEW id. Generous tolerance keeps the trackingId STABLE across
+    // brief SCRFD misses -- id churn was resetting the listener's 10s rPPG buffer
+    // before it could ever become ready (BPM stuck at null).
+    private val tracker = FaceTracker(maxAgeFrames = 20)
 
     /** Latest face geometry for an active track: full-res box + 5 keypoints. */
     class TrackGeom(val x0: Int, val y0: Int, val x1: Int, val y1: Int, val kps: FloatArray)
@@ -136,6 +141,29 @@ class RppgPipeline(
     private var pVRowStride = 0
     private var pUPixStride = 0
     private var pVPixStride = 0
+    // Current frame dims (FRAME thread); copied into the snapshot under snapLock.
+    private var curFrameW = 0
+    private var curFrameH = 0
+
+    // --- Latest-frame JPEG snapshot (for serving ReID recognition off the live
+    // rPPG stream instead of a camera-stealing RAW still) -----------------------
+    // The frame thread publishes a COPY of each frame's planes + dims under
+    // [snapLock]; [latestFrameJpeg] (any thread) reads that copy under the same
+    // lock and converts it to an upright JPEG. A per-frame plane COPY is the price
+    // of decoupling the snapshot from the frame thread's reused scratch; it is a
+    // few hundred KB memcpy at ~8fps, far cheaper than the 1280x960 RAW burst it
+    // replaces. snapW<=0 means no frame captured yet.
+    private val snapLock = Any()
+    private var snapY = ByteArray(0)
+    private var snapU = ByteArray(0)
+    private var snapV = ByteArray(0)
+    private var snapYRowStride = 0
+    private var snapURowStride = 0
+    private var snapVRowStride = 0
+    private var snapUPixStride = 0
+    private var snapVPixStride = 0
+    private var snapW = 0
+    private var snapH = 0
 
     // Throwaway counters for the probe.
     @Volatile var framesSeen = 0L; private set
@@ -174,6 +202,8 @@ class RppgPipeline(
         val now = SystemClock.elapsedRealtime()
         val w = image.width
         val h = image.height
+        curFrameW = w
+        curFrameH = h
         try {
             // Snapshot the plane bytes once (cheap bulk reads) so we never touch the
             // slow DirectByteBuffer per pixel -- and so we can close the Image before
@@ -405,7 +435,83 @@ class RppgPipeline(
         yBuf.get(yScratch, 0, yN)
         uBuf.get(uScratch, 0, uN)
         vBuf.get(vScratch, 0, vN)
+
+        // Publish a copy for on-demand recognition snapshots (off-thread readers).
+        synchronized(snapLock) {
+            if (snapY.size < yN) snapY = ByteArray(yN)
+            if (snapU.size < uN) snapU = ByteArray(uN)
+            if (snapV.size < vN) snapV = ByteArray(vN)
+            System.arraycopy(yScratch, 0, snapY, 0, yN)
+            System.arraycopy(uScratch, 0, snapU, 0, uN)
+            System.arraycopy(vScratch, 0, snapV, 0, vN)
+            snapYRowStride = pYRowStride
+            snapURowStride = pURowStride
+            snapVRowStride = pVRowStride
+            snapUPixStride = pUPixStride
+            snapVPixStride = pVPixStride
+            snapW = curFrameW
+            snapH = curFrameH
+        }
     }
+
+    /**
+     * Latest live-stream frame as an UPRIGHT JPEG, for serving ReID recognition off
+     * the running rPPG stream instead of a camera-stealing RAW still. Converts the
+     * most-recently-published YUV snapshot to ARGB, rotates -90 (matching the RAW
+     * still path so the consumer passes rotationDeg=0), and JPEG-encodes.
+     *
+     * Returns null if no frame has been captured yet. Callable from any thread; reads
+     * the published snapshot under [snapLock] so it never races the frame thread.
+     */
+    fun latestFrameJpeg(quality: Int = 90): JpegFrame? {
+        val w: Int; val h: Int
+        val yA: ByteArray; val uA: ByteArray; val vA: ByteArray
+        val yRow: Int; val uRow: Int; val vRow: Int; val uPix: Int; val vPix: Int
+        synchronized(snapLock) {
+            if (snapW <= 0 || snapH <= 0 || snapY.isEmpty()) return null
+            w = snapW; h = snapH
+            // Copy out under the lock so the conversion below runs lock-free.
+            yA = snapY.copyOf(); uA = snapU.copyOf(); vA = snapV.copyOf()
+            yRow = snapYRowStride; uRow = snapURowStride; vRow = snapVRowStride
+            uPix = snapUPixStride; vPix = snapVPixStride
+        }
+        val argb = IntArray(w * h)
+        var o = 0
+        for (y in 0 until h) {
+            val yBase = y * yRow
+            val cRow = y shr 1
+            val uBase = cRow * uRow
+            val vBase = cRow * vRow
+            for (x in 0 until w) {
+                val yy = (yA[yBase + x].toInt() and 0xFF)
+                val cIdx = x shr 1
+                val u = (uA[uBase + cIdx * uPix].toInt() and 0xFF) - 128
+                val v = (vA[vBase + cIdx * vPix].toInt() and 0xFF) - 128
+                val y1192 = 1192 * (yy - 16)
+                var r = (y1192 + 1634 * v) shr 10
+                var g = (y1192 - 833 * v - 400 * u) shr 10
+                var b = (y1192 + 2066 * u) shr 10
+                if (r < 0) r = 0 else if (r > 255) r = 255
+                if (g < 0) g = 0 else if (g > 255) g = 255
+                if (b < 0) b = 0 else if (b > 255) b = 255
+                argb[o++] = -0x1000000 or (r shl 16) or (g shl 8) or b
+            }
+        }
+        val raw = Bitmap.createBitmap(argb, w, h, Bitmap.Config.ARGB_8888)
+        // Rotate -90 so the delivered pixels are upright (rotationDeg=0 downstream),
+        // identical to RawStillCapturer's ReID frame orientation.
+        val m = android.graphics.Matrix().apply { postRotate(-90f) }
+        val upright = Bitmap.createBitmap(raw, 0, 0, w, h, m, true)
+        if (upright !== raw) raw.recycle()
+        val bos = java.io.ByteArrayOutputStream(upright.width * upright.height / 4)
+        upright.compress(Bitmap.CompressFormat.JPEG, quality, bos)
+        val outW = upright.width; val outH = upright.height
+        upright.recycle()
+        return JpegFrame(bos.toByteArray(), outW, outH)
+    }
+
+    /** An encoded upright JPEG plus its dimensions. rotationDeg is implicitly 0. */
+    class JpegFrame(val jpeg: ByteArray, val width: Int, val height: Int)
 
     /** Single-pixel YUV->packed 0xRRGGBB from the current plane snapshot. Frame thread. */
     private fun rgbAtSnapshot(x: Int, y: Int, @Suppress("UNUSED_PARAMETER") w: Int): Int {

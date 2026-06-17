@@ -81,8 +81,14 @@ object SpectralBpm {
         var chosenBin = peakBin
 
         // Harmonic disambiguation: look for a strong peak near half the detected freq.
+        // The half-frequency must itself be a PLAUSIBLE in-band heart rate (>= MIN_HZ),
+        // otherwise localPeakBin clamps the search to the band floor and grabs
+        // low-frequency drift leakage there -- which made a true ~70 bpm pulse (whose
+        // half, 0.58 Hz / 35 bpm, sits below the 0.7 Hz / 42 bpm floor) get reported
+        // as a spurious ~42-50 with high confidence. Only disambiguate when the
+        // candidate lower fundamental is genuinely inside [MIN_HZ, MAX_HZ].
         val halfHz = refinedHz / 2f
-        if (halfHz >= MIN_FUNDAMENTAL_HZ) {
+        if (halfHz >= MIN_HZ) {
             val halfBin = Math.round(halfHz / binHz)
             val subBin = localPeakBin(power, halfBin, loBin, hiBin, binHz)
             if (subBin != null && power[subBin] > HARMONIC_POWER_FRACTION * power[peakBin]) {
@@ -91,7 +97,18 @@ object SpectralBpm {
             }
         }
 
-        val bpm = (refinedHz * 60f).coerceIn(MIN_BPM, MAX_BPM)
+        val rawBpm = refinedHz * 60f
+        val bpm = rawBpm.coerceIn(MIN_BPM, MAX_BPM)
+        // Floor/ceiling collapse: when the dominant in-band "peak" sits at the very
+        // edge of the search band the raw frequency clamps to MIN_BPM/MAX_BPM. That
+        // is spectral leakage from detrend residual / motion, NOT a real pulse, yet
+        // it can still score a deceptively high bandRatio (~0.36 measured on-device
+        // when the face is lost). Force zero confidence so the smoother's gate always
+        // rejects it -- this removes the garbage-vs-good bandRatio overlap at the
+        // source rather than trying to thread the gate threshold between them.
+        if (rawBpm <= MIN_BPM || rawBpm >= MAX_BPM) {
+            return BpmEstimate(bpm, 0f)
+        }
         val bandRatio = bandRatio(power, chosenBin, binHz, loBin, hiBin)
         return BpmEstimate(bpm, bandRatio)
     }

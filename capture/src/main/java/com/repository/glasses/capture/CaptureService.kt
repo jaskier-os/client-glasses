@@ -249,6 +249,26 @@ class CaptureService : Service() {
                 )
                 return
             }
+            // rPPG STREAM ACTIVE: ReID recognition must take its frame FROM the
+            // ongoing silent video stream, NOT a separate RAW still. The RAW burst
+            // steals the single camera for ~6s every cycle, which periodically
+            // stalled the rPPG stream (~3s gap every ~7.5s) and fragmented the pulse
+            // signal. Serving recognition off the live stream's latest frame removes
+            // that contention entirely -- the two no longer fight over the camera.
+            val streamPipeline = rppgStreamPipeline
+            if (streamPipeline != null) {
+                val frameId = reidFrameId.incrementAndGet()
+                val frame = streamPipeline.latestFrameJpeg()
+                if (frame != null) {
+                    try { cb.onFrame(frame.jpeg, frame.width, frame.height, 0, frameId) }
+                    catch (e: Exception) { Log.w(TAG, "reid stream-snapshot deliver failed: ${e.message}") }
+                } else {
+                    // Stream up but no frame yet (just started): retry next tick.
+                    try { cb.onCaptureError(ERR_BUSY, "rppg stream warming up") }
+                    catch (e: Exception) { Log.w(TAG, "reid stream-snapshot onCaptureError failed: ${e.message}") }
+                }
+                return
+            }
             val frameId = reidFrameId.incrementAndGet()
             // ReID capture is SILENT by design (privacy / UX): unlike the
             // func-button photo path, which deliberately pulses the white LED,
@@ -394,6 +414,12 @@ class CaptureService : Service() {
      */
     private val rppgStreamRunning = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    /** The live AIDL stream pipeline, exposed so captureReidFrame can pull a
+     *  recognition JPEG off the ongoing rPPG video instead of a camera-stealing RAW
+     *  still. Non-null only while [rppgStreamRunning] is true. @Volatile: written on
+     *  the AIDL thread, read on the recognition-driver thread. */
+    @Volatile private var rppgStreamPipeline: RppgPipeline? = null
+
     /**
      * Start the silent rPPG YUV stream driving a per-frame batched pipeline; each
      * processed frame's samples are shipped as ONE [ICaptureCallback.onRppgSamples]
@@ -431,6 +457,7 @@ class CaptureService : Service() {
             },
         )
         pipeline.reset()
+        rppgStreamPipeline = pipeline
         Log.i(TAG, "rPPG stream START")
         cameraSession.startRppgStream { image -> pipeline.onYuvFrame(image) }
     }
@@ -441,6 +468,7 @@ class CaptureService : Service() {
             Log.w(TAG, "rPPG stream stop ignored: not running")
             return
         }
+        rppgStreamPipeline = null
         try { cameraSession.stopRppgStream() } catch (e: Exception) {
             Log.w(TAG, "rPPG stream stopRppgStream failed: ${e.message}")
         }
