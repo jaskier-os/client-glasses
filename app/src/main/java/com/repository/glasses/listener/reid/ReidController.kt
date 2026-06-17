@@ -1,6 +1,7 @@
 package com.repository.glasses.listener.reid
 
 import android.os.SystemClock
+import com.repository.glasses.listener.reid.rppg.RppgEngine
 
 /**
  * Core face recognition state machine.
@@ -19,6 +20,9 @@ class ReidController {
          *  demosaic), so the effective cadence is capture-time + this floor. Keeps the
          *  camera from being hammered while ReID frames are flowing. */
         private const val CAPTURE_MIN_INTERVAL_MS = 1500L
+        /** Cadence of the rPPG recompute tick. compute() runs the full window each call;
+         *  ~1 Hz matches TrackBuffer's intended drive rate and keeps CPU low. */
+        private const val RPPG_TICK_INTERVAL_MS = 1000L
     }
 
     data class PendingFace(
@@ -77,6 +81,31 @@ class ReidController {
     private var captureThread: android.os.HandlerThread? = null
     private var captureHandler: android.os.Handler? = null
     @Volatile private var captureInFlight = false
+
+    /** Live BPM per face track. Fed from the AIDL onRppgSamples batch on the binder
+     *  thread; recomputed about once per second on [captureHandler]. UI reads via
+     *  [bpmFor]. The trackingId<->verified-uid link is a later task; this only keeps
+     *  BPM keyed by trackingId. */
+    val rppgEngine = RppgEngine()
+
+    private val rppgListener = object : com.repository.glasses.listener.capture.CaptureBridge.Listener {
+        override fun onRppgSamples(trackingIds: LongArray, rgb: FloatArray, tMs: Long) {
+            rppgEngine.onSamples(trackingIds, rgb, tMs)
+        }
+    }
+
+    private val rppgTick = object : Runnable {
+        override fun run() {
+            if (!isRunning) return
+            try { rppgEngine.tick(SystemClock.elapsedRealtime()) } catch (e: Throwable) {
+                log("rppg tick threw: ${e.message}")
+            }
+            captureHandler?.postDelayed(this, RPPG_TICK_INTERVAL_MS)
+        }
+    }
+
+    /** Latest smoothed BPM for a face track, or null while measuring / unknown / dropped. */
+    fun bpmFor(trackingId: Long): Float? = rppgEngine.bpmFor(trackingId)
 
     private val frameListener = object : com.repository.glasses.listener.capture.CaptureBridge.Listener {
         override fun onFrame(jpeg: ByteArray, width: Int, height: Int, rotationDeg: Int, frameId: Long) {
@@ -147,6 +176,12 @@ class ReidController {
             // Kick the first capture immediately; subsequent ones are scheduled
             // after each frame's detection completes (self-throttling loop).
             captureHandler?.post { triggerCapture() }
+
+            // rPPG: subscribe to the silent skin-color sample stream and start it,
+            // then drive the per-track BPM recompute at ~1 Hz on the same thread.
+            bridge.addListener(rppgListener)
+            bridge.startRppg()
+            captureHandler?.postDelayed(rppgTick, RPPG_TICK_INTERVAL_MS)
         }
     }
 
@@ -192,7 +227,10 @@ class ReidController {
         val bridge = captureBridge
         if (bridge != null) {
             bridge.removeListener(frameListener)
+            bridge.removeListener(rppgListener)
+            bridge.stopRppg()
         }
+        rppgEngine.reset()
         frameConsumer?.stop()
         frameConsumer = null
 
