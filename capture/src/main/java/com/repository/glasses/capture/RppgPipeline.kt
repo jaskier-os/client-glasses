@@ -95,6 +95,7 @@ class RppgPipeline(
     @Volatile var framesProcessed = 0L; private set   // frames converted YUV->RGB
     @Volatile var scrfdProcessed = 0L; private set     // frames that ran SCRFD
     @Volatile var facesSeen = 0L; private set
+    @Volatile var roiAttempts = 0L; private set        // frames that entered the ACTIVE per-frame ROI block
 
     /** Reset counters + state for a fresh probe run. */
     fun reset() {
@@ -102,6 +103,7 @@ class RppgPipeline(
         framesProcessed = 0L
         scrfdProcessed = 0L
         facesSeen = 0L
+        roiAttempts = 0L
         state = State.IDLE
         lastScrfdMs = 0L
         lastFaceMs = 0L
@@ -145,7 +147,8 @@ class RppgPipeline(
                 scrfdMs = SystemClock.elapsedRealtime() - tS0
             }
             if (framesSeen <= 6L || framesSeen % 15L == 0L) {
-                Log.i(TAG, "frame#${framesSeen} convMs=$convMs scrfdMs=$scrfdMs ran=$runScrfd")
+                Log.i(TAG, "frame#${framesSeen} convMs=$convMs scrfdMs=$scrfdMs ran=$runScrfd " +
+                    "state=$state roiAttempts=$roiAttempts scrfd=$scrfdProcessed")
             }
 
             // EVERY frame: ROI-sample each active track. The RoiSampler scans only
@@ -153,6 +156,7 @@ class RppgPipeline(
             // requested pixel on demand from the plane snapshot -- no full-frame
             // conversion on non-detection frames.
             if (state == State.ACTIVE && trackKps.isNotEmpty()) {
+                roiAttempts++
                 val src = RoiSampler.RgbImage { x, y -> rgbAtSnapshot(x, y, w) }
                 val batch = ArrayList<Sample>(trackKps.size)
                 for ((id, kps) in trackKps) {
@@ -351,14 +355,22 @@ class RppgPipeline(
         // Detection downscale factor: SCRFD runs on a 1/DET_DS frame (it resizes
         // internally), so conversion + setPixels cost drops DET_DS^2. Boxes +
         // keypoints are scaled back up by DET_DS for full-res ROI placement.
-        private const val DET_DS = 2
+        private const val DET_DS = 3
         private const val IDLE_SCRFD_INTERVAL_MS = 1000L
-        private const val ACTIVE_SCRFD_INTERVAL_MS = 500L  // ~2fps detection;
-        // each detection frame costs ~350ms (full-frame YUV->ARGB + setPixels +
-        // SCRFD), and blocks the single in-flight slot. Spacing detection out lets
-        // the cheap ROI-only frames (~5-10ms each) flow between for a high sample
-        // rate. Faces move slowly relative to the sample cadence, so ~2.5fps box
-        // refresh is plenty to keep the forehead ROI placed.
+        // ACTIVE detection cadence. MEASURED on-device: one SCRFD detection frame
+        // costs ~150-200ms (QNN detect ~150ms + the downscaled YUV->ARGB conv
+        // ~20-50ms), and it BLOCKS the single in-flight worker slot the whole time.
+        // The cheap ROI-only frames (~8ms) can only run in the slot when detection
+        // is NOT due. So this interval is a budget split, not just a "freshness"
+        // knob: too low (e.g. 110ms < detect cost) and detection claims every slot,
+        // starving the ROI sampler down to the detection rate (~4-5Hz -- the old
+        // symptom). At 250ms, each ~400ms cycle is 1 detection + ~5 cheap ROI
+        // frames, giving ROI samples at ~12-15Hz (the stream rate) while still
+        // refreshing the box ~3-4x/s -- fast enough to keep the forehead ROI on a
+        // slowly-moving face. Raising detection further is infeasible here: SCRFD
+        // is ~150ms (NOT the 22ms a bare NPU run suggests), so >4fps detection
+        // would consume the whole slot budget and collapse the sample rate again.
+        private const val ACTIVE_SCRFD_INTERVAL_MS = 250L
         private const val ACTIVE_LINGER_MS = 3000L
     }
 }
