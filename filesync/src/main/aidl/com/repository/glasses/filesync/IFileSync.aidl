@@ -31,4 +31,11 @@ interface IFileSync {
 
     /** Phone reports successful pull. Currently informational (reserved for future TTL/rotation). */
     void ack(String fileId);
+
+    /**
+     * Gate the sideload HTTP routes (POST /sideload/upload|exec|cleanup). When false the
+     * routes return 403 and the staging dir (/data/local/tmp/sideload) is wiped immediately.
+     * Set by the listener app from GlassesConfig.sideloadingEnabled.
+     */
+    void setSideloadEnabled(boolean enabled);
 }

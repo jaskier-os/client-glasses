@@ -7,16 +7,19 @@
   for BluetoothA2dpSink.connect / BluetoothHeadsetClient.connect / setConnectionPolicy
   used by ProfileAutoConnector to bring HFP-HF and A2DP Sink up after pairing.
 
-  IMPORTANT: do NOT add comments inside the <privapp-permissions> block.
-  Android 12 silently drops the entire <privapp-permissions> block when a
-  comment node appears as a sibling to <permission> children if there's only
-  one permission element -- the parser advances past the comment to the
-  closing tag, and the priv-app then fails systemReady() check.
-  Multi-permission blocks (like the listener xml) tolerate inline comments,
-  but single-permission blocks do not. Keep this file comment-free below.
+  IMPORTANT: this block MUST list at least two permissions. On a fresh first
+  boot, Android 12 PMS drops a SINGLE-permission <privapp-permissions> block,
+  and the priv-app then fails the systemReady() allowlist check -- which throws
+  in system_server and BOOTLOOPS the device (observed on a clean 1.18 flash:
+  "Signature|privileged permissions not in privapp-permissions allowlist:
+  {com.repository.glasses.btmanager: BLUETOOTH_PRIVILEGED}"). MODIFY_PHONE_STATE
+  is added as the second entry so the block is multi-permission and parses
+  reliably; btmanager legitimately uses it for HFP-HF call state. Keep the
+  block comment-free below.
 -->
 <permissions>
     <privapp-permissions package="com.repository.glasses.btmanager">
         <permission name="android.permission.BLUETOOTH_PRIVILEGED"/>
+        <permission name="android.permission.MODIFY_PHONE_STATE"/>
     </privapp-permissions>
 </permissions>

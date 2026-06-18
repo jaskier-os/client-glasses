@@ -95,6 +95,10 @@ class FileSyncService : Service() {
      */
     @Volatile private var dirtyDuringServe: Boolean = false
     @Volatile private var currentWifiDetailsJson: String? = null
+    // Sideload gate. Set by the listener app over AIDL from GlassesConfig.sideloadingEnabled.
+    // FileHttpServer reads it per-request via a live getter so a mid-session flip-off
+    // immediately starts rejecting POST /sideload/* with 403.
+    @Volatile private var sideloadEnabled: Boolean = false
     private lateinit var idleChecker: ScheduledExecutorService
     private lateinit var archiveScheduler: ScheduledExecutorService
     @Volatile private var archiveTask: java.util.concurrent.ScheduledFuture<*>? = null
@@ -216,6 +220,19 @@ class FileSyncService : Service() {
         override fun ack(fileId: String) {
             // reserved
         }
+
+        override fun setSideloadEnabled(enabled: Boolean) {
+            if (sideloadEnabled == enabled) return
+            sideloadEnabled = enabled
+            Log.i(TAG, "setSideloadEnabled: $enabled")
+            // Flipping off must immediately kill any running exec jobs (a true teardown, unlike a
+            // transient WiFi close) and purge staged uploads -- tmp files must never persist once
+            // the gate closes.
+            if (!enabled) {
+                try { http.killAllJobs() } catch (e: Exception) { Log.w(TAG, "killAllJobs on disable: ${e.message}") }
+                try { http.wipeStaging() } catch (e: Exception) { Log.w(TAG, "wipeStaging on disable: ${e.message}") }
+            }
+        }
     }
 
     private val newFileBinder = object : INewFile.Stub() {
@@ -303,6 +320,10 @@ class FileSyncService : Service() {
             port = WifiDirectHost.HTTP_PORT,
             manifestProvider = { manifest },
             onHit = { lastHitMs = SystemClock.elapsedRealtime() },
+            sideloadEnabled = { sideloadEnabled },
+            // App-private dir: writable by this priv_app uid (/data/local/tmp is shell-only),
+            // and readable by the root appsud daemon when it pushes staged files into /system.
+            stagingDirPath = File(filesDir, "sideload").absolutePath,
         )
 
         idleChecker = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "FileSync-idle") }

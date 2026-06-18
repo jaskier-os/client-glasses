@@ -15,4 +15,6 @@ interface IFileSync {
 
     boolean deleteFile(String fileId);
     void ack(String fileId);
+
+    void setSideloadEnabled(boolean enabled);
 }

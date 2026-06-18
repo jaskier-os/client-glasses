@@ -43,6 +43,11 @@ object GlassesConfig {
     @Volatile var batteryPct: Int = 100
     @Volatile var voiceControl: String = ""        // "on" | "off" | ""
     @Volatile var longPressFun: String = "audio"   // "picture" | "video" | "audio"
+    // Phone-controlled gate for the sideload-through-phone deploy path. When true the
+    // filesync HTTP server accepts the POST /sideload/* routes and the CH_SIDELOAD BT
+    // channel will open WiFi Direct. Defaults OFF; only flipped on by the phone for a
+    // deploy session.
+    @Volatile var sideloadingEnabled: Boolean = false
 
     fun applySettings(ctx: Context, json: String) {
         try {
@@ -81,6 +86,9 @@ object GlassesConfig {
             }
             if (obj.has("on_demand_recording_active")) {
                 onDemandRecordingActive = obj.optBoolean("on_demand_recording_active", onDemandRecordingActive)
+            }
+            if (obj.has("enable_sideloading")) {
+                sideloadingEnabled = obj.optBoolean("enable_sideloading", sideloadingEnabled)
             }
             // TODO(glasses): wire voiceControl + longPressFun into the Rokid OS
             // framework (former CxrApi setVoiceControl / setLongPressFun calls)
@@ -124,6 +132,7 @@ object GlassesConfig {
         powerTimeoutMin = sp.getInt("powerTimeoutMin", powerTimeoutMin)
         wakewordEnabled = sp.getBoolean("wakeword_enabled", wakewordEnabled)
         alwaysRecordEnabled = sp.getBoolean("always_record_enabled", alwaysRecordEnabled)
+        sideloadingEnabled = sp.getBoolean("enable_sideloading", sideloadingEnabled)
         voiceControl = sp.getString("voiceControl", voiceControl) ?: voiceControl
         longPressFun = sp.getString("longPressFun", longPressFun) ?: longPressFun
     }
@@ -142,6 +151,7 @@ object GlassesConfig {
                 .putInt("powerTimeoutMin", powerTimeoutMin)
                 .putBoolean("wakeword_enabled", wakewordEnabled)
                 .putBoolean("always_record_enabled", alwaysRecordEnabled)
+                .putBoolean("enable_sideloading", sideloadingEnabled)
                 .putString("voiceControl", voiceControl)
                 .putString("longPressFun", longPressFun)
                 .apply()

@@ -155,6 +155,15 @@ object BtProtocol {
     // File sync (glasses <-> phone). See SyncChannelHandler / GlassesSyncClient.
     const val CH_SYNC = "listener_sync"
 
+    // Sideload-through-phone session (phone <-> glasses). A minimal parallel handshake
+    // to open/close the WiFi Direct link for a deploy session, independent of the photo
+    // pull FSM (CH_SYNC). Reuses the SAME filesync WifiDirectHost via FileSyncBridge.
+    // See SideloadChannelHandler. Wire (single JSON arg):
+    //   phone -> glasses {"t":"OPEN_WIFI"} | {"t":"CLOSE_WIFI"}
+    //   glasses -> phone {"t":"WIFI_READY","details":{ssid,passphrase,ip,port,deviceAddress}}
+    //                    {"t":"WIFI_ERROR","reason":"..."} | {"t":"WIFI_CLOSED"}
+    const val CH_SIDELOAD = "listener_sideload"
+
     // Glasses -> phone command (translation toggle, etc.)
     const val CH_GLASSES_COMMAND = "glasses_command"
 

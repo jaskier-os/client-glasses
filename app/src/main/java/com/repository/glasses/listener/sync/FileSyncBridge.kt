@@ -61,7 +61,10 @@ class FileSyncBridge(private val context: Context) {
             listeners.forEach { it.onManifestChanged(newStateHash) }
         }
         override fun onWifiDirectReady(detailsJson: String) {
-            logMsg("FileSync: wifi ready $detailsJson")
+            // Do NOT log the raw details: they carry the WiFi-Direct WPA2 passphrase, and this log
+            // persists to /sdcard/Download/glasses-client.log which is pullable over the :8848 P2P
+            // endpoint with no auth. Redact the passphrase before logging.
+            logMsg("FileSync: wifi ready ${redactPassphrase(detailsJson)}")
             listeners.forEach { it.onWifiDirectReady(detailsJson) }
         }
         override fun onWifiDirectClosed() {
@@ -76,6 +79,15 @@ class FileSyncBridge(private val context: Context) {
             logMsg("FileSync: file deleted $fileId")
             listeners.forEach { it.onFileDeleted(fileId) }
         }
+    }
+
+    /** Replace the passphrase value in a WIFI_READY details JSON with "***" for logging. */
+    private fun redactPassphrase(detailsJson: String): String = try {
+        val o = org.json.JSONObject(detailsJson)
+        if (o.has("passphrase")) o.put("passphrase", "***")
+        o.toString()
+    } catch (_: Exception) {
+        "<redacted>"
     }
 
     private val deathRecipient: IBinder.DeathRecipient = object : IBinder.DeathRecipient {
@@ -184,4 +196,19 @@ class FileSyncBridge(private val context: Context) {
         try { api?.deleteFile(fileId) ?: false } catch (e: Exception) {
             logMsg("FileSync: deleteFile failed: ${e.message}"); false
         }
+
+    /**
+     * Gate the filesync sideload HTTP routes. Mirrors GlassesConfig.sideloadingEnabled.
+     * Returns false if the call could not be delivered (binder not up yet) so the caller
+     * can re-push once bound. The last value is held so onBound re-syncs current state.
+     */
+    fun setSideloadEnabled(enabled: Boolean): Boolean {
+        val a = api ?: return false
+        return try {
+            a.setSideloadEnabled(enabled)
+            true
+        } catch (e: Exception) {
+            logMsg("FileSync: setSideloadEnabled failed: ${e.message}"); false
+        }
+    }
 }

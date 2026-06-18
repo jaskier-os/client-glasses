@@ -60,6 +60,8 @@ class GlassesBtClient(private val relay: MessageRelay) {
         fun onTgNewMessage(json: String) {}
         fun onTgTopicsResponse(chatId: String, json: String) {}
         fun onSyncMessage(msgType: String, sessionId: String, payload: List<String>) {}
+        /** Sideload session control (CH_SIDELOAD). payloadJson is the single JSON arg. */
+        fun onSideloadMessage(payloadJson: String) {}
         fun onWeatherUpdate(icon: String, tempC: String, location: String) {}
         fun onTimeSync(epochMillis: Long, tzId: String) {}
         fun onContactsHash(agMac: String, hash: String) {}
@@ -326,6 +328,11 @@ class GlassesBtClient(private val relay: MessageRelay) {
                     remoteLog?.invoke("Sync msg: $msgType session=$sessionId payloadArgs=${payload.size}")
                     listener?.onSyncMessage(msgType, sessionId, payload)
                 }
+                BtProtocol.CH_SIDELOAD -> {
+                    val payloadJson = args.getOrElse(0) { "{}" }
+                    remoteLog?.invoke("Sideload msg: ${payloadJson.take(80)}")
+                    listener?.onSideloadMessage(payloadJson)
+                }
                 BtProtocol.CH_TIME_SYNC -> {
                     val epoch = args.getOrElse(0) { "0" }.toLongOrNull() ?: 0L
                     val tz = args.getOrElse(1) { "" }
@@ -461,6 +468,15 @@ class GlassesBtClient(private val relay: MessageRelay) {
      */
     fun sendSync(msgType: String, sessionId: String, vararg payload: String): Boolean {
         return relay.publish(BtProtocol.CH_SYNC, msgType, sessionId, *payload)
+    }
+
+    /**
+     * Publish a sideload-session control message on the listener_sideload channel.
+     * Wire format: a single JSON arg, e.g. {"t":"WIFI_READY","details":{...}}.
+     * See SideloadChannelHandler.
+     */
+    fun sendSideload(payloadJson: String): Boolean {
+        return relay.publish(BtProtocol.CH_SIDELOAD, payloadJson)
     }
 
     /**

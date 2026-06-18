@@ -170,8 +170,9 @@ class BleWakeService(
     }
 
     private fun buildServiceData(): ByteArray {
-        // "REPO" (4 bytes) + classic BT MAC (6 bytes) so phone can RFCOMM-connect
-        // directly from the BLE scan result without GATT discovery.
+        // "REPO" (4 bytes) + classic BT MAC (6 bytes) + pairing flag (1 byte) so the phone
+        // can RFCOMM-connect directly from the BLE scan result without GATT discovery, AND
+        // tell whether this unit is currently available for pairing.
         // MAC is written by deploy script to /data/local/tmp/glasses_bt_mac
         // (all other approaches blocked by ROM permission checks).
         if (classicMacAddress == "00:00:00:00:00:00") {
@@ -185,9 +186,37 @@ class BleWakeService(
                 Log.w(TAG, "event=ble_wake.macResolve.fail err=${e.message}")
             }
         }
-        Log.d(TAG, "event=ble_wake.serviceData mac=$classicMacAddress")
+        val pairingFlag = if (isPairingAvailable()) 0x01.toByte() else 0x00.toByte()
+        Log.d(TAG, "event=ble_wake.serviceData mac=$classicMacAddress pairing=$pairingFlag")
         val macBytes = classicMacAddress.split(":").map { it.toInt(16).toByte() }.toByteArray()
-        return MAGIC_PREFIX + macBytes
+        return MAGIC_PREFIX + macBytes + byteArrayOf(pairingFlag)
+    }
+
+    /**
+     * Whether this glasses is currently advertising itself as available for pairing. True when
+     * it has no bonded host yet (a freshly flashed unit) OR the user opened a pairing window on
+     * the glasses. An already-paired unit returns false, so the phone's "Pair" scan ignores it
+     * and only bonds a unit that is genuinely waiting to be paired. This is what lets the phone
+     * pick the NEW glasses when an old, still-paired unit is also in range advertising the same
+     * name.
+     */
+    private fun isPairingAvailable(): Boolean {
+        if (pairingWindowUntilMs > android.os.SystemClock.elapsedRealtime()) return true
+        return try {
+            val adapter = bluetoothManager.adapter ?: return true
+            (adapter.bondedDevices?.size ?: 0) == 0
+        } catch (_: Exception) { true }
+    }
+
+    /** Set by setDiscoverable(): opens a timed window during which this unit advertises
+     *  pairing=1 even if it already has a bond (user explicitly re-pairing on the glasses). */
+    @Volatile private var pairingWindowUntilMs: Long = 0L
+
+    fun openPairingWindow(durationSeconds: Int) {
+        pairingWindowUntilMs = android.os.SystemClock.elapsedRealtime() + durationSeconds * 1000L
+        Log.i(TAG, "event=ble_wake.pairingWindow open duration_s=$durationSeconds")
+        // Re-advertise immediately so the flag flips without waiting for the next refresh.
+        try { startAdvertising() } catch (_: Exception) {}
     }
 
     private fun startAdvertising() {

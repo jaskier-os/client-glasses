@@ -2408,6 +2408,15 @@ class ListenerService : LifecycleService(),
             syncChannelHandler = com.repository.glasses.listener.sync.SyncChannelHandler(btClient, fileSyncBridge, btManagerBridge).apply {
                 remoteLog = { btLog(it) }
             }
+            sideloadChannelHandler = com.repository.glasses.listener.sync.SideloadChannelHandler(btClient, fileSyncBridge).apply {
+                remoteLog = { btLog(it) }
+            }
+            // Push the persisted sideload gate to filesync once it binds, and re-push on every
+            // rebind so the HTTP server's gate always matches GlassesConfig.
+            fileSyncBridge.addOnBoundListener {
+                try { fileSyncBridge.setSideloadEnabled(GlassesConfig.sideloadingEnabled) }
+                catch (e: Exception) { btErr("setSideloadEnabled on bind failed: ${e.message}") }
+            }
             fileSyncBridge.bind()
             btLog("FileSyncBridge bind() called")
         } catch (e: Exception) {
@@ -3674,6 +3683,7 @@ class ListenerService : LifecycleService(),
     private var glassesBatteryMonitor: com.repository.glasses.listener.capture.GlassesBatteryMonitor? = null
     private lateinit var fileSyncBridge: com.repository.glasses.listener.sync.FileSyncBridge
     private var syncChannelHandler: com.repository.glasses.listener.sync.SyncChannelHandler? = null
+    private var sideloadChannelHandler: com.repository.glasses.listener.sync.SideloadChannelHandler? = null
     private lateinit var captureBridge: com.repository.glasses.listener.capture.CaptureBridge
     private lateinit var functionButtonHandler: com.repository.glasses.listener.input.FunctionButtonHandler
 
@@ -6771,7 +6781,16 @@ class ListenerService : LifecycleService(),
         btLog("Applying settings: ${settingsJson.take(100)}")
         val prevPadding = GlassesConfig.bottomPaddingPx
         val prevChatFontSize = GlassesConfig.chatFontSize
+        val prevSideloading = GlassesConfig.sideloadingEnabled
         GlassesConfig.applySettings(this, settingsJson)
+        val newSideloading = GlassesConfig.sideloadingEnabled
+        if (newSideloading != prevSideloading) {
+            btLog("Sideloading enabled changed: $prevSideloading -> $newSideloading")
+            // Push the new gate to the filesync APK so its HTTP server starts/stops
+            // honoring POST /sideload/*. When false, filesync also wipes the staging dir.
+            try { fileSyncBridge.setSideloadEnabled(newSideloading) }
+            catch (e: Exception) { btErr("setSideloadEnabled failed: ${e.message}") }
+        }
         val newPadding = GlassesConfig.bottomPaddingPx
         if (newPadding != prevPadding) {
             btLog("Bottom padding changed: $prevPadding -> $newPadding")
@@ -7326,6 +7345,11 @@ class ListenerService : LifecycleService(),
             setPackage(packageName)
             putExtra(EXTRA_TG_NEW_MESSAGE_JSON, json)
         })
+    }
+
+    override fun onSideloadMessage(payloadJson: String) {
+        try { sideloadChannelHandler?.onMessage(payloadJson) }
+        catch (e: Exception) { btErr("onSideloadMessage failed: ${e.message}") }
     }
 
     override fun onSyncMessage(msgType: String, sessionId: String, payload: List<String>) {
@@ -8838,6 +8862,7 @@ class ListenerService : LifecycleService(),
         try { btClient.shutdown() } catch (_: Exception) {}
         try { mapRelay?.let { it.listener = null; it.stop() } } catch (_: Exception) {}
         try { syncChannelHandler?.detach() } catch (_: Exception) {}
+        try { sideloadChannelHandler?.detach() } catch (_: Exception) {}
         try { fileSyncBridge.unbind() } catch (_: Exception) {}
         try { unregisterReceiver(fnKeyReceiver) } catch (_: Exception) {}
         try { if (::captureBridge.isInitialized) captureBridge.unbind() } catch (_: Exception) {}

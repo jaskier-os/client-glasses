@@ -415,6 +415,76 @@ adb shell getprop | grep rkd          # Rokid-specific properties
 
 Detailed hardware documentation: `Recon/rokid-docs/yodaos/docs/hardware/` (audio, display, sensors)
 
+## Sideloading (deploy/control the glasses through the phone, no USB)
+
+Lets a **desktop deploy to and control the glasses over LAN + WiFi-Direct via the phone**,
+replacing the adb-USB cable. `scripts/deploy-to-glasses-via-phone.sh` is the over-the-air sibling
+of `deploy-to-glasses.sh`: it builds the APKs and runs the whole priv-app overlay install + grants
++ reboot + verify with the glasses never on adb. The phone-side half (LAN server, the
+"Enable sideloading" toggle, the BT/WiFi-Direct forwarder, the desktop HTTP API) is documented in
+the **phone app CLAUDE.md ("Sideloading")**; this section covers the glasses-side internals.
+
+### Glasses-side architecture
+
+The **filesync APK** is the glasses end. When the listener app receives `enable_sideloading=true`
+on the `CH_SETTINGS` BT channel it tells filesync (over the `IFileSync` AIDL
+`setSideloadEnabled`), which makes `http/FileHttpServer.kt` accept the `POST /sideload/*` routes.
+The same `WifiDirectHost` that serves photo/log pulls hosts the Group-Owner HTTP server on
+**:8849**; the phone opens/closes that link over BT via the `listener_sideload` channel (handled in
+the app by `sync/SideloadChannelHandler.kt`, which drives the shared filesync
+`openWifiDirectForSync`/`closeWifiDirect` -- WiFi is toggled ONLY by `WifiDirectHost`, never
+duplicated).
+
+All privileged work (writes into /system, `pm install`, grants, reboot, arbitrary shell) runs as
+**root via the `appsud` daemon** (see "Glasses App Root" below) -- the filesync app uid is not
+itself root.
+
+### Glasses HTTP routes (filesync FileHttpServer, port 8849)
+
+| Route | Purpose |
+|---|---|
+| `POST /sideload/upload` (header `X-Upload-Name`, raw body) | stream to the app-private staging dir; returns `{ok,path,size,sha256}` |
+| `POST /sideload/exec` (`{cmd}`) | **synchronous** root exec, capped at `SYNC_EXEC_CAP_MS`=120s; returns `{rc,stdout,stderr,truncated}` |
+| `POST /sideload/exec/start` (`{cmd}`) -> `{job}` | **async** root exec, no time limit |
+| `POST /sideload/exec/poll` (`{job,stdoutFrom,stderrFrom}`) | incremental `{running,rc,stdoutB64,stderrB64,stdoutTotal,stderrTotal,truncated,error}` |
+| `POST /sideload/cleanup` | wipe staging |
+
+All routes 403 unless sideloading is currently enabled. No auth beyond that flag (the device
+single-user-trusts on-device callers by design).
+
+### Sideloading exec internals (run ANY command, including long-running)
+
+Root commands run through the `appsud` daemon's **streaming frame protocol** (see "Glasses App
+Root"). filesync's `ExecJob` (inner class in `FileHttpServer.kt`) holds the appsud LocalSocket on a
+background thread and consumes frames into rolling 16 MiB stdout/stderr buffers, so the HTTP layer
+never blocks on the command. The desktop polls `/sideload/exec/poll` for incremental output +
+final `rc`; output is returned **base64** so it is binary/UTF-8 clean across poll boundaries. There
+is no exec time limit -- long commands stream until they exit. Jobs are killed on session stop and
+retired (with a staging wipe) once the desktop has drained all output.
+
+Two gotchas learned during bring-up (don't reintroduce):
+- The desktop `gl_exec` must NOT parse `running` with jq's `.running // true`: jq's `//` treats
+  boolean `false` as empty and returns the fallback, so a finished job reads as still-running and
+  the poll loop never ends. Extract it explicitly.
+- The WiFi-Direct GO group tears down after ~36s of NO traffic (firmware
+  `hdd_psoc_idle_timeout` -> psoc shutdown, plus a "Wifi turning off from UI" path). Under
+  continuous polling (gl_exec polls every 0.3s) the link stays up for the whole command; only
+  idle GAPS trigger the teardown. Don't leave a sideload session idle -- close it or keep polling.
+
+### Tmp hygiene (uploaded/derived files never persist)
+
+Required guarantee: nothing sideload writes survives the session. Coverage:
+- Uploads land in the filesync **app-private** dir (`<filesDir>/sideload/`, since
+  `/data/local/tmp` is `shell:shell 0771` and a priv_app can't mkdir there; appsud-root can still
+  read it). Wiped by `wipeStaging()` on session open, close, stop, `/sideload/cleanup`, sync-exec
+  finally, and async-job finish.
+- APK installs need a **world-readable** copy (PackageManager/system_server cannot read the
+  app-private dir), placed in `/data/local/tmp/sideload-stage/` (`INSTALL_SCRATCH_DIR`). The
+  desktop removes it inline after `pm install`; additionally `wipeStaging()` **force-wipes that
+  dir via the appsud root daemon on every teardown** (the dir is root-owned, so the app uid can't
+  delete it itself), so a job killed mid-install leaves nothing behind. Verified on-device: a
+  root-owned leftover planted there is gone after `/sideload/close`.
+
 ## Logging -- External File + WiFi P2P Pull
 
 When connected via USB cable, direct ADB logcat is available. Otherwise (BT-only connection), glasses logcat is invisible from the PC and the persistent file is the only path.
