@@ -152,11 +152,6 @@ class FileHttpServer(
     fun start() = GT.section("fs.http.start") {
         if (running) return@section
         running = true
-        // Start every session from a clean slate. If a prior deploy aborted mid-sequence
-        // (e.g. desktop died before the exec that consumes+wipes a staged APK), the leftover
-        // would otherwise persist until the next wipe. Wiping on open guarantees no uploaded
-        // tmp survives across sessions regardless of how the previous one ended.
-        wipeStaging()
         // Re-create the pool on each start: stop() shutdownNow's it, and a
         // shutdown ExecutorService is permanently rejecting -- never reuse.
         if (pool.isShutdown) pool = newPool()
@@ -164,6 +159,12 @@ class FileHttpServer(
         val thread = Thread({ acceptLoop() }, "FileHttp-accept")
         thread.isDaemon = true
         thread.start()
+        // Clean slate: wipe leftover staged uploads from a prior deploy that aborted
+        // mid-sequence. Done AFTER the accept loop is spawned so it does not block the
+        // caller (onWifiReady runs on the main Looper; wipeStaging -> wipeRootInstallScratch
+        // opens a synchronous appsud socket that can block up to soTimeout=5s, which would
+        // freeze the main thread and delay the WIFI_READY broadcast to the phone).
+        Thread({ try { wipeStaging() } catch (e: Exception) { Log.w(TAG, "start wipeStaging: ${e.message}") } }, "FileHttp-wipe-start").start()
     }
 
     /**
@@ -181,12 +182,17 @@ class FileHttpServer(
         try { serverSocket?.close() } catch (_: Exception) {}
         serverSocket = null
         pool.shutdownNow()
-        // Wait for in-flight workers to actually stop before the final wipe; otherwise an
-        // upload worker mid-write could re-create the staging dir and persist a file AFTER
-        // wipeStaging() ran, defeating the "tmp never persists" guarantee.
-        try { pool.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS) } catch (_: InterruptedException) {}
-        // Tmp hygiene: never leave staged uploads behind across a session teardown.
-        wipeStaging()
+        // Await + wipe on a background thread so the caller (onWifiClosed, which runs on
+        // the main Looper) is not blocked. pool.awaitTermination can stall up to 5 s when
+        // respondFile threads are stuck in OutputStream.write to dead WiFi sockets (regular
+        // Java sockets are NOT interruptible by Thread.interrupt; the write only unblocks
+        // when the kernel TCP stack detects the broken peer). Blocking the main Looper that
+        // long delays the onWifiDirectClosed callback to the listener app and the deferred
+        // onManifestChanged broadcast, which stalls the phone's sync FSM.
+        Thread({
+            try { pool.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS) } catch (_: InterruptedException) {}
+            try { wipeStaging() } catch (e: Exception) { Log.w(TAG, "stop wipeStaging: ${e.message}") }
+        }, "FileHttp-wipe-stop").start()
     }
 
     /** Kill every running async exec job + drop them. Called only on a true teardown (sideloading

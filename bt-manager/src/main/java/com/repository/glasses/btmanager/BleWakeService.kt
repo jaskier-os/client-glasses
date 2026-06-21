@@ -157,7 +157,34 @@ class BleWakeService(
         // Tell the BLE advertiser to advertise our service UUID under our tag.
         // BLE subsystem can lag behind GATT -- retry if advertiser is not ready.
         startAdvertising()
+
+        // The advertised pairing flag is baked into the scan-response payload at advertise time,
+        // so it does not auto-update when the user later toggles BT pairing (discoverable). Watch
+        // for scan-mode changes and re-advertise so pairing=1 propagates the moment the user puts
+        // the glasses into pairing mode.
+        registerScanModeReceiver()
         return@section true
+    }
+
+    private var scanModeReceiver: android.content.BroadcastReceiver? = null
+
+    private fun registerScanModeReceiver() {
+        if (scanModeReceiver != null) return
+        val rx = object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: android.content.Intent) {
+                if (intent.action == android.bluetooth.BluetoothAdapter.ACTION_SCAN_MODE_CHANGED) {
+                    Log.i(TAG, "event=ble_wake.scanModeChanged -> re-advertise")
+                    try { startAdvertising() } catch (_: Exception) {}
+                }
+            }
+        }
+        scanModeReceiver = rx
+        try {
+            context.registerReceiver(rx, android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_SCAN_MODE_CHANGED))
+        } catch (e: Exception) {
+            Log.w(TAG, "event=ble_wake.scanModeReceiver.fail err=${e.message}")
+            scanModeReceiver = null
+        }
     }
 
     @Volatile
@@ -193,17 +220,22 @@ class BleWakeService(
     }
 
     /**
-     * Whether this glasses is currently advertising itself as available for pairing. True when
-     * it has no bonded host yet (a freshly flashed unit) OR the user opened a pairing window on
-     * the glasses. An already-paired unit returns false, so the phone's "Pair" scan ignores it
-     * and only bonds a unit that is genuinely waiting to be paired. This is what lets the phone
-     * pick the NEW glasses when an old, still-paired unit is also in range advertising the same
-     * name.
+     * Whether this glasses is currently advertising itself as available for pairing. True when:
+     *   - the user put the glasses into BT pairing mode (adapter scan mode is
+     *     CONNECTABLE_DISCOVERABLE) -- putting the glasses in pairing means the user WANTS it to
+     *     pair, no matter how many devices are already bonded; OR
+     *   - the bt-manager pairing window was opened explicitly (openPairingWindow); OR
+     *   - it has no bonded host yet (a freshly flashed unit).
+     * An idle, already-bonded unit that the user did NOT put into pairing returns false, so the
+     * phone's "Pair" scan skips it and only bonds a unit the user is actually trying to pair.
      */
     private fun isPairingAvailable(): Boolean {
         if (pairingWindowUntilMs > android.os.SystemClock.elapsedRealtime()) return true
         return try {
             val adapter = bluetoothManager.adapter ?: return true
+            // User-initiated BT pairing makes the adapter discoverable -- treat that as the
+            // explicit "I want to pair" signal regardless of existing bonds.
+            if (adapter.scanMode == android.bluetooth.BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE) return true
             (adapter.bondedDevices?.size ?: 0) == 0
         } catch (_: Exception) { true }
     }
@@ -220,6 +252,12 @@ class BleWakeService(
     }
 
     private fun startAdvertising() {
+        // RESTART (stop then start): bleAdvertiser.start() is a no-op when the tag is already
+        // advertising, so without stopping first a re-advertise would NOT replace the live
+        // scan-response payload -- the stale pairing flag would keep broadcasting and the phone
+        // would read the old value. Stop ensures the new buildServiceData() (current pairing flag)
+        // actually goes on air. Safe no-op on first start.
+        bleAdvertiser.stop(ADVERTISE_TAG)
         bleAdvertiser.start(ADVERTISE_TAG, SERVICE_UUID, includeDeviceName = false, serviceData = buildServiceData())
         if (!bleAdvertiser.isActive(ADVERTISE_TAG)) {
             val delay = (RETRY_BASE_MS shl advRetryAttempt.coerceAtMost(5)).coerceAtMost(RETRY_MAX_MS)
@@ -246,6 +284,8 @@ class BleWakeService(
         charRx = null
         subscribers.clear()
         connectedDevices.clear()
+        scanModeReceiver?.let { try { context.unregisterReceiver(it) } catch (_: Exception) {} }
+        scanModeReceiver = null
         Log.i(TAG, "event=ble_wake.stopped")
     }
 

@@ -4299,6 +4299,11 @@ class ListenerService : LifecycleService(),
                 put("on_demand_recording_active", cfg.onDemandRecordingActive)
                 put("recording_active", running)
                 put("worn", lastWornState != false)
+                // Glasses is the source of truth for sideloading. The phone MIRRORS this value on
+                // connect; it must never push enable_sideloading on connect/sync. Reporting it in
+                // the status snapshot (sent on connect + periodically) is how the phone learns the
+                // glasses' persisted state.
+                put("enable_sideloading", cfg.sideloadingEnabled)
             }
             if (::btClient.isInitialized) {
                 btClient.sendStatus("recording_status:${json}")
@@ -5071,6 +5076,10 @@ class ListenerService : LifecycleService(),
         } catch (t: Throwable) {
             btErr("sendStateSnapshot failed: ${t.message}")
         }
+        // Report the persisted sideloading state to the phone on connect (carried in the
+        // recording_status snapshot). The glasses is authoritative; the phone mirrors this value
+        // and must never push enable_sideloading on connect.
+        pushRecordingStatusToPhone()
         // Reset audio state so signalAudioStart always triggers on reconnect
         wantAudioStream = false
         signalAudioStart("BT connect")
