@@ -1294,10 +1294,27 @@ class ListenerService : LifecycleService(),
         // call sites (signalAudioStart, reconcileMicStream, reconcileWakeWord,
         // reconcileLocalOpusWriter) follow fold instead of the noisy wear sensor.
         lastWornState = !folded
+        // Propagate the worn change to the phone so its wear-gated logic (audio
+        // duck AND the map-bitmap streamer transmit gate) tracks fold. Without
+        // this the phone only ever saw the single connect-time seed, so unfolding
+        // the glasses mid-journey never re-enabled map streaming -> black map HUD.
+        try { btClient.sendWearState(!folded) } catch (t: Throwable) {
+            btErr("fold sendWearState failed: ${t.message}")
+        }
         val reason = if (folded) "folded" else "unfolded"
         btLog("FoldGate: $reason -- reconciling capture stack")
         if (folded && streamMode == StreamMode.LIVE_UTTERANCE) {
             exitLiveUtteranceMode(reason)
+        }
+        // Folding mid Telegram-voice-reply must finalize the session: tear down the
+        // armed glasses->phone stream and tell the phone to stop, else wantAudioStream
+        // stays stuck true and the phone's tg-voice session lingers until its no-speech
+        // watchdog fires. Mirrors tgVoiceStopReceiver.
+        if (folded && telegramVoiceActive) {
+            telegramVoiceActive = false
+            updateDuckState()
+            stopGlassesAudioStream("tg-fold")
+            btClient.sendTgVoiceStop()
         }
         reconcileWakeWord(reason)
         postReconcileLocalOpusWriter(reason)
@@ -5089,12 +5106,12 @@ class ListenerService : LifecycleService(),
         // socket pinned during real work, kernel RFCOMM detects dead peers in ~30-60s.
         // Emit HELLO so phone sees our current sync-state hash
         try { syncChannelHandler?.onBtConnected() } catch (e: Exception) { btErr("sync onBtConnected failed: ${e.message}") }
-        // Seed phone with current wear state so it can gate its own pre-duck.
-        audioRouting?.state?.let { ws ->
-            val worn = ws == WearState.ON_HEAD || ws == WearState.TRANSITIONING_ON
-            try { btClient.sendWearState(worn) } catch (t: Throwable) {
-                btErr("initial sendWearState failed: ${t.message}")
-            }
+        // Seed phone with current wear state so it can gate its own pre-duck and
+        // the map-bitmap streamer. WEAR-DECOUPLED 2026-05-08: fold is the canonical
+        // worn signal (the is_take_on sensor is deprecated/noisy), so seed from
+        // lastWornState (= !folded), treating unknown (null) as worn.
+        try { btClient.sendWearState(lastWornState != false) } catch (t: Throwable) {
+            btErr("initial sendWearState failed: ${t.message}")
         }
         // Seed phone with current screen state so the map streamer knows
         // whether the HUD is visible.
@@ -8127,10 +8144,24 @@ class ListenerService : LifecycleService(),
     private val tgVoiceStartReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val chatId = intent.getStringExtra(EXTRA_TG_CHAT_ID) ?: return
+            // Mutual exclusion mirror of the phone (which ignores tg-voice while a
+            // notif reply is live): a notif reply owns the shared audio gate, so do
+            // NOT arm/cycle it here or the stop path would tear the reply's stream down.
+            if (notifReplyId != null) {
+                btLog("TG voice start ignored: notif reply in progress (notifId=$notifReplyId)")
+                return
+            }
             btLog("TG voice start from UI: chatId=$chatId")
             mediaPlayingSnapshot = mediaSessionMonitor.isPlaying
             telegramVoiceActive = true
             updateDuckState()
+            // Open the glasses->phone audio path so the phone's VAD actually
+            // receives speech and can detect end-of-utterance to finalize+send the
+            // Telegram voice reply. The old code assumed a tg chat "already has the
+            // live stream up", but tgVoiceStart never armed it -- so streamMode
+            // stayed LOCAL_ONLY, no PCM reached the phone, VAD never fired, and the
+            // reply was never sent. Force it open exactly like the notif-reply path.
+            signalAudioStart("tg-voice", force = true, durationMs = 0L)
             btClient.sendTgVoiceStart(chatId)
         }
     }
@@ -8140,6 +8171,9 @@ class ListenerService : LifecycleService(),
             btLog("TG voice stop from UI")
             telegramVoiceActive = false
             updateDuckState()
+            // Balance the signalAudioStart above: close the live-stream gate (the
+            // mic itself stays up for other MicBus consumers).
+            stopGlassesAudioStream("tg-voice-stop")
             btClient.sendTgVoiceStop()
         }
     }

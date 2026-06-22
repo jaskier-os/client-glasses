@@ -937,6 +937,10 @@ class CaptureService : Service() {
                     runCatching { resultFile.writeText(json) }.onFailure {
                         Log.w(TAG, "adb result write failed: ${it.message}")
                     }
+                    // Exercise the SAME filesync notify the AIDL takePhoto does, so
+                    // ADB-triggered captures also land in the manifest and sync to the
+                    // phone (and so this path can be used to test the sync chain).
+                    notifyPhotoSync(file)
                     Log.i(TAG, "ADB takePhoto final id=$id path=${file.absolutePath} previewMs=$previewMs totalMs=$ms err=${err?.message}")
                 },
             )

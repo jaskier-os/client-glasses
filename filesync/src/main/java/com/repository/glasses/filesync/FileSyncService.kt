@@ -503,6 +503,24 @@ class FileSyncService : Service() {
 
     private fun checkIdle() {
         Log.i(TAG_IDLE, "tick state=$state")
+        // Safety net for a STRANDED deferred manifest notification. notifyNew (and
+        // deleteFile) set dirtyDuringServe and skip the onManifestChanged broadcast
+        // while SERVING/OPENING_WIFI/CLOSING; that deferral is normally flushed by
+        // onWifiClosed() on the return to IDLE. But if the WiFi-Direct group tears
+        // down via the firmware 36s idle timeout WITHOUT delivering the close
+        // broadcast (a documented quirk), onWifiClosed never runs and the flag is
+        // stranded -- the phone is never told, so photos only appear after the next
+        // filesync restart (reconcile). Flush it here so the phone learns within one
+        // idle tick instead of waiting for a reboot.
+        if (state == State.IDLE) {
+            if (dirtyDuringServe) {
+                dirtyDuringServe = false
+                val newHash = synchronized(manifestLock) { manifest.stateHash() }
+                Log.i(TAG, "idle-tick flushing stranded dirty manifest hash=${newHash.take(12)}")
+                broadcast { it.onManifestChanged(newHash) }
+            }
+            return
+        }
         // Idle timeout while SERVING (no HTTP hits for IDLE_TIMEOUT_MS).
         if (state == State.SERVING) {
             val sinceHit = SystemClock.elapsedRealtime() - lastHitMs
