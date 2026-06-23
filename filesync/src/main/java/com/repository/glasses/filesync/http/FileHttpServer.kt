@@ -5,9 +5,7 @@ import android.net.LocalSocketAddress
 import android.util.Log
 import com.repository.glasses.tracing.GT
 import com.repository.glasses.filesync.FileEntry
-import com.repository.glasses.filesync.Manifest
 import com.repository.glasses.filesync.ScanJob
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -32,7 +30,22 @@ import java.util.concurrent.Executors
  */
 class FileHttpServer(
     private val port: Int,
-    private val manifestProvider: () -> Manifest,
+    // Manifest reads MUST be lock-protected: FileSyncService mutates the manifest (reconcileNow,
+    // delete) under its private manifestLock, and these HTTP routes run on a 6-thread pool. A
+    // lock-free read here would iterate the LinkedHashMap concurrently with an upsert/remove ->
+    // ConcurrentModificationException / torn read that 500s the manifest endpoint. The service
+    // passes accessors that take its lock internally, so this layer never references the lock.
+    //
+    // Returns (json-bytes, etag) computed together under ONE lock so the served body and its ETag
+    // are a consistent snapshot of the same manifest state.
+    private val manifestJsonProvider: () -> Pair<ByteArray, String>,
+    // Returns a single entry by id under the lock (used by /file/<id>).
+    private val manifestEntryProvider: (String) -> FileEntry?,
+    // Invoked at the start of respondManifest, right before the manifest JSON is built. The
+    // service wires this to FileSyncService.reconcileNow() so any media file present on disk
+    // but missing from the manifest (a dropped capture-side notifyNew) is folded in before the
+    // phone diffs the full manifest -- healing the dropped notify with no extra plumbing.
+    private val reconcileBeforeServe: () -> Unit = {},
     private val onHit: () -> Unit,   // called per request; used to reset idle timer
     // Live gate for the POST /sideload/* routes. The listener app flips the backing
     // flag (GlassesConfig.sideloadingEnabled) over AIDL; we read it per-request so a
@@ -821,10 +834,13 @@ class FileHttpServer(
     }
 
     private fun respondManifest(out: OutputStream) {
-        val mf = manifestProvider()
-        val arr: JSONArray = mf.toJsonArray()
-        val body = arr.toString().toByteArray(Charsets.UTF_8)
-        val etag = mf.stateHash()
+        // Heal any dropped capture-side notifyNew before building the response: the phone diffs
+        // the full manifest on every handshake, so an entry reconcile adds here is picked up
+        // immediately. Cheap (stats unchanged files, hashes only new ones).
+        try { reconcileBeforeServe() } catch (e: Exception) { Log.w(TAG, "reconcileBeforeServe: ${e.message}") }
+        // Body + ETag are computed together under the service's manifestLock (see ctor) so they
+        // reflect the SAME post-reconcile snapshot and can't tear against a concurrent mutation.
+        val (body, etag) = manifestJsonProvider()
         val head = StringBuilder()
             .append("HTTP/1.1 200 OK\r\n")
             .append("Content-Type: application/json; charset=utf-8\r\n")
@@ -842,8 +858,8 @@ class FileHttpServer(
         // Decode URL-encoded ids and reject empty strings.
         val id = try { java.net.URLDecoder.decode(rawId, "UTF-8") } catch (_: Exception) { rawId }
         if (id.isEmpty() || id.contains('/') || id.contains('\\')) { respond404(out); return }
-        val mf = manifestProvider()
-        val entry: FileEntry? = mf.get(id)
+        // Locked single-entry read (see ctor) -- must not race a concurrent reconcile/delete.
+        val entry: FileEntry? = manifestEntryProvider(id)
         if (entry == null) { respond404(out); return }
         val file = File(ScanJob.rootDir, entry.relPath)
         // Canonicalise + prefix-check to stop a crafted manifest entry from escaping rootDir.

@@ -20,6 +20,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -162,6 +163,20 @@ class RawStillCapturer(
          *  photo path's because there is no SplitterDenoiser pass: warmup (<=1.5s)
          *  + 1-frame burst + demosaic + JPEG encode all fit well under this. */
         private const val REID_BORROW_TIMEOUT_MS = 12000L
+
+        /** Bounded in-session retries for a demosaic that threw (path b in
+         *  [enqueueProcess]). A demosaic failure is almost always transient RAM/CPU
+         *  contention (a 2nd photo + the rPPG stream), so a short delay then a retry
+         *  on the same raw usually succeeds and lets the FULL-COLOR image sync
+         *  WITHOUT ever shipping the gray preview. Capped so a permanently-failing
+         *  raw (e.g. genuinely corrupt) cannot re-enqueue forever -- after the cap we
+         *  leave the raw sidecar on disk so the next process-start [resumePending]
+         *  picks it up, rather than burning the CPU in a tight retry loop. */
+        private const val DEMOSAIC_RETRY_MAX = 3
+
+        /** Delay before a bounded demosaic retry, giving the contending denoise /
+         *  rPPG / 2nd-photo work time to drain before we re-attempt off the same raw. */
+        private const val DEMOSAIC_RETRY_DELAY_MS = 4000L
     }
 
     // Camera callbacks must not share a thread with the executor (doCapture
@@ -180,11 +195,50 @@ class RawStillCapturer(
     // NEVER blocks the camera executor.
     private val processExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "RawStill-process") }
 
+    /** Schedules the bounded in-session demosaic retry (path b in [enqueueProcess]).
+     *  A separate scheduled executor only DELAYS the re-enqueue; the actual retry
+     *  still runs on the single-threaded [processExecutor], so RAM stays bounded to
+     *  one raw at a time. Exists so a transiently-failed demosaic re-attempts the
+     *  FULL-COLOR conversion in-session instead of waiting for the next process
+     *  restart's [resumePending] -- without that, a gray preview would otherwise be
+     *  the phone's only copy for a long time (and we must NEVER sync the gray one). */
+    private val retryScheduler: ScheduledExecutorService =
+        Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "RawStill-retry") }
+
     /** Dedicated thread for the fast-preview path so it doesn't contend with the
      *  camera callback thread or the denoise worker. Keeps preview latency low
      *  even when a previous denoise is still running. */
     private val previewExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "RawStill-preview") }
     private val busy = AtomicBoolean(false)
+
+    /**
+     * Count of heavy SplitterNet denoise passes currently running on
+     * [processExecutor]. A COUNTER, not a bool, so concurrent resume jobs and a
+     * live photo can't clear each other's pause prematurely (the counter only
+     * reaches 0 when the LAST denoise finishes). Incremented before the denoise
+     * block and decremented in a finally that always runs.
+     *
+     * The ~67-105s denoise pins all 4 A55 cores; running it WHILE the live rPPG
+     * YUV stream is up starves the in-flight photo's demosaic/burst and is the
+     * contention that silently aborts a back-to-back photo. So while this is > 0
+     * CameraSession drops the rPPG YUV reader (see [onDenoiseStateChanged] /
+     * denoiseInFlightProvider) and rebuilds it once denoise completes.
+     */
+    private val denoiseInFlight = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** True while >= 1 heavy denoise is running. CameraSession consults this (via
+     *  denoiseInFlightProvider) to decide whether the rPPG stream may run. */
+    fun isDenoiseInFlight(): Boolean = denoiseInFlight.get() > 0
+
+    /**
+     * Notified on every [denoiseInFlight] transition (both increment and
+     * decrement) so the camera owner can re-evaluate the rPPG stream off the
+     * denoise critical section. Wired by CaptureService to
+     * CameraSession.onDenoiseStateChanged(); kept as a plain lambda so this class
+     * has no compile-time dependency on CameraSession's concrete type. Default
+     * no-op so the class compiles standalone.
+     */
+    @Volatile var onDenoiseStateChanged: () -> Unit = {}
 
     /**
      * Count of func-button photos that have been requested but whose camera/session
@@ -422,10 +476,17 @@ class RawStillCapturer(
         onFinal: (File, Throwable?) -> Unit,
         t0: Long,
         onResumed: ((File) -> Unit)? = null,
+        attempt: Int = 0,
     ) {
         processExecutor.execute process@{
             val burst = readPendingRaw(rawFile) ?: run {
                 // Corrupt/missing raw already logged + deleted in readPendingRaw.
+                // Color is UNRECOVERABLE (no raw left to demosaic), and the on-disk
+                // JPEG holds only the GRAYSCALE preview. The phone must NEVER receive
+                // a gray image, so we do NOT sync it -- better no photo on the phone
+                // than a black-and-white one. Fire onPreviewOnce(null,err) only (a UX
+                // error broadcast, no filesync notify); onFinal must NOT be called
+                // here because CaptureService wires onFinal -> notifyPhotoSync.
                 onPreviewOnce(null, IllegalStateException("pending raw unreadable"))
                 return@process
             }
@@ -438,9 +499,34 @@ class RawStillCapturer(
                 // freshly written full-res file so every photo still gets one onPreview.
                 onPreviewOnce(file, null)
             } catch (e: Throwable) {
-                Log.e(TAG, "process demosaic failed: ${e.message}")
-                onPreviewOnce(null, e)
-                // Leave the raw on disk so a later resume can retry it; do NOT delete.
+                Log.e(TAG, "process demosaic failed (attempt=$attempt): ${e.message}")
+                // Demosaic aborted (RAM/CPU contention from a 2nd photo + rPPG). The
+                // on-disk JPEG still holds only the GRAYSCALE preview. The phone must
+                // NEVER receive the gray image, so this path syncs NOTHING: we fire
+                // neither onFinal (-> notifyPhotoSync) nor an onPreview-error. The raw
+                // sidecar is intentionally LEFT on disk so the full COLOR image can be
+                // produced and synced later.
+                //
+                // To guarantee the phone eventually gets the color image WITHOUT
+                // shipping gray -- and without waiting for the next capture-process
+                // restart's resumePending -- schedule a BOUNDED in-session retry of
+                // this same raw. Bounded so a permanently-failing raw can't re-enqueue
+                // forever; after the cap we give up and leave the raw for the next
+                // process-start resume.
+                if (attempt + 1 < DEMOSAIC_RETRY_MAX) {
+                    Log.w(TAG, "scheduling demosaic retry ${attempt + 2}/$DEMOSAIC_RETRY_MAX for ${rawFile.name} in ${DEMOSAIC_RETRY_DELAY_MS}ms")
+                    try {
+                        retryScheduler.schedule({
+                            enqueueProcess(rawFile, onPreviewOnce, onFinal, t0, onResumed, attempt + 1)
+                        }, DEMOSAIC_RETRY_DELAY_MS, TimeUnit.MILLISECONDS)
+                    } catch (re: Throwable) {
+                        // Scheduler shut down (service tearing down): leave the raw on
+                        // disk for the next process-start resumePending.
+                        Log.w(TAG, "demosaic retry schedule failed: ${re.message}")
+                    }
+                } else {
+                    Log.e(TAG, "demosaic retries exhausted for ${rawFile.name}; leaving raw for next process-start resume")
+                }
                 return@process
             }
             // DEBUG (until-reboot): when SKIP_DENOISE_PROP is "1", short-circuit the
@@ -467,6 +553,17 @@ class RawStillCapturer(
                 }
                 return@process
             }
+            // PAUSE rPPG ACROSS THE HEAVY DENOISE ONLY. The ~67-105s SplitterNet
+            // pass saturates all 4 A55 cores; overlapping it with the live rPPG
+            // YUV stream starves an in-flight photo's burst/demosaic and is the
+            // contention that aborts a back-to-back photo. Increment BEFORE the
+            // denoise + notify so CameraSession drops the rPPG reader; the finally
+            // ALWAYS decrements (success, denoise-failure, or any exception/OOM-
+            // survivable error) + notifies so the stream rebuilds afterwards. The
+            // ~17s demosaic above is deliberately NOT gated.
+            denoiseInFlight.incrementAndGet()
+            try { onDenoiseStateChanged() } catch (_: Throwable) {}
+            try {
             GT.section("cap.raw.denoise") {
                 try {
                     val tD = android.os.SystemClock.elapsedRealtime()
@@ -487,6 +584,12 @@ class RawStillCapturer(
                     // the photo as gray forever.
                     onFinal(file, e)
                 }
+            }
+            } finally {
+                // Always clear the pause + notify so the rPPG stream resumes,
+                // even if denoise threw or the process was killed mid-write.
+                denoiseInFlight.decrementAndGet()
+                try { onDenoiseStateChanged() } catch (_: Throwable) {}
             }
         }
     }
@@ -1120,5 +1223,6 @@ class RawStillCapturer(
         handlerThread.quitSafely()
         executor.shutdown()
         processExecutor.shutdown()
+        retryScheduler.shutdown()
     }
 }

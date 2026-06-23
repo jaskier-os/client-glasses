@@ -318,7 +318,21 @@ class FileSyncService : Service() {
         )
         http = FileHttpServer(
             port = WifiDirectHost.HTTP_PORT,
-            manifestProvider = { manifest },
+            // Lock-protected manifest accessors. The HTTP pool threads must never read the manifest
+            // without manifestLock -- reconcileNow()/delete mutate it under that lock, so a lock-free
+            // iteration would race -> ConcurrentModificationException. Body+etag are produced together
+            // in one locked block so the served JSON and its ETag are a consistent snapshot.
+            manifestJsonProvider = {
+                synchronized(manifestLock) {
+                    Pair(manifest.toJsonArray().toString().toByteArray(Charsets.UTF_8), manifest.stateHash())
+                }
+            },
+            manifestEntryProvider = { id -> synchronized(manifestLock) { manifest.get(id) } },
+            // Safety net for a dropped capture-side notifyNew: the phone diffs the FULL manifest
+            // on every handshake, so reconciling on each /manifest GET makes any file that exists
+            // on disk but was never reported (post-processing aborted before notifyNew) appear in
+            // the very response the phone is about to diff -- it heals with no extra notify plumbing.
+            reconcileBeforeServe = { reconcileNow() },
             onHit = { lastHitMs = SystemClock.elapsedRealtime() },
             sideloadEnabled = { sideloadEnabled },
             // App-private dir: writable by this priv_app uid (/data/local/tmp is shell-only),
@@ -501,6 +515,59 @@ class FileSyncService : Service() {
 
     @Volatile private var openingWifiStartedAtMs: Long = 0
 
+    /**
+     * Filesync-side safety net for a captured file that exists on disk but never made it into
+     * the manifest (capture app aborted post-processing before calling notifyNew, so the file
+     * never syncs). Re-scans the watched dir and upserts any unreported media file. Called on
+     * every phone handshake (FileHttpServer.reconcileBeforeServe) and -- as a backstop for the
+     * no-phone-ever-connects case -- on the coarse idle tick.
+     *
+     * Cheap by design: ScanJob.reconcile only stats unchanged files (size+mtime match) and
+     * sha256s only genuinely new/changed ones, so running it per /manifest GET is acceptable.
+     * Guarded by the SAME isEperm filter as the boot reconcile so a transient storage-permission
+     * race can't crash the service.
+     */
+    fun reconcileNow() {
+        synchronized(manifestLock) {
+            val before = manifest.stateHash()
+            try {
+                // NOTE: ScanJob.reconcile() sha256s any new/changed files while we hold manifestLock.
+                // A cold backlog of large un-notified files would hash here on the HTTP serving thread
+                // (called via reconcileBeforeServe) and stall concurrent binder getManifestJson/delete
+                // for the hash duration. We accept that: the phone diffs the post-reconcile manifest in
+                // the SAME response, so the scan MUST complete before we serialize -- moving it off-lock
+                // would break that ordering guarantee. In practice the backlog is small (notifyNew is
+                // the normal path; this only heals dropped notifies).
+                ScanJob.reconcile(manifest)
+            } catch (e: Exception) {
+                if (isEperm(e)) {
+                    Log.w(TAG, "reconcileNow hit EPERM (MANAGE_EXTERNAL_STORAGE not granted?); skipping: ${e.message}")
+                    return
+                }
+                throw e
+            }
+            val after = manifest.stateHash()
+            if (after == before) return
+            try { store.save(manifest.snapshot()) } catch (e: Exception) {
+                if (isEperm(e)) {
+                    Log.w(TAG, "reconcileNow save EPERM (non-fatal): ${e.message}")
+                } else {
+                    throw e
+                }
+            }
+            // Mirror notifyNew's deferral rule: if a sync is in flight, don't change the hash the
+            // phone is mid-pull on -- flag it and let onWifiClosed()/checkIdle flush the broadcast
+            // after the session ends. When IDLE, notify listeners directly.
+            if (state == State.SERVING || state == State.OPENING_WIFI || state == State.CLOSING) {
+                dirtyDuringServe = true
+                Log.i(TAG, "reconcileNow added entries during ${state} -- deferring onManifestChanged hash=${after.take(12)}")
+            } else {
+                Log.i(TAG, "reconcileNow added entries -- broadcasting hash=${after.take(12)}")
+                broadcast { it.onManifestChanged(after) }
+            }
+        }
+    }
+
     private fun checkIdle() {
         Log.i(TAG_IDLE, "tick state=$state")
         // Safety net for a STRANDED deferred manifest notification. notifyNew (and
@@ -519,6 +586,11 @@ class FileSyncService : Service() {
                 Log.i(TAG, "idle-tick flushing stranded dirty manifest hash=${newHash.take(12)}")
                 broadcast { it.onManifestChanged(newHash) }
             }
+            // Backstop for the case where NO phone ever connects (so the handshake reconcile
+            // never fires): pick up any file dropped from notifyNew within one idle tick. The
+            // idle tick runs at IDLE_TICK_QUIET_MS (60 s) while IDLE -- a coarse-enough cadence,
+            // and reconcileNow is cheap (stats unchanged files, hashes only new ones).
+            reconcileNow()
             return
         }
         // Idle timeout while SERVING (no HTTP hits for IDLE_TIMEOUT_MS).

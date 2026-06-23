@@ -789,6 +789,15 @@ class CaptureService : Service() {
         rawStill = RawStillCapturer(this, cameraSession, onResumedPhotoProcessed = { file ->
             notifyPhotoSync(file)
         })
+        // Pause the live rPPG YUV stream while a heavy SplitterNet denoise runs.
+        // The denoise pins all 4 A55 cores for ~67-105s; overlapping it with the
+        // YUV stream starves an in-flight photo's burst/demosaic and is the
+        // contention that drops a back-to-back photo. CameraSession reads
+        // isDenoiseInFlight() in rppgActive(); RawStillCapturer pings
+        // onDenoiseStateChanged() on each denoise enter/exit so the stream is
+        // released and rebuilt. Wired AFTER both are constructed.
+        cameraSession.denoiseInFlightProvider = { rawStill.isDenoiseInFlight() }
+        rawStill.onDenoiseStateChanged = { cameraSession.onDenoiseStateChanged() }
         video = VideoRecorder(this, cameraSession)
         notifier = SyncNotifier(this)
 

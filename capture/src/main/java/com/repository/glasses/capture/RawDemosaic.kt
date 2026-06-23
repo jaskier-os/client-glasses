@@ -44,6 +44,28 @@ object RawDemosaic {
      *  black pixel doesn't drive ln() to -inf and the key scale stays finite. */
     private const val LUMA_EPS = 1e-4f
 
+    // ---- Clipped-highlight desaturation ----
+    //
+    // A blown highlight (bright lamp, sky, screen) pins ALL Bayer channels to ~white.
+    // After black subtraction the quad reads R=G1=G2=B~range, but the per-channel WB
+    // gains (rGain~1.7, gGain*2~1.0, bGain~1.8) then push the clipped pixel to high-R,
+    // low-G, high-B -- i.e. MAGENTA/PURPLE -- even though the true colour is neutral
+    // white. The post-CCM clamp to [0,1] happens far too late: by then the channels
+    // have already been mixed and the magenta cast is baked in. The truth is that once
+    // a channel clips its real value is unknowable, so the only safe estimate for a
+    // fully-clipped pixel is NEUTRAL (its own luma). We therefore detect near-clip at
+    // the RAW level and, in Pass 1 (before any tone map or CCM), lerp the post-WB
+    // linear RGB toward luma by a clip amount t that ramps 0->1 from HIGHLIGHT_DESAT_FRAC
+    // of full scale up to saturation. This pulls only blown highlights to white while
+    // leaving every non-clipped colour exactly unchanged (t==0 => no-op), with no hard
+    // edge. Cost: one max + one compare + a branch, and 3 FMAs only on clipped pixels.
+    //
+    /** Fraction of (whiteLevel - blackLevel) above which a raw sample is treated as
+     *  clipping. Desaturation ramps from 0 here to full (neutral) at saturation. 0.98
+     *  leaves a 2% guard band; tunable -- lower it if highlights still show colour
+     *  fringing, raise it if near-white colours look washed out. */
+    private const val HIGHLIGHT_DESAT_FRAC = 0.98f
+
     /**
      * Geometric mean (exp of the mean of ln) of [luma] over [count] pixels, with a
      * [LUMA_EPS] floor so black pixels don't send ln() to -inf. This log-average
@@ -213,6 +235,12 @@ object RawDemosaic {
         val bl = blackLevel
         val n = halfW * halfH
 
+        // Raw-domain clip threshold + ramp: a quad channel (raw-bl) at/above clipStart
+        // is treated as clipping; the desat amount ramps to 1 at clipFull (= range).
+        val clipFull = range.coerceAtLeast(1f)
+        val clipStart = HIGHLIGHT_DESAT_FRAC * clipFull
+        val clipRampInv = 1f / (clipFull - clipStart).coerceAtLeast(1f)
+
         // CCM: post-WB camera-RGB -> sRGB primary mapping. Each row sums to
         // 1.0 so a neutral grey stays neutral. Diagonal >1 with negative
         // off-diagonals subtracts inter-channel crosstalk and expands the
@@ -243,9 +271,22 @@ object RawDemosaic {
                 val g1v = ((raw[sy0 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
                 val g2v = ((raw[sy1 + sx0].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
                 val bv = ((raw[sy1 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
-                val rl = rv * rGain
-                val gl = (g1v + g2v) * gGain
-                val blin = bv * bGain
+                var rl = rv * rGain
+                var gl = (g1v + g2v) * gGain
+                var blin = bv * bGain
+                // Clipped-highlight desaturation: drive off the MAX raw channel of the
+                // quad (the first to clip). t ramps 0->1 over [clipStart, clipFull];
+                // a fully-clipped (magenta-prone) pixel is lerped to its own luma =>
+                // neutral white. t==0 for any non-clipped pixel, so colours are intact.
+                val maxRaw = if (rv > g1v) (if (rv > g2v) (if (rv > bv) rv else bv) else (if (g2v > bv) g2v else bv))
+                             else (if (g1v > g2v) (if (g1v > bv) g1v else bv) else (if (g2v > bv) g2v else bv))
+                if (maxRaw > clipStart) {
+                    val t = ((maxRaw - clipStart) * clipRampInv).coerceAtMost(1f)
+                    val lum = 0.299f * rl + 0.587f * gl + 0.114f * blin
+                    rl += t * (lum - rl)
+                    gl += t * (lum - gl)
+                    blin += t * (lum - blin)
+                }
                 val idx = dstRow + x
                 linR[idx] = rl; linG[idx] = gl; linB[idx] = blin
                 luma[idx] = 0.299f * rl + 0.587f * gl + 0.114f * blin
@@ -341,6 +382,12 @@ object RawDemosaic {
         val bGain = wbB / range
         val bl = blackLevel
 
+        // Raw-domain clip threshold + ramp (see binToBitmap): without this, blown
+        // highlights render magenta/purple after the per-channel WB gains.
+        val clipFull = range.coerceAtLeast(1f)
+        val clipStart = HIGHLIGHT_DESAT_FRAC * clipFull
+        val clipRampInv = 1f / (clipFull - clipStart).coerceAtLeast(1f)
+
         // CCM + saturation: identical constants to binToBitmap so the ReID
         // still has the same color/look as the photo path.
         val m00 = 1.65f; val m01 = -0.50f; val m02 = -0.15f
@@ -382,9 +429,19 @@ object RawDemosaic {
                 val g1v = ((raw[sy0 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
                 val g2v = ((raw[sy1 + sx0].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
                 val bv = ((raw[sy1 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
-                val rl = rv * rGain
-                val gl = (g1v + g2v) * gGain
-                val blin = bv * bGain
+                var rl = rv * rGain
+                var gl = (g1v + g2v) * gGain
+                var blin = bv * bGain
+                // Clipped-highlight desaturation -> neutral white (see binToBitmap).
+                val maxRaw = if (rv > g1v) (if (rv > g2v) (if (rv > bv) rv else bv) else (if (g2v > bv) g2v else bv))
+                             else (if (g1v > g2v) (if (g1v > bv) g1v else bv) else (if (g2v > bv) g2v else bv))
+                if (maxRaw > clipStart) {
+                    val t = ((maxRaw - clipStart) * clipRampInv).coerceAtMost(1f)
+                    val lum = 0.299f * rl + 0.587f * gl + 0.114f * blin
+                    rl += t * (lum - rl)
+                    gl += t * (lum - gl)
+                    blin += t * (lum - blin)
+                }
                 val idx = dstRow + x
                 linR[idx] = rl; linG[idx] = gl; linB[idx] = blin
                 luma[idx] = 0.299f * rl + 0.587f * gl + 0.114f * blin

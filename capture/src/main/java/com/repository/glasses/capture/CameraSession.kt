@@ -113,6 +113,35 @@ class CameraSession(private val context: Context) {
     var emitter: FrameEmitter? = null
     var stateListener: StateListener? = null
 
+    /**
+     * Reports whether a heavy SplitterNet denoise is currently running on the
+     * RawStillCapturer's process thread. The rPPG YUV stream YIELDS while it is
+     * true: the ~67-105s denoise pins all 4 A55 cores, and running it alongside
+     * the live YUV stream starves an in-flight photo's burst/demosaic -- the
+     * contention that silently aborts a back-to-back photo. Wired by
+     * CaptureService to rawStill.isDenoiseInFlight(); kept as a lambda so this
+     * class has no compile-time dependency on RawStillCapturer (layering).
+     */
+    @Volatile var denoiseInFlightProvider: () -> Boolean = { false }
+
+    /**
+     * Re-evaluate the rPPG stream after a denoise-state transition. On the
+     * camera handler thread (so reconfigure/close are safe): mirrors the
+     * borrow/reconfigure pattern -- close the camera if no holders remain, else
+     * rebuild the output set. On increment rppgActive() turns false so the YUV
+     * reader is released; on decrement it turns true again and reconfigure
+     * rebuilds the stream + re-runs the 3A warmup so rPPG resumes.
+     */
+    fun onDenoiseStateChanged() {
+        handler.post {
+            try {
+                if (holderCount() == 0) closeInternal() else reconfigure()
+            } catch (e: Throwable) {
+                Log.e(TAG, "onDenoiseStateChanged failed: ${e.message}")
+            }
+        }
+    }
+
     private val handlerThread = HandlerThread("CamSession").apply { start() }
     private val handler = Handler(handlerThread.looper)
     // camera2 framework session-state callbacks.
@@ -224,7 +253,8 @@ class CameraSession(private val context: Context) {
      *  because the HAL cannot sustain a streamed YUV target alongside a
      *  record/JPEG combo. */
     private fun rppgActive(): Boolean =
-        rppgEnabled && recorderSurface == null && pendingStill == null && !transientStillOpen
+        rppgEnabled && recorderSurface == null && pendingStill == null && !transientStillOpen &&
+            !denoiseInFlightProvider()
 
     // ---- Recorder surface (video) ----
 
