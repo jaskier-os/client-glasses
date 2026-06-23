@@ -145,19 +145,44 @@ gl_exec() {
     # output incrementally via /sideload/exec/poll. This replaces the old single-request
     # /sideload/exec (which was capped at the phone's 60s socket + the glasses' 120s exec
     # timeout), so arbitrarily long commands work and stream live.
+    #
+    # START RESILIENCE: the glasses-side filesync HTTP server (:8849) frequently drops the
+    # FIRST request after a WiFi-Direct group (re)forms -- the phone proxies it back as an
+    # HTTP 502 "unexpected end of stream", and the GO also tears down after ~36s idle. A bare
+    # one-shot start would abort the whole deploy on that transient blip. So retry exec/start
+    # for a bounded grace window, re-opening the session between attempts (a re-open clears the
+    # wedge); the job is only created once a start actually returns a job id, so retrying a
+    # failed start cannot leak duplicate jobs.
     payload="$(jq -n --arg cmd "$cmd" '{cmd:$cmd}')"
-    if ! body="$(_http POST "$BASE_URL/sideload/exec/start" \
-            -H 'Content-Type: application/json' \
-            --data "$payload")"; then
-        echo "gl_exec TRANSPORT FAILURE (start) for command: $cmd" >&2
-        return "$GL_EXEC_TRANSPORT_RC"
-    fi
-    job="$(printf '%s' "$body" | jq -r '.job // empty' 2>/dev/null)"
-    if [ -z "$job" ]; then
-        echo "gl_exec: start returned no job id for command: $cmd" >&2
-        echo "  raw: $body" >&2
-        return "$GL_EXEC_TRANSPORT_RC"
-    fi
+    local start_fail_start=0 start_reopen_at=0 snow
+    job=""
+    while :; do
+        if body="$(_http POST "$BASE_URL/sideload/exec/start" \
+                -H 'Content-Type: application/json' \
+                --data "$payload")"; then
+            job="$(printf '%s' "$body" | jq -r '.job // empty' 2>/dev/null)"
+            [ -n "$job" ] && break
+            # Reached the server but got no job id (e.g. {"ok":false,...} transient). Treat like
+            # a transport blip and retry within the grace window rather than aborting outright.
+            echo "gl_exec: start returned no job id (will retry): $body" >&2
+        fi
+        snow=$(date +%s)
+        if [ "$start_fail_start" -eq 0 ]; then start_fail_start=$snow; start_reopen_at=$snow; fi
+        if [ $((snow - start_fail_start)) -ge "$POLL_FAIL_GRACE_S" ]; then
+            echo "gl_exec TRANSPORT FAILURE (start outage > ${POLL_FAIL_GRACE_S}s) for command: $cmd" >&2
+            return "$GL_EXEC_TRANSPORT_RC"
+        fi
+        # Recycle the WiFi-Direct session and retry. A bare re-open does NOT clear the glasses
+        # :8849 "unexpected end of stream" wedge once the server is in that state -- the link
+        # reports open but every request 502s. A close->open cycle DOES reset it (verified on
+        # device). Spaced every ~5s to avoid hammering.
+        if [ "$snow" -ge "$start_reopen_at" ]; then
+            _http POST "$BASE_URL/sideload/close" >/dev/null 2>&1 || true
+            _http POST "$BASE_URL/sideload/open" >/dev/null 2>&1 || true
+            start_reopen_at=$((snow + 5))
+        fi
+        sleep 1
+    done
 
     local sout=0 serr=0 running rc_field trunc out err total_out total_err
     # The async ExecJob keeps running on the glasses independent of the WiFi-Direct link, so a
@@ -187,9 +212,13 @@ gl_exec() {
                 echo "gl_exec TRANSPORT FAILURE (poll outage > ${POLL_FAIL_GRACE_S}s) for command: $cmd" >&2
                 return "$GL_EXEC_TRANSPORT_RC"
             fi
-            # Every few seconds of failure, try to re-establish the WiFi-Direct session so polling
-            # can resume. The on-glasses job kept running the whole time.
+            # Every few seconds of failure, recycle the WiFi-Direct session so polling can resume.
+            # The on-glasses ExecJob keeps running the whole time (it's independent of the link),
+            # and the job id is stable across a re-join, so polling resumes where it left off. A
+            # close->open cycle is required (not a bare open): once the glasses :8849 server is in
+            # the "unexpected end of stream" wedge a re-open alone keeps 502ing; a close resets it.
             if [ "$now" -ge "$reopen_at" ]; then
+                _http POST "$BASE_URL/sideload/close" >/dev/null 2>&1 || true
                 _http POST "$BASE_URL/sideload/open" >/dev/null 2>&1 || true
                 reopen_at=$((now + 5))
             fi
