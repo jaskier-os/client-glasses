@@ -75,6 +75,14 @@ class RawStillCapturer(
         /** Hard upper bound on AE convergence wait. The actual capture fires as
          *  soon as CONTROL_AE_STATE reaches CONVERGED, so this only kicks in
          *  for scenes where the HAL never reports convergence. */
+        // Bounded retry for a transient cold-camera burst failure (HAL sensor/CSIPHY
+        // resource momentarily exhausted during bring-up -> onCaptureFailed reason=0).
+        // The resource frees within ~1s, so 3 attempts with a short backoff reliably
+        // recovers the first-photo-after-boot drop. Each attempt fully releases the
+        // camera borrow and rebuilds the capture session.
+        private const val BURST_RETRY_MAX = 3
+        private const val BURST_RETRY_BACKOFF_MS = 350L
+
         // Max wait for AE to converge during warmup. The await returns the INSTANT
         // AE settles, so a warm camera still finishes in a few hundred ms; this cap
         // only matters on a COLD camera (fresh boot) where AE must ramp from the
@@ -312,11 +320,47 @@ class RawStillCapturer(
             val onPreviewOnce: (File?, Throwable?) -> Unit = { f, e ->
                 if (previewFired.compareAndSet(false, true)) onPreview(f, e)
             }
-            try {
-                burst = captureBurst(onPreviewOnce, t0, onShutterDone)
-            } catch (e: Throwable) {
-                Log.e(TAG, "takePhoto burst failed: ${e.message}")
-                onPreviewOnce(null, e)
+            // BOUNDED BURST RETRY. On a cold camera (first capture after boot) the
+            // Qualcomm HAL transiently runs out of a sensor/CSIPHY resource during
+            // bring-up (camxresourcemanager: SensorHw AvailableResource=0) and drops
+            // one frame of the burst with onCaptureFailed reason=0 (REASON_ERROR),
+            // which aborts the whole photo. The resource frees within ~1s -- the very
+            // next capture always succeeds. So retry the self-contained captureBurst()
+            // a few times with a short backoff: each attempt fully releases the borrow
+            // and recreates the reader/accumulator, giving the HAL room to recover.
+            // onEarlyPreview from a FAILED attempt is suppressed (preview swallowed) so
+            // only a successful attempt's preview/photo propagates; the once-guard then
+            // makes onPreviewOnce idempotent for the success path.
+            var attempt = 0
+            var captured: BurstResult? = null
+            var lastErr: Throwable? = null
+            while (attempt < BURST_RETRY_MAX) {
+                val isLast = attempt == BURST_RETRY_MAX - 1
+                // Only let the preview/shutter callbacks escape on the final attempt OR
+                // once an attempt is succeeding; a failed early attempt must not fire a
+                // preview (it would be from a partial/aborted capture).
+                val attemptPreview: (File?, Throwable?) -> Unit = { f, e ->
+                    if (e == null) onPreviewOnce(f, null)         // success preview -> propagate
+                    else if (isLast) onPreviewOnce(null, e)       // final failure -> propagate error
+                    // else: swallow this attempt's failure, we will retry
+                }
+                try {
+                    captured = captureBurst(attemptPreview, t0, onShutterDone)
+                    break
+                } catch (e: Throwable) {
+                    lastErr = e
+                    attempt++
+                    Log.w(TAG, "takePhoto burst attempt $attempt/$BURST_RETRY_MAX failed: ${e.message}" +
+                        if (attempt < BURST_RETRY_MAX) " -- retrying after ${BURST_RETRY_BACKOFF_MS}ms" else " -- giving up")
+                    if (attempt < BURST_RETRY_MAX) {
+                        try { Thread.sleep(BURST_RETRY_BACKOFF_MS) }
+                        catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+                    }
+                }
+            }
+            if (captured == null) {
+                Log.e(TAG, "takePhoto burst failed after $attempt attempts: ${lastErr?.message}")
+                onPreviewOnce(null, lastErr ?: IllegalStateException("burst failed"))
                 // Camera work for this photo is over (failed). Release BOTH the software
                 // lock and the pending mark so a stuck flag can never permanently starve
                 // ReID frames or future photos. No heavy work was posted, so nothing else
@@ -325,6 +369,7 @@ class RawStillCapturer(
                 synchronized(photoPendingLock) { if (photoPending > 0) photoPending-- }
                 return@execute
             }
+            burst = captured
             // The RAW burst is captured and accumulated; the camera device was already
             // released when borrowDeviceExclusive returned inside captureBurst. Release
             // the SOFTWARE lock + the priority mark NOW, BEFORE the heavy demosaic, so
