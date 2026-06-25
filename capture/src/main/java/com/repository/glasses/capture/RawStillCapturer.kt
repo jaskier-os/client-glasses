@@ -75,7 +75,13 @@ class RawStillCapturer(
         /** Hard upper bound on AE convergence wait. The actual capture fires as
          *  soon as CONTROL_AE_STATE reaches CONVERGED, so this only kicks in
          *  for scenes where the HAL never reports convergence. */
-        private const val AE_WARMUP_MS = 1500L
+        // Max wait for AE to converge during warmup. The await returns the INSTANT
+        // AE settles, so a warm camera still finishes in a few hundred ms; this cap
+        // only matters on a COLD camera (fresh boot) where AE must ramp from the
+        // dark cold-start exposure -- 1.5s was too short for that and left the first
+        // photo dark/black. 4s gives cold AE room to converge while still bounding a
+        // genuinely stuck HAL.
+        private const val AE_WARMUP_MS = 4000L
 
         // Exposure correction is no longer an absolute-target DRO gain. This Rokid
         // HAL exposes RAW conservatively (a well-lit scene's green sits at codes
@@ -780,19 +786,29 @@ class RawStillCapturer(
                 // the HAL FD pipeline). The HAL under-meters outdoors; we correct that
                 // brightness DIGITALLY (DRO) in the demosaic from the burst's own luma.
                 run {
-                    val warmupBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                    // AE warmup: let the HAL's auto-exposure settle on the PRIVATE preview
+                    // surface before the burst. CRITICAL: the PRECAPTURE_TRIGGER must be sent
+                    // exactly ONCE (a single capture()), NOT inside the repeating request.
+                    // A repeating request carrying TRIGGER_START re-arms the precapture
+                    // metering sequence every frame, so CONTROL_AE_STATE stays pinned at
+                    // PRECAPTURE and NEVER transitions to CONVERGED -- the old code did this,
+                    // so the latch always timed out and the burst fired at whatever exposure
+                    // the HAL happened to hold. On a COLD camera (fresh boot) that is the
+                    // dark cold-start exposure => black first photo, degenerate preview, and
+                    // (because the black RAW then fails demosaic) no sync. Warm cameras only
+                    // "worked" because the free-running AE had already settled.
+                    val baseBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                         addTarget(previewSurface)
                         set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
                         set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                         // AWB auto so the HAL converges + reports COLOR_CORRECTION_GAINS.
                         set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-                        set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
                     }
                     val converged = CountDownLatch(1)
                     val lastExp = java.util.concurrent.atomic.AtomicLong(0L)
                     val lastIso = java.util.concurrent.atomic.AtomicInteger(0)
                     val lastAeState = java.util.concurrent.atomic.AtomicInteger(-1)
-                    session.setRepeatingRequest(warmupBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
+                    val cb = object : CameraCaptureSession.CaptureCallback() {
                         override fun onCaptureCompleted(
                             s: CameraCaptureSession,
                             req: CaptureRequest,
@@ -802,12 +818,28 @@ class RawStillCapturer(
                             result.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)?.let { lastIso.set(it) }
                             val state = result.get(android.hardware.camera2.CaptureResult.CONTROL_AE_STATE)
                             if (state != null) lastAeState.set(state)
+                            // Settle = the precapture sequence has finished and AE picked an
+                            // exposure: CONVERGED, LOCKED, or FLASH_REQUIRED. (LOCKED can occur
+                            // if a prior session left AE locked.) PRECAPTURE/SEARCHING/INACTIVE
+                            // mean still metering -> keep waiting.
                             if (state == android.hardware.camera2.CaptureResult.CONTROL_AE_STATE_CONVERGED ||
+                                state == android.hardware.camera2.CaptureResult.CONTROL_AE_STATE_LOCKED ||
                                 state == android.hardware.camera2.CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED) {
                                 converged.countDown()
                             }
                         }
-                    }, handler)
+                    }
+                    // 1) Run a plain AE-auto preview (NO trigger) so AE can free-run.
+                    session.setRepeatingRequest(baseBuilder.build(), cb, handler)
+                    // 2) Kick the precapture metering sequence exactly ONCE.
+                    val triggerReq = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                        addTarget(previewSurface)
+                        set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                        set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
+                    }
+                    session.capture(triggerReq.build(), cb, handler)
                     val convergedOk = converged.await(AE_WARMUP_MS, TimeUnit.MILLISECONDS)
                     session.stopRepeating()
                     Log.i(TAG, "AE warmup: converged=$convergedOk aeState=${lastAeState.get()} exp=${lastExp.get() / 1_000_000.0}ms iso=${lastIso.get()}")
@@ -1052,15 +1084,18 @@ class RawStillCapturer(
                 // sensor's near-zero default). The frame then captures at comp=0;
                 // brightness is corrected digitally (DRO) from its own luma.
                 run {
-                    val warmupBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                    // Same correct AE warmup as the photo path: send PRECAPTURE_TRIGGER
+                    // ONCE via capture(), NOT in the repeating request (a repeating trigger
+                    // pins AE at PRECAPTURE forever and never converges -> the latch always
+                    // timed out and the still landed at the cold/near-zero exposure).
+                    val baseBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                         addTarget(previewSurface)
                         set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
                         set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                         set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-                        set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
                     }
                     val converged = CountDownLatch(1)
-                    session.setRepeatingRequest(warmupBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
+                    val cb = object : CameraCaptureSession.CaptureCallback() {
                         override fun onCaptureCompleted(
                             s: CameraCaptureSession,
                             req: CaptureRequest,
@@ -1068,11 +1103,21 @@ class RawStillCapturer(
                         ) {
                             val state = result.get(android.hardware.camera2.CaptureResult.CONTROL_AE_STATE)
                             if (state == android.hardware.camera2.CaptureResult.CONTROL_AE_STATE_CONVERGED ||
+                                state == android.hardware.camera2.CaptureResult.CONTROL_AE_STATE_LOCKED ||
                                 state == android.hardware.camera2.CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED) {
                                 converged.countDown()
                             }
                         }
-                    }, handler)
+                    }
+                    session.setRepeatingRequest(baseBuilder.build(), cb, handler)
+                    val triggerReq = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                        addTarget(previewSurface)
+                        set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                        set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
+                    }
+                    session.capture(triggerReq.build(), cb, handler)
                     val convergedOk = converged.await(AE_WARMUP_MS, TimeUnit.MILLISECONDS)
                     session.stopRepeating()
                     Log.i(TAG, "reid AE warmup converged=$convergedOk")
