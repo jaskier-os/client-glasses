@@ -14,6 +14,51 @@ import android.util.Log
 object RawDemosaic {
     private const val TAG = "RawDemosaic"
 
+    // ---- Multi-core demosaic ----
+    // The demosaic is the dominant photo-loading cost (~20s on the 4xA55 cluster):
+    // its passes are per-pixel maps + a separable box blur, all embarrassingly
+    // parallel. We split the work across all cores. A persistent fixed pool sized
+    // to the CPU count is created once (cheap idle threads) so we don't pay a
+    // pool-spinup cost per photo.
+    private val CORES = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+    private val pool: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newFixedThreadPool(CORES) { r ->
+            Thread(r, "Demosaic-worker").apply { isDaemon = true }
+        }
+
+    // Precomputed linear->sRGB encode LUT: index = round(linear[0,1] * (N-1)),
+    // value = encoded 0..255 byte. Replaces a per-pixel Math.pow in the hot loop.
+    // N=4096 bins -> max quantization error well under 1/255, i.e. visually lossless.
+    private const val SRGB_LUT_N = 4096
+    private val SRGB_LUT: IntArray = IntArray(SRGB_LUT_N) { i ->
+        val c = i.toFloat() / (SRGB_LUT_N - 1)
+        val s = if (c <= 0.0031308f) 12.92f * c
+                else 1.055f * Math.pow(c.toDouble(), 1.0 / 2.4).toFloat() - 0.055f
+        (s * 255f + 0.5f).toInt().coerceIn(0, 255)
+    }
+
+    /**
+     * Run [body] over [total] indices split into [CORES] contiguous chunks, one per
+     * worker, and block until all finish. [body] is called with the half-open
+     * [start, end) range its chunk owns. Single-threaded fallback when total is
+     * tiny or only one core is available, to avoid dispatch overhead.
+     */
+    private inline fun parallelChunks(total: Int, crossinline body: (start: Int, end: Int) -> Unit) {
+        if (total <= 0) return
+        if (CORES <= 1 || total < 4096) { body(0, total); return }
+        val chunk = (total + CORES - 1) / CORES
+        val latch = java.util.concurrent.CountDownLatch(CORES)
+        for (c in 0 until CORES) {
+            val s = c * chunk
+            val e = minOf(s + chunk, total)
+            if (s >= e) { latch.countDown(); continue }
+            pool.execute {
+                try { body(s, e) } finally { latch.countDown() }
+            }
+        }
+        latch.await()
+    }
+
     // ---- Local Reinhard tone-mapping (dodge-and-burn) ----
     //
     // A SINGLE global tone curve cannot expose a high-dynamic-range scene -- e.g. a
@@ -98,36 +143,40 @@ object RawDemosaic {
         val r = radius.coerceAtLeast(1)
         val win = 2 * r + 1
         val tmp = FloatArray(w * h)
-        // Horizontal pass: src -> tmp.
-        for (y in 0 until h) {
-            val row = y * w
-            // Seed the running sum for x=0 with clamp-extended left border.
-            var sum = 0f
-            for (k in -r..r) {
-                val xx = if (k < 0) 0 else if (k >= w) w - 1 else k
-                sum += src[row + xx]
-            }
-            tmp[row] = sum / win
-            for (x in 1 until w) {
-                val add = (x + r).let { if (it >= w) w - 1 else it }
-                val sub = (x - r - 1).let { if (it < 0) 0 else it }
-                sum += src[row + add] - src[row + sub]
-                tmp[row + x] = sum / win
+        // Horizontal pass: src -> tmp. Each row is independent -> split over rows.
+        parallelChunks(h) { yStart, yEnd ->
+            for (y in yStart until yEnd) {
+                val row = y * w
+                // Seed the running sum for x=0 with clamp-extended left border.
+                var sum = 0f
+                for (k in -r..r) {
+                    val xx = if (k < 0) 0 else if (k >= w) w - 1 else k
+                    sum += src[row + xx]
+                }
+                tmp[row] = sum / win
+                for (x in 1 until w) {
+                    val add = (x + r).let { if (it >= w) w - 1 else it }
+                    val sub = (x - r - 1).let { if (it < 0) 0 else it }
+                    sum += src[row + add] - src[row + sub]
+                    tmp[row + x] = sum / win
+                }
             }
         }
-        // Vertical pass: tmp -> dst.
-        for (x in 0 until w) {
-            var sum = 0f
-            for (k in -r..r) {
-                val yy = if (k < 0) 0 else if (k >= h) h - 1 else k
-                sum += tmp[yy * w + x]
-            }
-            dst[x] = sum / win
-            for (y in 1 until h) {
-                val add = (y + r).let { if (it >= h) h - 1 else it }
-                val sub = (y - r - 1).let { if (it < 0) 0 else it }
-                sum += tmp[add * w + x] - tmp[sub * w + x]
-                dst[y * w + x] = sum / win
+        // Vertical pass: tmp -> dst. Each column is independent -> split over columns.
+        parallelChunks(w) { xStart, xEnd ->
+            for (x in xStart until xEnd) {
+                var sum = 0f
+                for (k in -r..r) {
+                    val yy = if (k < 0) 0 else if (k >= h) h - 1 else k
+                    sum += tmp[yy * w + x]
+                }
+                dst[x] = sum / win
+                for (y in 1 until h) {
+                    val add = (y + r).let { if (it >= h) h - 1 else it }
+                    val sub = (y - r - 1).let { if (it < 0) 0 else it }
+                    sum += tmp[add * w + x] - tmp[sub * w + x]
+                    dst[y * w + x] = sum / win
+                }
             }
         }
     }
@@ -260,36 +309,39 @@ object RawDemosaic {
         val linG = FloatArray(n)
         val linB = FloatArray(n)
         val luma = FloatArray(n)
-        for (y in 0 until halfH) {
-            val sy0 = 2 * y * width
-            val sy1 = (2 * y + 1) * width
-            val dstRow = y * halfW
-            for (x in 0 until halfW) {
-                val sx0 = 2 * x
-                val sx1 = sx0 + 1
-                val rv = ((raw[sy0 + sx0].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
-                val g1v = ((raw[sy0 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
-                val g2v = ((raw[sy1 + sx0].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
-                val bv = ((raw[sy1 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
-                var rl = rv * rGain
-                var gl = (g1v + g2v) * gGain
-                var blin = bv * bGain
-                // Clipped-highlight desaturation: drive off the MAX raw channel of the
-                // quad (the first to clip). t ramps 0->1 over [clipStart, clipFull];
-                // a fully-clipped (magenta-prone) pixel is lerped to its own luma =>
-                // neutral white. t==0 for any non-clipped pixel, so colours are intact.
-                val maxRaw = if (rv > g1v) (if (rv > g2v) (if (rv > bv) rv else bv) else (if (g2v > bv) g2v else bv))
-                             else (if (g1v > g2v) (if (g1v > bv) g1v else bv) else (if (g2v > bv) g2v else bv))
-                if (maxRaw > clipStart) {
-                    val t = ((maxRaw - clipStart) * clipRampInv).coerceAtMost(1f)
-                    val lum = 0.299f * rl + 0.587f * gl + 0.114f * blin
-                    rl += t * (lum - rl)
-                    gl += t * (lum - gl)
-                    blin += t * (lum - blin)
+        // Pass 1 is per-output-row independent -> split the rows across cores.
+        parallelChunks(halfH) { yStart, yEnd ->
+            for (y in yStart until yEnd) {
+                val sy0 = 2 * y * width
+                val sy1 = (2 * y + 1) * width
+                val dstRow = y * halfW
+                for (x in 0 until halfW) {
+                    val sx0 = 2 * x
+                    val sx1 = sx0 + 1
+                    val rv = ((raw[sy0 + sx0].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
+                    val g1v = ((raw[sy0 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
+                    val g2v = ((raw[sy1 + sx0].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
+                    val bv = ((raw[sy1 + sx1].toInt() and 0xFFFF) - bl).coerceAtLeast(0f)
+                    var rl = rv * rGain
+                    var gl = (g1v + g2v) * gGain
+                    var blin = bv * bGain
+                    // Clipped-highlight desaturation: drive off the MAX raw channel of the
+                    // quad (the first to clip). t ramps 0->1 over [clipStart, clipFull];
+                    // a fully-clipped (magenta-prone) pixel is lerped to its own luma =>
+                    // neutral white. t==0 for any non-clipped pixel, so colours are intact.
+                    val maxRaw = if (rv > g1v) (if (rv > g2v) (if (rv > bv) rv else bv) else (if (g2v > bv) g2v else bv))
+                                 else (if (g1v > g2v) (if (g1v > bv) g1v else bv) else (if (g2v > bv) g2v else bv))
+                    if (maxRaw > clipStart) {
+                        val t = ((maxRaw - clipStart) * clipRampInv).coerceAtMost(1f)
+                        val lum = 0.299f * rl + 0.587f * gl + 0.114f * blin
+                        rl += t * (lum - rl)
+                        gl += t * (lum - gl)
+                        blin += t * (lum - blin)
+                    }
+                    val idx = dstRow + x
+                    linR[idx] = rl; linG[idx] = gl; linB[idx] = blin
+                    luma[idx] = 0.299f * rl + 0.587f * gl + 0.114f * blin
                 }
-                val idx = dstRow + x
-                linR[idx] = rl; linG[idx] = gl; linB[idx] = blin
-                luma[idx] = 0.299f * rl + 0.587f * gl + 0.114f * blin
             }
         }
         // LOCAL TONE MAP. Anchor exposure to the log-average luminance (geometric
@@ -300,36 +352,40 @@ object RawDemosaic {
         val k = LOCAL_KEY / logavg.coerceAtLeast(LUMA_EPS)
         val radius = (LOCAL_RADIUS_FRAC * halfW).toInt().coerceAtLeast(1)
         // lLocal = boxblur(luma * k). Scale luma by k in place; reuse luma's storage.
-        for (i in 0 until n) luma[i] = luma[i] * k
+        parallelChunks(n) { s, e -> for (i in s until e) luma[i] = luma[i] * k }
         val lLocal = FloatArray(n)
         boxBlur(luma, lLocal, halfW, halfH, radius)
         Log.i(TAG, "localtonemap [photo]: logavg=${"%.5f".format(logavg)} k=${"%.3f".format(k)} radius=$radius (key=$LOCAL_KEY)")
 
         // Pass 2: per-pixel local scale = 1/(1+lLocal), applied (with the key k) to
-        // each channel; then CCM, sat, sRGB.
+        // each channel; then CCM, sat, sRGB. Per-index independent -> split across
+        // cores. The sRGB encode uses the precomputed SRGB_LUT (linear[0,1] quantized
+        // to SRGB_LUT_N bins) instead of a per-channel Math.pow -- ~9M pow calls per
+        // photo were a large chunk of this pass.
         val outPx = IntArray(n)
-        for (i in 0 until n) {
-            val scale = k / (1f + lLocal[i])
-            val rl = linR[i] * scale
-            val gl = linG[i] * scale
-            val bl2 = linB[i] * scale
-            var rc = m00 * rl + m01 * gl + m02 * bl2
-            var gc = m10 * rl + m11 * gl + m12 * bl2
-            var bc = m20 * rl + m21 * gl + m22 * bl2
-            val lm = 0.299f * rc + 0.587f * gc + 0.114f * bc
-            rc = lm + sat * (rc - lm)
-            gc = lm + sat * (gc - lm)
-            bc = lm + sat * (bc - lm)
-            if (rc < 0f) rc = 0f else if (rc > 1f) rc = 1f
-            if (gc < 0f) gc = 0f else if (gc > 1f) gc = 1f
-            if (bc < 0f) bc = 0f else if (bc > 1f) bc = 1f
-            val rs = if (rc <= 0.0031308f) 12.92f * rc else 1.055f * Math.pow(rc.toDouble(), 1.0/2.4).toFloat() - 0.055f
-            val gs = if (gc <= 0.0031308f) 12.92f * gc else 1.055f * Math.pow(gc.toDouble(), 1.0/2.4).toFloat() - 0.055f
-            val bs2 = if (bc <= 0.0031308f) 12.92f * bc else 1.055f * Math.pow(bc.toDouble(), 1.0/2.4).toFloat() - 0.055f
-            val ri = (rs * 255f + 0.5f).toInt().coerceIn(0, 255)
-            val gi = (gs * 255f + 0.5f).toInt().coerceIn(0, 255)
-            val bi = (bs2 * 255f + 0.5f).toInt().coerceIn(0, 255)
-            outPx[i] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+        val lut = SRGB_LUT
+        val lutMax = SRGB_LUT_N - 1
+        parallelChunks(n) { s, e ->
+            for (i in s until e) {
+                val scale = k / (1f + lLocal[i])
+                val rl = linR[i] * scale
+                val gl = linG[i] * scale
+                val bl2 = linB[i] * scale
+                var rc = m00 * rl + m01 * gl + m02 * bl2
+                var gc = m10 * rl + m11 * gl + m12 * bl2
+                var bc = m20 * rl + m21 * gl + m22 * bl2
+                val lm = 0.299f * rc + 0.587f * gc + 0.114f * bc
+                rc = lm + sat * (rc - lm)
+                gc = lm + sat * (gc - lm)
+                bc = lm + sat * (bc - lm)
+                if (rc < 0f) rc = 0f else if (rc > 1f) rc = 1f
+                if (gc < 0f) gc = 0f else if (gc > 1f) gc = 1f
+                if (bc < 0f) bc = 0f else if (bc > 1f) bc = 1f
+                val ri = lut[(rc * lutMax + 0.5f).toInt()]
+                val gi = lut[(gc * lutMax + 0.5f).toInt()]
+                val bi = lut[(bc * lutMax + 0.5f).toInt()]
+                outPx[i] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+            }
         }
 
         val bmp = Bitmap.createBitmap(outPx, halfW, halfH, Bitmap.Config.ARGB_8888)
