@@ -141,6 +141,12 @@ class CaptureService : Service() {
                     Log.i(TAG, "takePhoto final; pushing to phone $file size=${file.length()}")
                     notifyPhotoSync(file)
                 },
+                onShutterDone = {
+                    // RAW burst fully captured -- tell the UI to show the "photo
+                    // taken, you can move now" checkmark (the loader + bar keep
+                    // running for the demosaic/denoise).
+                    broadcast { it.onShutterComplete() }
+                },
             )
         }
 
@@ -951,6 +957,11 @@ class CaptureService : Service() {
                     // phone (and so this path can be used to test the sync chain).
                     notifyPhotoSync(file)
                     Log.i(TAG, "ADB takePhoto final id=$id path=${file.absolutePath} previewMs=$previewMs totalMs=$ms err=${err?.message}")
+                },
+                onShutterDone = {
+                    // Same checkmark hint as the AIDL path, so ADB-triggered captures
+                    // exercise the full preview-overlay flow end to end.
+                    broadcast { it.onShutterComplete() }
                 },
             )
             return START_NOT_STICKY

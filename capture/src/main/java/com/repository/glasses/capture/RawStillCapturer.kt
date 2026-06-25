@@ -282,6 +282,10 @@ class RawStillCapturer(
     fun takePhoto(
         onPreview: (File?, Throwable?) -> Unit,
         onFinal: (File, Throwable?) -> Unit = { _, _ -> },
+        // Fired the instant the RAW burst is fully acquired -- the camera no longer
+        // needs the scene held still (the subsequent demosaic/denoise work off the
+        // captured frames). Drives the "photo taken, you can move now" checkmark.
+        onShutterDone: () -> Unit = {},
     ) = GT.section("cap.raw.capture") {
         // PRIORITY: mark a photo pending on the binder thread, BEFORE posting, so any
         // captureReidFrame call racing in right now already sees photoPending > 0 and
@@ -309,7 +313,7 @@ class RawStillCapturer(
                 if (previewFired.compareAndSet(false, true)) onPreview(f, e)
             }
             try {
-                burst = captureBurst(onPreviewOnce, t0)
+                burst = captureBurst(onPreviewOnce, t0, onShutterDone)
             } catch (e: Throwable) {
                 Log.e(TAG, "takePhoto burst failed: ${e.message}")
                 onPreviewOnce(null, e)
@@ -648,6 +652,7 @@ class RawStillCapturer(
     private fun captureBurst(
         onEarlyPreview: (File?, Throwable?) -> Unit = { _, _ -> },
         takePhotoStartMs: Long = android.os.SystemClock.elapsedRealtime(),
+        onShutterDone: () -> Unit = {},
     ): BurstResult = GT.section("cap.raw.burst") {
         val out = FileNamer.photoFile()
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -887,6 +892,10 @@ class RawStillCapturer(
                     throw IllegalStateException("burst capture timeout (remaining=${captureLatch.count})")
                 captureErr[0]?.let { throw it }
                 Log.i(TAG, "burst captured durMs=${android.os.SystemClock.elapsedRealtime() - tBurst}")
+                // All RAW frames are in hand -- the scene no longer needs to be held
+                // still. Signal "photo taken" so the UI can show the captured checkmark
+                // (the remaining demosaic/denoise work off the buffered frames).
+                try { onShutterDone() } catch (_: Throwable) {}
                 if (!imageLatch.await(30, TimeUnit.SECONDS))
                     throw IllegalStateException("raw burst merge timeout (received=${received.get()}/$BURST_N)")
                 frameErr[0]?.let { throw it }

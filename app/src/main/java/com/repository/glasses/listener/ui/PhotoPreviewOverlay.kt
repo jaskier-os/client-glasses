@@ -71,6 +71,28 @@ class PhotoPreviewOverlay(private val context: Context) {
     }
 
     /**
+     * RAW burst is fully captured -- the user can stop holding the scene still.
+     * Tells the most-recent loading placeholder to animate its spinner into a
+     * checkmark. The progress bar KEEPS running (demosaic/denoise are still in
+     * flight) and the preview still swaps in later via [show]; this only adds the
+     * "photo taken" affordance, it does not dismiss anything.
+     */
+    fun indicateCaptured() {
+        main.post {
+            // Target the live loading view. NOTE: by the time the burst-captured
+            // signal arrives, show() (driven by the earlier fast-preview JPEG) may
+            // have already pulled this Showing off pendingPlaceholders while it
+            // holds the swap via completeWhenCaptured -- so look at the ACTIVE set,
+            // not just the pending queue, or the checkmark would silently no-op.
+            val loading = active.lastOrNull { it.content is LoadingPreviewView }?.content
+                as? LoadingPreviewView
+                ?: pendingPlaceholders.lastOrNull()?.content as? LoadingPreviewView
+                ?: return@post
+            loading.markCaptured()
+        }
+    }
+
+    /**
      * Cancel the most recently added placeholder (e.g. when the capture fails
      * with ERR_BUSY before any photo is produced). Without this a failed
      * capture leaves the spinner on screen until the long placeholder
@@ -124,7 +146,14 @@ class PhotoPreviewOverlay(private val context: Context) {
                     attachAndAnimate(processed, decoded.rotationDeg)
                 }
                 if (loading != null && active.contains(placeholder!!)) {
-                    loading.complete(swap)
+                    // The fast preview (frame 0) is ready BEFORE the RAW burst is fully
+                    // captured, so don't swap to the photo yet -- hold the loading view
+                    // (spinner + progress bar) until burst-done fires the checkmark
+                    // ("you can move now"), THEN complete the bar and swap. This keeps
+                    // the progress bar showing the whole capture and guarantees the
+                    // checkmark gets a loader to animate on. A fallback fires the swap
+                    // anyway if the shutter signal never arrives.
+                    loading.completeWhenCaptured(swap)
                 } else {
                     swap.run()
                 }
@@ -626,6 +655,13 @@ class PhotoPreviewOverlay(private val context: Context) {
             strokeWidth = SPINNER_STROKE_DP * dp
             strokeCap = Paint.Cap.ROUND
         }
+        private val checkPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = CHECK_STROKE_DP * dp
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
         private val progressPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             style = Paint.Style.FILL
@@ -647,8 +683,55 @@ class PhotoPreviewOverlay(private val context: Context) {
         private var completionStartMs: Long = 0L
         private var completionFromProgress: Float = 0f
 
+        // Checkmark: set when the RAW burst is done ("you can move now"). The
+        // spinner cross-fades out while a checkmark strokes itself on with an
+        // overshoot pop. Independent of the progress bar, which keeps running for
+        // the demosaic/denoise still in flight.
+        @Volatile private var captured = false
+        private var capturedAtMs: Long = 0L
+        // A swap-to-photo runnable that is waiting for the burst-captured signal
+        // (the fast preview is ready before the burst finishes). Run after the
+        // checkmark has been visible for CHECK_HOLD_MS.
+        private var pendingSwap: Runnable? = null
+
         fun stop() {
             running = false
+        }
+
+        /** Spinner -> checkmark. Idempotent. Releases any swap waiting on capture. */
+        fun markCaptured() {
+            if (captured) return
+            captured = true
+            capturedAtMs = SystemClock.uptimeMillis()
+            invalidate()
+            pendingSwap?.let { swap ->
+                pendingSwap = null
+                // Let the checkmark register before the photo replaces the loader.
+                postDelayed(swap, CHECK_HOLD_MS)
+            }
+        }
+
+        /**
+         * Complete the bar + swap in the photo, but only AFTER the burst-captured
+         * checkmark has shown. If capture already happened, behave like [complete].
+         * Otherwise hold the swap until [markCaptured], with a safety timeout so a
+         * missing shutter signal never strands the loader.
+         */
+        fun completeWhenCaptured(onDone: Runnable) {
+            val finish = Runnable { complete(onDone) }
+            if (captured) {
+                finish.run()
+            } else {
+                pendingSwap = finish
+                // Safety: if the shutter signal never arrives, swap anyway so the
+                // preview still appears (matches the old behaviour as a fallback).
+                postDelayed({
+                    if (pendingSwap === finish) {
+                        pendingSwap = null
+                        finish.run()
+                    }
+                }, CAPTURE_WAIT_TIMEOUT_MS)
+            }
         }
 
         /**
@@ -686,14 +769,54 @@ class PhotoPreviewOverlay(private val context: Context) {
             val now = SystemClock.uptimeMillis()
             val elapsed = (now - startMs).coerceAtLeast(0L)
 
-            // Spinner: arc that rotates around the centre, 270 deg sweep.
+            // Centre glyph: spinner while capturing, checkmark once the burst is
+            // done. On markCaptured() the spinner cross-fades out (CHECK_FADE_MS)
+            // while the checkmark strokes itself on with an overshoot pop.
             val spinnerR = minOf(w, h) * SPINNER_RADIUS_FRAC
             val cx = w / 2f
             val cy = h / 2f - SPINNER_OFFSET_DP * dp
-            val arcRect = RectF(cx - spinnerR, cy - spinnerR, cx + spinnerR, cy + spinnerR)
-            val sweepAngle = 270f
-            val rotationAngle = (elapsed * 360f / SPINNER_PERIOD_MS) % 360f
-            canvas.drawArc(arcRect, rotationAngle, sweepAngle, false, spinnerPaint)
+            if (!captured) {
+                // Spinner: arc that rotates around the centre, 270 deg sweep.
+                val arcRect = RectF(cx - spinnerR, cy - spinnerR, cx + spinnerR, cy + spinnerR)
+                val rotationAngle = (elapsed * 360f / SPINNER_PERIOD_MS) % 360f
+                canvas.drawArc(arcRect, rotationAngle, 270f, false, spinnerPaint)
+            } else {
+                val ce = (now - capturedAtMs).coerceAtLeast(0L)
+                // Fade the spinner out over the first CHECK_FADE_MS.
+                val spinAlpha = (1f - ce.toFloat() / CHECK_FADE_MS).coerceIn(0f, 1f)
+                if (spinAlpha > 0f) {
+                    val arcRect = RectF(cx - spinnerR, cy - spinnerR, cx + spinnerR, cy + spinnerR)
+                    val rotationAngle = (elapsed * 360f / SPINNER_PERIOD_MS) % 360f
+                    spinnerPaint.alpha = (spinAlpha * 255f).toInt()
+                    canvas.drawArc(arcRect, rotationAngle, 270f, false, spinnerPaint)
+                    spinnerPaint.alpha = 255
+                }
+                // Checkmark: two strokes drawn progressively over CHECK_DRAW_MS,
+                // with an overshoot scale pop. Geometry is a classic tick: a short
+                // down-leg then a longer up-leg, sized to the spinner radius.
+                val draw = (ce.toFloat() / CHECK_DRAW_MS).coerceIn(0f, 1f)
+                // Overshoot pop: 0 -> ~1.12 -> 1.0.
+                val pop = OvershootInterpolator(2.2f).getInterpolation(draw)
+                val r = spinnerR * 1.05f * (0.6f + 0.4f * pop)
+                // Tick vertices (relative to centre): p0 left, p1 bottom elbow, p2 top right.
+                val p0x = cx - r * 0.55f; val p0y = cy + r * 0.05f
+                val p1x = cx - r * 0.12f; val p1y = cy + r * 0.50f
+                val p2x = cx + r * 0.60f; val p2y = cy - r * 0.45f
+                val leg1 = Math.hypot((p1x - p0x).toDouble(), (p1y - p0y).toDouble()).toFloat()
+                val leg2 = Math.hypot((p2x - p1x).toDouble(), (p2y - p1y).toDouble()).toFloat()
+                val total = leg1 + leg2
+                val drawn = draw * total
+                // First leg.
+                val t1 = (drawn / leg1).coerceIn(0f, 1f)
+                val a1x = p0x + (p1x - p0x) * t1; val a1y = p0y + (p1y - p0y) * t1
+                canvas.drawLine(p0x, p0y, a1x, a1y, checkPaint)
+                // Second leg (after the first completes).
+                if (drawn > leg1) {
+                    val t2 = ((drawn - leg1) / leg2).coerceIn(0f, 1f)
+                    val a2x = p1x + (p2x - p1x) * t2; val a2y = p1y + (p2y - p1y) * t2
+                    canvas.drawLine(p1x, p1y, a2x, a2y, checkPaint)
+                }
+            }
 
             // Progress bar at bottom. Two-phase:
             //   - capturing: fills 0 -> CAPTURING_CAP over estimatedDurationMs,
@@ -731,6 +854,18 @@ class PhotoPreviewOverlay(private val context: Context) {
             private const val SPINNER_RADIUS_FRAC = 0.18f
             private const val SPINNER_STROKE_DP = 2.5f
             private const val SPINNER_OFFSET_DP = 4f
+            // Checkmark: stroke slightly heavier than the spinner so it reads as a
+            // confident "done". Draw the tick over CHECK_DRAW_MS; cross-fade the
+            // spinner out over the (shorter) CHECK_FADE_MS so the two overlap briefly.
+            private const val CHECK_STROKE_DP = 3.0f
+            private const val CHECK_DRAW_MS = 300f
+            private const val CHECK_FADE_MS = 160f
+            // How long the checkmark stays visible after burst-done before the photo
+            // swaps in -- long enough for the user to register "taken, can move now".
+            private const val CHECK_HOLD_MS = 600L
+            // If the burst-captured signal never arrives, swap the preview in anyway
+            // after this long so the photo is never withheld.
+            private const val CAPTURE_WAIT_TIMEOUT_MS = 6000L
             private const val PROGRESS_HEIGHT_DP = 4f
             private const val PROGRESS_INSET_X_DP = 10f
             private const val PROGRESS_INSET_BOTTOM_DP = 10f

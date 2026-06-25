@@ -3846,6 +3846,11 @@ class ListenerService : LifecycleService(),
     }
 
     private val captureFeedbackListener = object : com.repository.glasses.listener.capture.CaptureBridge.Listener {
+        override fun onShutterComplete() {
+            // RAW burst fully captured -- show the "photo taken, you can move now"
+            // checkmark on the loading overlay (the bar keeps running for denoise).
+            photoPreviewOverlay?.indicateCaptured()
+        }
         override fun onPhotoTaken(absPath: String, sizeBytes: Long) {
             photoPreviewOverlay?.show(absPath)
             // ONE-SHOT ReID on the photo frame, independent of whether ReID mode is on:

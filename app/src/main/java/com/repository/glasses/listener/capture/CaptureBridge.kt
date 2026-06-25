@@ -28,6 +28,8 @@ class CaptureBridge(private val context: Context) {
 
     interface Listener {
         fun onPhotoTaken(absPath: String, sizeBytes: Long) {}
+        /** RAW burst fully captured -- "photo taken, you can move now". */
+        fun onShutterComplete() {}
         fun onVideoStarted(absPath: String) {}
         fun onVideoPaused(absPath: String) {}
         fun onVideoResumed(absPath: String) {}
@@ -90,6 +92,9 @@ class CaptureBridge(private val context: Context) {
         override fun onPhotoTaken(absPath: String, sizeBytes: Long) = GT.section("cap.cb.photo_taken") {
             logMsg("Capture: photo $absPath ($sizeBytes B)")
             listeners.forEach { it.onPhotoTaken(absPath, sizeBytes) }
+        }
+        override fun onShutterComplete() = GT.section("cap.cb.shutter_complete") {
+            listeners.forEach { it.onShutterComplete() }
         }
         override fun onVideoStarted(absPath: String) = GT.section("cap.cb.video_started") {
             recordingActive = true
