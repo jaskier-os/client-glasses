@@ -2758,9 +2758,9 @@ class ListenerService : LifecycleService(),
                 @Suppress("UnspecifiedRegisterReceiverFlag")
                 registerReceiver(callControlReceiver, callFilter)
             }
-            // React to SCO call-audio transitions (CallController + the debug path both
-            // broadcast ACTION_CALL_UI_STATE with a scoActive extra) to gate/relay the
-            // far-party call downlink for translation.
+            // React to call phase transitions (CallController broadcasts
+            // ACTION_CALL_UI_STATE on every phase change) to gate/relay the far-party
+            // call downlink for translation -- reconcileCallAudio reads the current phase.
             val callAudioFilter = IntentFilter(ACTION_CALL_UI_STATE)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(callAudioStateReceiver, callAudioFilter, Context.RECEIVER_NOT_EXPORTED)
@@ -6949,7 +6949,7 @@ class ListenerService : LifecycleService(),
             // "system" audio source. Update our gate and re-run the call-audio reconcile so
             // a source switch mid-call takes effect without waiting for an SCO transition.
             phoneWantsCallAudio = obj.optBoolean("wantsCallAudio", false)
-            reconcileCallAudio(callController.scoActive)
+            reconcileCallAudio()
         } catch (e: Exception) {
             btErr("onTranslationState parse failed: ${e.message}")
         }
@@ -7028,7 +7028,7 @@ class ListenerService : LifecycleService(),
             // Seed the call-downlink tap in case a call is already active when translation
             // starts. The phone's pushTranslationState on start will also arrive and run
             // reconcileCallAudio, but seeding here avoids a first-block gap.
-            callAudioActive = callController.scoActive && phoneWantsCallAudio
+            callAudioActive = callController.phase == CallController.CallPhase.ACTIVE && phoneWantsCallAudio
             start(twoWay)
         }
     }
@@ -7248,25 +7248,33 @@ class ListenerService : LifecycleService(),
     private val callAudioStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != ACTION_CALL_UI_STATE) return
-            reconcileCallAudio(intent.getBooleanExtra("scoActive", false))
+            reconcileCallAudio()
         }
     }
 
     /**
      * Reconcile the far-party call-downlink tap. The glasses are the HFP hands-free
-     * endpoint, so scoActive means far-party audio is on the 8ch array's echo channel.
-     * Tap it only when SCO is up AND translation is running (the recorder owns the 8ch
-     * buffer we read from) AND the phone actually wants call audio (it is translating the
+     * endpoint, so during a real call the far-party audio is on the 8ch array's echo
+     * channel. Tap it only when a call is ACTIVE AND translation is running (the recorder
+     * owns the 8ch buffer we read from) AND the phone actually wants call audio (it is
+     * translating the
      * "system" source). Relay call-audio-active (not raw SCO) to the phone so it flips to
      * the "call" sub-source only when audio will really flow -- otherwise a background call
      * would freeze the phone's system-playback captions.
      */
-    private fun reconcileCallAudio(scoActive: Boolean) {
+    private fun reconcileCallAudio() {
         val recorder = translationFrontMicRecorder
-        val tapActive = scoActive && recorder != null && phoneWantsCallAudio
+        // Gate on an ACTUAL active call, not raw SCO. An HFP audio-gateway (e.g. a
+        // paired phone acting as our AG) can bring SCO up without any call -- and a PC
+        // HFP mic keeps phase==IDLE forever. Tapping on raw scoActive made the tap flap
+        // on/off with that SCO, suspending the Opus front-beam and injecting raw c6 PCM
+        // during normal translation, starving/desyncing the phone decoder. Only a real
+        // call (CallPhase.ACTIVE) carries far-party downlink worth tapping.
+        val callActive = callController.phase == CallController.CallPhase.ACTIVE
+        val tapActive = callActive && recorder != null && phoneWantsCallAudio
         if (recorder != null && recorder.callAudioActive != tapActive) {
             recorder.callAudioActive = tapActive
-            btLog("CallAudio: tap ${if (tapActive) "enabled" else "disabled"} (sco=$scoActive, wantsCallAudio=$phoneWantsCallAudio)")
+            btLog("CallAudio: tap ${if (tapActive) "enabled" else "disabled"} (callActive=$callActive, wantsCallAudio=$phoneWantsCallAudio)")
         }
         if (tapActive != lastRelayedCallAudioActive) {
             lastRelayedCallAudioActive = tapActive
