@@ -2,6 +2,7 @@ package com.repository.glasses.headlockoverlay
 
 import android.hardware.SensorManager
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.View
 import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
@@ -25,6 +26,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         overlay = OverlayView(this)
+        overlay.selectedTunable = currentTunable()
         setContentView(overlay)
 
         val sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
@@ -73,6 +75,77 @@ class MainActivity : AppCompatActivity() {
         pushFrame(off.yawDeg, off.pitchDeg, yawDeg, pitchDeg)
     }
 
+    // --- Live touchpad tuning ------------------------------------------------
+
+    /** Ordered tunables the touchpad cursor cycles through. */
+    private val tunables = listOf("k", "D", "fov", "recenter")
+    private var selectedIndex = 0
+
+    private fun currentTunable() = tunables[selectedIndex]
+
+    /**
+     * On-device touchpad tuning. The Rokid glasses touchpad reports the keycodes below
+     * (tap / hold / scroll). These are the observed mappings from prior work -- they may
+     * need on-device confirmation and are easy to remap via the companion constants.
+     *
+     * - tap    : cycle the selection cursor over [tunables].
+     * - scroll : adjust the selected tunable (forward = +, backward = -).
+     * - hold   : context action -- recenter (when "recenter" is selected) else toggle debug.
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        when (keyCode) {
+            KEY_TAP -> {
+                selectedIndex = (selectedIndex + 1) % tunables.size
+                overlay.selectedTunable = currentTunable()
+                overlay.invalidate()
+                return true
+            }
+
+            KEY_SCROLL_FWD -> {
+                adjustSelected(+1)
+                return true
+            }
+
+            KEY_SCROLL_BACK -> {
+                adjustSelected(-1)
+                return true
+            }
+
+            KEY_HOLD -> {
+                if (currentTunable() == "recenter") {
+                    lazyFollow.recenter(tracker.yawDeg, tracker.pitchDeg)
+                } else {
+                    overlay.debugEnabled = !overlay.debugEnabled
+                }
+                overlay.invalidate()
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    /** Nudge the currently selected tunable by [dir] (+1 forward / -1 backward). */
+    private fun adjustSelected(dir: Int) {
+        when (currentTunable()) {
+            "k" -> {
+                val v = (lazyFollow.followRate + dir * 0.05f).coerceIn(0.05f, 3.0f)
+                lazyFollow.followRate = v
+                overlay.followRate = v
+            }
+            "D" -> {
+                val v = (lazyFollow.deadzoneDeg + dir * 1.0f).coerceIn(0.0f, 20.0f)
+                lazyFollow.deadzoneDeg = v
+                overlay.deadzoneDeg = v
+            }
+            "fov" -> {
+                val v = (overlay.projection.horizontalFovDeg + dir * 1.0f).coerceIn(12.0f, 60.0f)
+                overlay.projection.horizontalFovDeg = v
+            }
+            // "recenter": scrolling is a no-op.
+        }
+        overlay.invalidate()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
@@ -86,5 +159,13 @@ class MainActivity : AppCompatActivity() {
         controller.hide(WindowInsetsCompat.Type.systemBars())
         controller.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    }
+
+    companion object {
+        // Rokid glasses touchpad -> Android keycodes (observed; confirm on-device, easy to remap).
+        private const val KEY_TAP = KeyEvent.KEYCODE_NUMPAD_2         // tap
+        private const val KEY_HOLD = KeyEvent.KEYCODE_NUMPAD_3        // long hold (~500ms)
+        private const val KEY_SCROLL_FWD = KeyEvent.KEYCODE_NUMPAD_0  // scroll forward
+        private const val KEY_SCROLL_BACK = KeyEvent.KEYCODE_NUMPAD_1 // scroll backward
     }
 }
