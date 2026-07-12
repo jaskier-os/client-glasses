@@ -6,6 +6,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import java.io.IOException
@@ -63,6 +65,11 @@ class CallController : BtManagerBridge.CallListener {
         // Rokid lights_ctrl PHONE_RING event
         private const val LIGHTS_EVENT_TYPE_SPECIAL = 3
         private const val LIGHTS_EVENT_PHONE_RING = 3017
+
+        // Grace period before an SCO drop during an ACTIVE call is treated as a
+        // real call end. Covers the typical iPhone mid-call SCO bounce without
+        // materially delaying real call-end detection.
+        private const val SCO_DROP_GRACE_MS = 2500L
     }
 
     private var bridge: BtManagerBridge? = null
@@ -112,6 +119,33 @@ class CallController : BtManagerBridge.CallListener {
     // Dedupe keys
     private var lastCallKey: Long = -1L           // (callId << 8) | state
     private var lastAudioKey: String = ""         // addr|state
+
+    // SCO-drop debounce. The iPhone's SCO genuinely bounces mid-call (SCO
+    // connect/disconnect), and each ACTIVE->IDLE flip tears down the far-party
+    // call-audio tap and flips the phone's translation sub-source mid-sentence.
+    // On an SCO drop while ACTIVE we post enterIdle("sco-dropped") delayed by
+    // SCO_DROP_GRACE_MS; an SCO reconnect within the window cancels it so a brief
+    // blip does not flap the tap. A real hangup delivers AG STATE_TERMINATED ->
+    // enterIdle("terminated") which cancels the pending runnable and tears down
+    // immediately, so the debounce can only ever delay a spurious blip -- never
+    // keep the tap alive past a genuine hangup. Runs on the main looper so the
+    // delayed transition is serialized with the other phase transitions.
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var pendingScoDrop: Runnable? = null
+    // Bumped on every phase transition; captured when a drop is posted and
+    // re-checked when it fires so a stale runnable that was dequeued just before a
+    // new call went ACTIVE cannot kill the live tap. Volatile: bumped on the binder
+    // callback thread (phase transitions) and read on the main looper (the delayed
+    // runnable), so it needs a cross-thread happens-before and atomic 64-bit access.
+    @Volatile private var callGeneration: Long = 0L
+
+    private fun cancelPendingScoDrop() {
+        pendingScoDrop?.let {
+            mainHandler.removeCallbacks(it)
+            pendingScoDrop = null
+            Log.i(TAG, "event=sco_drop_cancelled gen=$callGeneration")
+        }
+    }
 
     fun start(
         bridge: BtManagerBridge,
@@ -373,6 +407,10 @@ class CallController : BtManagerBridge.CallListener {
         when (audioState) {
             AUDIO_CONNECTED -> {
                 scoActive = true
+                // SCO came back within the grace window: the drop was a blip, keep
+                // the call ACTIVE and the tap alive. Cancel here directly rather than
+                // via enterActive(), which early-returns when phase is still ACTIVE.
+                cancelPendingScoDrop()
                 Log.i(TAG, "event=sco_connected addr=$deviceAddress phase=$phase")
                 if (phase != CallPhase.ACTIVE && (phase == CallPhase.INCOMING || phase == CallPhase.OUTGOING_DIALING)) {
                     Log.i(TAG, "event=sco_upgrade_to_active addr=$deviceAddress from_phase=$phase")
@@ -393,7 +431,27 @@ class CallController : BtManagerBridge.CallListener {
                 Log.i(TAG, "event=sco_disconnected addr=$deviceAddress phase=$phase")
                 if (phase == CallPhase.ACTIVE) {
                     Log.w(TAG, "event=sco_dropped_during_active addr=$deviceAddress")
-                    enterIdle("sco-dropped")
+                    // Debounce: do NOT tear down immediately. A brief SCO bounce
+                    // (common on iPhone AGs) would otherwise flap the call-audio tap
+                    // and cut the phone's translation stream mid-sentence. Post a
+                    // delayed enterIdle; an SCO reconnect or a real terminate cancels
+                    // it. Guard the fire on the generation captured now so a stale
+                    // runnable can never tear down a newer call.
+                    cancelPendingScoDrop()
+                    val gen = callGeneration
+                    val dropAddr = deviceAddress
+                    val r = Runnable {
+                        pendingScoDrop = null
+                        if (callGeneration == gen && phase == CallPhase.ACTIVE && !scoActive) {
+                            Log.w(TAG, "event=sco_drop_grace_expired addr=$dropAddr gen=$gen")
+                            enterIdle("sco-dropped")
+                        } else {
+                            Log.i(TAG, "event=sco_drop_grace_stale addr=$dropAddr gen=$gen cur=$callGeneration phase=$phase sco=$scoActive")
+                        }
+                    }
+                    pendingScoDrop = r
+                    mainHandler.postDelayed(r, SCO_DROP_GRACE_MS)
+                    log("sco dropped during active -- ${SCO_DROP_GRACE_MS}ms grace before idle")
                 } else {
                     // Even when phase is IDLE (e.g. PC HFP mic without a real call),
                     // notify UI so the mute indicator hides.
@@ -462,6 +520,10 @@ class CallController : BtManagerBridge.CallListener {
     private fun enterActive() {
         if (phase == CallPhase.ACTIVE) return
         val prev = phase
+        // New ACTIVE epoch: invalidate any pending sco-drop from a prior state and
+        // bump the generation so a runnable already dequeued cannot fire against us.
+        cancelPendingScoDrop()
+        callGeneration++
         phase = CallPhase.ACTIVE
         startedElapsedRealtime = SystemClock.elapsedRealtime()
         Log.i(TAG, "event=phase_transition from=$prev to=ACTIVE addr=$currentAddr id=$currentCallId scoActive=$scoActive")
@@ -476,6 +538,10 @@ class CallController : BtManagerBridge.CallListener {
     }
 
     private fun enterIdle(reason: String) {
+        // A real terminate (or any non-debounced idle) must win instantly over a
+        // pending sco-drop grace timer so the tap never survives past a hangup.
+        cancelPendingScoDrop()
+        callGeneration++
         if (phase == CallPhase.IDLE) return
         val prev = phase
         val durMs = if (startedElapsedRealtime > 0L) SystemClock.elapsedRealtime() - startedElapsedRealtime else 0L
@@ -490,6 +556,7 @@ class CallController : BtManagerBridge.CallListener {
     }
 
     private fun reset() {
+        cancelPendingScoDrop()
         phase = CallPhase.IDLE
         currentCallId = -1
         currentAddr = ""

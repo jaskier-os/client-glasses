@@ -549,9 +549,9 @@ class GlassesBtClient(private val relay: MessageRelay) {
         return if (relay.publish(BtProtocol.CH_AUDIO_DATA_INWARD, b64Pcm)) 0 else -1
     }
 
-    /** Send Base64-encoded HFP call downlink (far-party) PCM chunk to phone. */
-    fun sendCallAudioData(b64Pcm: String): Int {
-        return if (relay.publish(BtProtocol.CH_AUDIO_DATA_CALL, b64Pcm)) 0 else -1
+    /** Send Base64-encoded, Opus-compressed HFP call downlink (far-party) chunk to phone. */
+    fun sendCallAudioData(b64Opus: String): Int {
+        return if (relay.publish(BtProtocol.CH_AUDIO_DATA_CALL, b64Opus)) 0 else -1
     }
 
     /** Relay HFP SCO call-audio state to phone so it can flip its translation sub-source. */

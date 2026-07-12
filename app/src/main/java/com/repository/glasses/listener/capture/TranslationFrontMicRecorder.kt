@@ -4,6 +4,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Base64
+import com.repository.glasses.listener.audio.OpusEncoder
 import com.repository.glasses.listener.bt.GlassesBtClient
 
 /**
@@ -62,6 +63,11 @@ class TranslationFrontMicRecorder(
     companion object {
         private const val SAMPLE_RATE = 16000
         private const val BYTES_PER_SAMPLE = 2  // PCM 16-bit
+
+        // Opus bitrate for the far-party call downlink. 16 kbit/s CBR is ample for
+        // mono 16 kHz speech and collapses the ~341 kbit/s raw-PCM+Base64 stream
+        // that previously saturated RFCOMM.
+        private const val CALL_OPUS_BITRATE = 16000
 
         /* 8-ch mode for CAE path */
         private const val NUM_CHANNELS_8 = 8
@@ -195,12 +201,28 @@ class TranslationFrontMicRecorder(
             val rawBuf = ByteArray(CAE_BLOCK_BYTES_8CH)
             val sixChBuf = ByteArray(CAE_BLOCK_BYTES_6CH)
             val inwardBuf = if (twoWayActive) ByteArray(INWARD_BLOCK_BYTES) else null
-            // Reused mono buffer for the far-party call downlink (echo channel).
+            // Reused mono buffer holding one block of the far-party call downlink
+            // (echo channel) PCM16, fed into the Opus encoder below.
             val callBuf = ByteArray(INWARD_BLOCK_BYTES)
+            // Opus encoder for the call-downlink channel, owned entirely by this
+            // audio thread (OpusEncoder is single-thread). Compressing c6 from
+            // ~341 kbit/s Base64 PCM down to ~16 kbit/s removes the RFCOMM
+            // saturation that stalled this capture thread and starved the far
+            // party at the phone. Created here, released in the loop-exit finally.
+            val callOpusEncoder = OpusEncoder(
+                sampleRate = SAMPLE_RATE,
+                bitrate = CALL_OPUS_BITRATE,
+                channels = 1,
+                log = remoteLog
+            )
+            if (!callOpusEncoder.initialize()) {
+                remoteLog?.invoke("FrontMic: call Opus encoder init failed (${OpusEncoder.nativeLoadError ?: "unknown"}); call downlink will not be sent")
+            }
             var consecutiveZeroBlocks = 0
             var deadMicRetried = false
             var currentRec: AudioRecord = initialRec
 
+            try {
             while (isRecording) {
                 val bytesRead = currentRec.read(rawBuf, 0, CAE_BLOCK_BYTES_8CH)
 
@@ -259,8 +281,12 @@ class TranslationFrontMicRecorder(
 
                 /* Extract ch0 (post-algorithm / inward) for two-way mode.
                  * Done every block before CAE (which only outputs every 2nd block)
-                 * so inward audio has continuous 16ms chunks. */
-                if (twoWayActive && inwardBuf != null) {
+                 * so inward audio has continuous 16ms chunks. Suppressed while a
+                 * call is active: the inward channel is the wearer's near-party
+                 * speech, out of scope for the phone's "system audio" call
+                 * translation, and its raw PCM would otherwise co-saturate RFCOMM
+                 * alongside the call downlink. */
+                if (twoWayActive && inwardBuf != null && !callAudioActive) {
                     for (i in 0 until CAE_BLOCK_FRAMES) {
                         val srcIdx = i * NUM_CHANNELS_8 * BYTES_PER_SAMPLE  // ch0 is first
                         val raw = (rawBuf[srcIdx].toInt() and 0xFF) or (rawBuf[srcIdx + 1].toInt() shl 8)
@@ -273,9 +299,13 @@ class TranslationFrontMicRecorder(
                     btClient.sendInwardAudioData(b64Inward)
                 }
 
-                /* Extract the far-party call downlink (echo channel, raw 8ch index
-                 * callEchoChannel = 6) per block while a call is active. Loud and clean
-                 * already, so no gain. Mirrors the ch0 inward extraction above. */
+                /* While a call is active, extract the far-party call downlink (echo
+                 * channel, raw 8ch index callEchoChannel = 6) per block, Opus-encode
+                 * it, and send. Loud and clean already, so no gain. The front beam is
+                 * NOT sent during a call (its near-party output is out of scope for
+                 * the phone's "system audio" translation), so the CAE beamformer is
+                 * skipped entirely below -- no point spending capture-thread CPU on a
+                 * beam we discard. */
                 if (callAudioActive) {
                     val ch = callEchoChannel
                     for (i in 0 until CAE_BLOCK_FRAMES) {
@@ -284,11 +314,23 @@ class TranslationFrontMicRecorder(
                         callBuf[dstIdx] = rawBuf[srcIdx]
                         callBuf[dstIdx + 1] = rawBuf[srcIdx + 1]
                     }
-                    val b64Call = Base64.encodeToString(callBuf, Base64.NO_WRAP)
-                    btClient.sendCallAudioData(b64Call)
+                    // encode() accumulates whole 20 ms (320-sample) Opus frames from
+                    // the 256-sample blocks, so it returns null on some blocks and one
+                    // or more length-prefixed frames on others. Send only when frames
+                    // are produced; Base64 NO_WRAP matches the phone-side decode.
+                    val opusFramed = callOpusEncoder.encode(callBuf)
+                    if (opusFramed != null) {
+                        val b64Call = Base64.encodeToString(opusFramed, Base64.NO_WRAP)
+                        btClient.sendCallAudioData(b64Call)
+                    }
+                    // Skip the beamformer during the call -- nothing consumes its
+                    // output. It resumes cleanly from the next block once the call
+                    // ends (the native CAE is fed fresh input each block; it holds no
+                    // cross-call state that a gap would corrupt).
+                    continue
                 }
 
-                /* Extract channels [2,3,4,5,6,7] from 8ch interleaved */
+                /* Extract channels [2,3,4,5,6,7] from 8ch interleaved (CAE input) */
                 for (f in 0 until CAE_BLOCK_FRAMES) {
                     for (c in 0 until CAE_INPUT_CHANNELS) {
                         val srcIdx = (f * NUM_CHANNELS_8 + EXTRACT_MAP[c]) * BYTES_PER_SAMPLE
@@ -298,11 +340,7 @@ class TranslationFrontMicRecorder(
                     }
                 }
 
-                /* Feed to CAE -- returns beamformed mono PCM or null if no output yet.
-                 * Keep the beamformer warm even during a call, but do NOT send the front
-                 * beam while call audio is active: the front beam is the wearer's near
-                 * party, which is out of scope for the phone's "system audio" translation,
-                 * and suspending it halves RFCOMM load during the call. */
+                /* Feed to CAE -- returns beamformed mono PCM or null if no output yet. */
                 val beamOutput = try {
                     nativeCaeProcess(sixChBuf)
                 } catch (e: Exception) {
@@ -310,10 +348,14 @@ class TranslationFrontMicRecorder(
                     null
                 } ?: continue
 
-                if (!callAudioActive) {
-                    val b64 = Base64.encodeToString(beamOutput, Base64.NO_WRAP)
-                    btClient.sendAudioData(b64)
-                }
+                val b64 = Base64.encodeToString(beamOutput, Base64.NO_WRAP)
+                btClient.sendAudioData(b64)
+            }
+            } finally {
+                // Release the native encoder on every loop-exit path, including an
+                // uncaught throwable from the loop body (e.g. OpusEncoder.encode's
+                // IllegalArgumentException on a bad range), so it is never leaked.
+                callOpusEncoder.release()
             }
 
             // If we exited the loop while still supposed to be recording,
