@@ -231,9 +231,15 @@ Java_com_repository_glasses_listener_capture_TranslationFrontMicRecorder_nativeC
         fn_api_destroy(api_handle);
     }
 
-    if (lib_handle) {
-        dlclose(lib_handle);
-    }
+    /* Deliberately NO dlclose(lib_handle). libcae.so registers pthread TLS key
+     * destructors and spawns internal threads (CallbackModule); after dlclose
+     * unmapped its .text, any thread that ever ran libcae code (our recorder
+     * thread, binder threads) faulted at thread-exit in the unmapped pages --
+     * SIGSEGV at a fixed offset (fault addr ...d48), killing the :backend
+     * process seconds after every stop_translation and dropping all RFCOMM
+     * sockets. Keeping the mapping is safe: it is a single system lib and
+     * vtn_api_destroy already tears down the engine state; the next
+     * nativeCaeInit's dlopen just bumps the refcount on the live mapping. */
 
     free(float_buf);
     free(out_ptrs_buf);
