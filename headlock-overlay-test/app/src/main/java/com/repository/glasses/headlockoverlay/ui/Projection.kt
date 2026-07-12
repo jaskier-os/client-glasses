@@ -11,7 +11,8 @@ class Projection(var horizontalFovDeg: Float = 28f) {
     fun screenX(panelYawDeg: Float, offsetYawDeg: Float, viewWidthPx: Int): Float =
         viewWidthPx / 2f + (panelYawDeg + offsetYawDeg) * pxPerDeg(viewWidthPx)
 
-    // +pitch = up = smaller Y. Uses the same px/deg scale (dimension / fov).
-    fun screenY(panelPitchDeg: Float, offsetPitchDeg: Float, viewHeightPx: Int): Float =
-        viewHeightPx / 2f - (panelPitchDeg + offsetPitchDeg) * (viewHeightPx / horizontalFovDeg)
+    // +pitch = up = smaller Y. Centers vertically on height but derives px/deg from WIDTH,
+    // so degrees stay square (angularly uniform) on a non-square landscape viewport.
+    fun screenY(panelPitchDeg: Float, offsetPitchDeg: Float, viewWidthPx: Int, viewHeightPx: Int): Float =
+        viewHeightPx / 2f - (panelPitchDeg + offsetPitchDeg) * pxPerDeg(viewWidthPx)
 }

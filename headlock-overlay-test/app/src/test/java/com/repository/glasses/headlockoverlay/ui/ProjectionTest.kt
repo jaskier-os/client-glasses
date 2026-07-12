@@ -41,9 +41,9 @@ class ProjectionTest {
     @Test
     fun screenYTopMiddleBottom() {
         val p = Projection(horizontalFovDeg = 28f)
-        assertEquals(0f, p.screenY(panelPitchDeg = 14f, offsetPitchDeg = 0f, viewHeightPx = 640), d)
-        assertEquals(640f, p.screenY(panelPitchDeg = -14f, offsetPitchDeg = 0f, viewHeightPx = 640), d)
-        assertEquals(320f, p.screenY(panelPitchDeg = 0f, offsetPitchDeg = 0f, viewHeightPx = 640), d)
+        assertEquals(0f, p.screenY(panelPitchDeg = 14f, offsetPitchDeg = 0f, viewWidthPx = 640, viewHeightPx = 640), d)
+        assertEquals(640f, p.screenY(panelPitchDeg = -14f, offsetPitchDeg = 0f, viewWidthPx = 640, viewHeightPx = 640), d)
+        assertEquals(320f, p.screenY(panelPitchDeg = 0f, offsetPitchDeg = 0f, viewWidthPx = 640, viewHeightPx = 640), d)
     }
 
     @Test
