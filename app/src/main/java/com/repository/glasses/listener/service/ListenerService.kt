@@ -3591,6 +3591,13 @@ class ListenerService : LifecycleService(),
      * either way; holding the gate open longer is the intended behavior.
      */
     fun enterLiveUtteranceMode(reasonTag: String, maxDurationMs: Long = 30_000L): Boolean {
+        // Defense-in-depth: while a call-downlink tap is active, keep the dedicated a1b2c3 audio
+        // socket cold no matter the trigger (wake word, pc-demand, notif-reply). Call audio uses
+        // the MESSAGE socket; opening the audio socket during a call only causes contention.
+        if (callAudioTapActive) {
+            btLog("[StreamMode] enterLiveUtteranceMode($reasonTag) suppressed: call-audio tap active")
+            return false
+        }
         val transitioned: Boolean
         synchronized(liveUtteranceHandler) {
             liveUtteranceHandler.removeCallbacks(liveUtteranceRevertRunnable)
@@ -4254,7 +4261,10 @@ class ListenerService : LifecycleService(),
         } catch (_: Throwable) { false }
         val phone = phoneAudioConnected || forced
         val wakewordEnabled = GlassesConfig.wakewordEnabled
-        val needed = worn && phone && wakewordEnabled
+        // callAudioTapActive: during a real call-downlink tap the wake word is suppressed so a
+        // far-party-speech false-fire cannot open the a1b2c3 socket / a second AudioRecord and
+        // contend with the front-mic recorder. Resumes when the tap clears (reconcileCallAudio).
+        val needed = worn && phone && wakewordEnabled && !callAudioTapActive
         val running = ::wakeWordPipeline.isInitialized && wakeWordPipeline.isRunning()
         val action = when {
             needed && !running -> "start"
@@ -7239,6 +7249,16 @@ class ListenerService : LifecycleService(),
     @Volatile private var lastRelayedCallAudioActive = false
 
     /**
+     * True while the far-party call-downlink tap is active (a real call + translation + the phone
+     * wants call audio). While set, the wake-word pipeline and the LIVE_UTTERANCE / dedicated
+     * a1b2c3 audio socket are suppressed: the call downlink already streams over the MESSAGE
+     * socket (CH_AUDIO_DATA_CALL), and letting a wake-word false-fire open a second MIC AudioRecord
+     * + the a1b2c3 socket during a call caused HAL/RFCOMM contention that dropped and desynced the
+     * audio socket mid-utterance. Toggled only in reconcileCallAudio.
+     */
+    @Volatile private var callAudioTapActive = false
+
+    /**
      * Whether the phone currently wants the far-party call downlink (it is translating with
      * the "system" audio source). Relayed via CH_TRANSLATION_STATE. Gates the c6 tap so a
      * "glasses" source translation keeps its front beam during a call.
@@ -7274,12 +7294,28 @@ class ListenerService : LifecycleService(),
         val tapActive = callActive && recorder != null && phoneWantsCallAudio
         if (recorder != null && recorder.callAudioActive != tapActive) {
             recorder.callAudioActive = tapActive
-            btLog("CallAudio: tap ${if (tapActive) "enabled" else "disabled"} (callActive=$callActive, wantsCallAudio=$phoneWantsCallAudio)")
+            btLog("[CallAudio] tap ${if (tapActive) "enabled" else "disabled"} (callActive=$callActive, wantsCallAudio=$phoneWantsCallAudio)")
+        }
+        // Suppress the wake-word / a1b2c3 audio-socket path for the duration of the tap. The call
+        // downlink flows over the MESSAGE socket, so the dedicated audio socket should stay idle;
+        // a wake-word false-fire during the call otherwise opens a second AudioRecord + the a1b2c3
+        // socket and contends with the front-mic recorder, dropping/desyncing the audio socket.
+        if (callAudioTapActive != tapActive) {
+            callAudioTapActive = tapActive
+            btLog("[CallAudio] tap ${if (tapActive) "on -> suppress" else "off -> resume"} wake-word/live-utterance")
+            if (tapActive) {
+                // Close any live-utterance window that a just-fired wake word opened, then stop the
+                // wake word so it cannot re-fire until the call clears.
+                exitLiveUtteranceMode("call-audio-tap")
+            }
+            // Re-run on both edges: stop the wake word when the tap turns on, resume it when it
+            // turns off (reconcileWakeWord's needed calc now honors callAudioTapActive).
+            reconcileWakeWord("call-audio-tap")
         }
         if (tapActive != lastRelayedCallAudioActive) {
             lastRelayedCallAudioActive = tapActive
             btClient.sendCallState(tapActive)
-            btLog("CallAudio: relayed call-audio-active to phone ($tapActive)")
+            btLog("[CallAudio] relayed call-audio-active to phone ($tapActive)")
         }
     }
 
