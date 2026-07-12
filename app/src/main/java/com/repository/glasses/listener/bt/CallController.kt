@@ -139,6 +139,24 @@ class CallController : BtManagerBridge.CallListener {
     // runnable), so it needs a cross-thread happens-before and atomic 64-bit access.
     @Volatile private var callGeneration: Long = 0L
 
+    // Anti-thrash latch for the far-party call-audio tap. The iPhone AG re-emits
+    // DIALING/ALERTING (and sometimes INCOMING/WAITING) for a call that is already
+    // connected, which would bounce phase ACTIVE -> OUTGOING_DIALING and flap the tap
+    // mid-utterance. A connected call never legitimately returns to a pre-active state,
+    // so once a callId has reached ACTIVE we record it here and ignore backward
+    // transitions for that same callId until the call really ends. Set when phase
+    // becomes ACTIVE (both enterActive() and the resync path) for a known callId;
+    // cleared in reset(), which every path to IDLE runs -- so the latch can never
+    // outlive the call. Value -1 means "no active call latched". Read on the binder
+    // callback thread; @Volatile for visibility with the main-looper reads elsewhere.
+    @Volatile private var activeLatchedCallId: Int = -1
+
+    /** Latch the current call as connected so backward transitions for its id are
+     *  ignored. Only latches a known id; a -1 (AG omitted the id) is left unlatched. */
+    private fun latchActiveCall() {
+        if (currentCallId >= 0) activeLatchedCallId = currentCallId
+    }
+
     private fun cancelPendingScoDrop() {
         pendingScoDrop?.let {
             mainHandler.removeCallbacks(it)
@@ -377,6 +395,25 @@ class CallController : BtManagerBridge.CallListener {
             looked
         }
 
+        // Anti-thrash: the iPhone AG re-emits DIALING/ALERTING (and sometimes
+        // INCOMING/WAITING) for an already-connected call, which would bounce phase
+        // ACTIVE -> OUTGOING_DIALING and flap the far-party call-audio tap mid-utterance.
+        // A connected call never legitimately returns to a pre-active state, so once
+        // this callId has reached ACTIVE we ignore backward transitions for it. Real
+        // call-end (STATE_TERMINATED) and the SCO-drop grace still end the call; HELD is
+        // not suppressed (hold/unhold keeps the audio route). A pre-active event for a
+        // DIFFERENT callId is a genuinely new call (or call-waiting) and passes through,
+        // because the latch is keyed on callId.
+        if (phase == CallPhase.ACTIVE &&
+            activeLatchedCallId >= 0 &&
+            callId == activeLatchedCallId &&
+            (state == STATE_INCOMING || state == STATE_WAITING ||
+                state == STATE_DIALING || state == STATE_ALERTING)) {
+            Log.i(TAG, "event=call_state_backward_ignored id=$callId state=$stateName (already active)")
+            log("ignoring spurious $stateName for active call id=$callId")
+            return@section
+        }
+
         when (state) {
             STATE_INCOMING, STATE_WAITING -> enterIncoming()
             STATE_DIALING, STATE_ALERTING -> enterDialing()
@@ -525,6 +562,9 @@ class CallController : BtManagerBridge.CallListener {
         cancelPendingScoDrop()
         callGeneration++
         phase = CallPhase.ACTIVE
+        // Latch the connected call so later spurious backward transitions for the same
+        // callId are ignored (see onCallStateChanged).
+        latchActiveCall()
         startedElapsedRealtime = SystemClock.elapsedRealtime()
         Log.i(TAG, "event=phase_transition from=$prev to=ACTIVE addr=$currentAddr id=$currentCallId scoActive=$scoActive")
         log("phase -> ACTIVE")
@@ -567,6 +607,7 @@ class CallController : BtManagerBridge.CallListener {
         micMuted = false
         lastCallKey = -1L
         lastAudioKey = ""
+        activeLatchedCallId = -1
     }
 
     // ---- Side effects ----
@@ -799,6 +840,10 @@ class CallController : BtManagerBridge.CallListener {
             STATE_ACTIVE -> {
                 if (phase != CallPhase.ACTIVE) {
                     phase = CallPhase.ACTIVE
+                    // Latch the same as enterActive() so the anti-thrash guard also
+                    // covers a call that first became ACTIVE via resync (e.g. unfold-
+                    // restore of a call that connected while folded).
+                    latchActiveCall()
                     // We missed the real call start; use now() as an approximation.
                     startedElapsedRealtime = SystemClock.elapsedRealtime()
                     Log.i(TAG, "event=phase_transition from=resync to=ACTIVE approx_start=$startedElapsedRealtime")
