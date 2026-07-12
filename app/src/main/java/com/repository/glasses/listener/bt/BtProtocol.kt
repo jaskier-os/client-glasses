@@ -57,6 +57,14 @@ object BtProtocol {
     const val CH_TRANSLATION_RESULT = "listener_trans_result"
     const val CH_TRANSLATION_CONFIG = "listener_trans_config"
 
+    // Phone -> glasses desired translation on/off state (authoritative reconciliation).
+    // The phone owns translationMode; the glasses reconcile their translationFrontMicRecorder
+    // to match. Heals any lost edge-triggered start_translation/stop_translation command
+    // (fire-and-forget RFCOMM can drop, esp. during the reconnect burst). Sent on glasses
+    // connect, whenever translationMode changes, and periodically while translation is active.
+    // Single JSON arg: {active, from, to, fromNllb, toNllb, fontSize, twoWay}.
+    const val CH_TRANSLATION_STATE = "listener_trans_state"
+
     // Glasses -> phone mic audio (raw PCM16LE, Base64 encoded)
     const val CH_AUDIO_DATA = "listener_audio_data"
 

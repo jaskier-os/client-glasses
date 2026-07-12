@@ -40,6 +40,9 @@ class GlassesBtClient(private val relay: MessageRelay) {
         fun onChatHistory(conversationId: String, turnsJson: String)
         fun onTranslationResult(resultJson: String)
         fun onTranslationConfig(configJson: String)
+        /** Authoritative desired translation on/off state from phone. Single JSON arg:
+         *  {active, from, to, fromNllb, toNllb, fontSize, twoWay}. */
+        fun onTranslationState(stateJson: String) {}
         fun onPartialText(text: String)
         fun onUserText(requestId: String, text: String)
         fun onReidResult(trackingId: String, recognized: Boolean, personUid: String, displayName: String, score: Float)
@@ -198,6 +201,11 @@ class GlassesBtClient(private val relay: MessageRelay) {
                     val configJson = args.getOrElse(0) { "{}" }
                     remoteLog?.invoke("Translation config received: $configJson")
                     listener?.onTranslationConfig(configJson)
+                }
+                BtProtocol.CH_TRANSLATION_STATE -> {
+                    val stateJson = args.getOrElse(0) { "{}" }
+                    remoteLog?.invoke("Translation state received: $stateJson")
+                    listener?.onTranslationState(stateJson)
                 }
                 BtProtocol.CH_GLASSES_PARTIAL_TEXT -> {
                     val text = args.getOrElse(0) { "" }

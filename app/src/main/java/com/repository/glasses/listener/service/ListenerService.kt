@@ -5142,8 +5142,9 @@ class ListenerService : LifecycleService(),
         notifHandler.removeCallbacks(replyResultTimeoutRunnable)
 
         // Stop translation recorders so they don't keep sending into a dead
-        // RFCOMM channel. On reconnect the phone re-sends start_translation
-        // which creates fresh recorder instances.
+        // RFCOMM channel. On reconnect the phone re-asserts the desired translation
+        // state over CH_TRANSLATION_STATE, which reconcileTranslation acts on to
+        // recreate the recorder if translation should still be active.
         stopFrontMicForTranslation()
         BeamformController.setScene(BeamformController.SCENE_IDLE)
 
@@ -6453,9 +6454,12 @@ class ListenerService : LifecycleService(),
                 BeamformController.setScene(BeamformController.SCENE_CARDIOID)
                 // Assistant always uses dual-mic capture: front beam = interlocutor,
                 // inward ch0 = wearer. Same recorder path as two-way translation.
+                // Claim ownership (assistantActive) BEFORE starting the shared recorder so a
+                // concurrent reconcileTranslation(desiredActive=false) can never see the fresh
+                // recorder with the flag still clear and stop the assistant's mic.
+                assistantActive = true
                 startFrontMicForTranslation(twoWay = true)
                 assistantCardOverlay.hideAll()
-                assistantActive = true
                 btClient.sendCommandResult(requestId, """{"status":"started"}""")
             }
             "stop_assistant" -> {
@@ -6913,6 +6917,87 @@ class ListenerService : LifecycleService(),
             setPackage(packageName)
             putExtra(EXTRA_TRANSLATION_CONFIG, configJson)
         })
+    }
+
+    /**
+     * Authoritative desired translation on/off state from the phone. The phone owns
+     * translationMode; here we reconcile our actual recorder to match. This heals a
+     * dropped edge-triggered start_translation/stop_translation command (fire-and-forget
+     * RFCOMM can lose a frame, especially in the reconnect burst) that otherwise leaves
+     * the front mic stuck holding the 8ch HAL. Idempotent: a no-op when already matching.
+     */
+    override fun onTranslationState(stateJson: String) {
+        try {
+            val obj = org.json.JSONObject(stateJson)
+            val desiredActive = obj.optBoolean("active", false)
+            val from = obj.optString("from", "")
+            val to = obj.optString("to", "")
+            val fontSize = obj.optInt("fontSize", 14)
+            val twoWay = obj.optBoolean("twoWay", false)
+            reconcileTranslation(desiredActive, from, to, fontSize, twoWay)
+        } catch (e: Exception) {
+            btErr("onTranslationState parse failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Reconcile the translation front-mic recorder to the phone's desired state.
+     * Mirrors reconcileMicStream: start if it should be on and isn't, stop if it should
+     * be off and is. Never touches the recorder while the assistant owns it
+     * (assistantActive), since both share startFrontMicForTranslation/stopFrontMicForTranslation.
+     */
+    private fun reconcileTranslation(
+        desiredActive: Boolean,
+        from: String,
+        to: String,
+        fontSize: Int,
+        twoWay: Boolean
+    ) {
+        if (assistantActive) {
+            // The assistant owns the front mic; the phone's translation state must not
+            // yank it. Assistant lifecycle is driven by its own start/stop commands.
+            return
+        }
+        val actuallyActive = translationFrontMicRecorder != null
+        if (desiredActive == actuallyActive) return
+
+        if (desiredActive) {
+            btLog("reconcileTranslation: phone wants translation ON, recorder was off -- starting")
+            BeamformController.remoteLog = { btLog(it) }
+            BeamformController.init(this)
+            BeamformController.setScene(BeamformController.SCENE_CARDIOID)
+            if (from.isNotEmpty()) GlassesConfig.setTranslationFromLanguage(this, from)
+            if (to.isNotEmpty()) GlassesConfig.setTranslationToLanguage(this, to)
+            if (fontSize > 0) GlassesConfig.setTranslationFontSize(this, fontSize)
+            GlassesConfig.setTranslationTwoWay(this, twoWay)
+            startFrontMicForTranslation(twoWay)
+            ensureActivityRunning(android.os.Bundle().apply {
+                putBoolean("start_translation", true)
+            })
+            if (from.isNotEmpty() && to.isNotEmpty()) {
+                val cfgJson = JSONObject().apply {
+                    put("fromLanguage", from)
+                    put("toLanguage", to)
+                    put("fontSize", fontSize)
+                }.toString()
+                sendBroadcast(Intent(ACTION_TRANSLATION_CONFIG).apply {
+                    setPackage(packageName)
+                    putExtra(EXTRA_TRANSLATION_CONFIG, cfgJson)
+                })
+            }
+            sendBroadcast(Intent(ACTION_TRANSLATION_STATE).apply {
+                setPackage(packageName)
+                putExtra(EXTRA_TRANSLATION_ACTIVE, true)
+            })
+        } else {
+            btLog("reconcileTranslation: phone wants translation OFF, recorder was on -- stopping")
+            BeamformController.setScene(BeamformController.SCENE_IDLE)
+            stopFrontMicForTranslation()
+            sendBroadcast(Intent(ACTION_TRANSLATION_STATE).apply {
+                setPackage(packageName)
+                putExtra(EXTRA_TRANSLATION_ACTIVE, false)
+            })
+        }
     }
 
     // Translation audio: 8ch AudioRecord extracts both front (CAE beamformed, sent
