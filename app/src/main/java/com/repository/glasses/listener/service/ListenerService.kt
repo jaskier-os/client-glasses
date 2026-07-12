@@ -2758,6 +2758,16 @@ class ListenerService : LifecycleService(),
                 @Suppress("UnspecifiedRegisterReceiverFlag")
                 registerReceiver(callControlReceiver, callFilter)
             }
+            // React to SCO call-audio transitions (CallController + the debug path both
+            // broadcast ACTION_CALL_UI_STATE with a scoActive extra) to gate/relay the
+            // far-party call downlink for translation.
+            val callAudioFilter = IntentFilter(ACTION_CALL_UI_STATE)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(callAudioStateReceiver, callAudioFilter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(callAudioStateReceiver, callAudioFilter)
+            }
             val debugCallFilter = IntentFilter().apply {
                 addAction(ACTION_DEBUG_CALL_SHOW_INCOMING)
                 addAction(ACTION_DEBUG_CALL_SHOW_ACTIVE)
@@ -6935,6 +6945,11 @@ class ListenerService : LifecycleService(),
             val fontSize = obj.optInt("fontSize", 14)
             val twoWay = obj.optBoolean("twoWay", false)
             reconcileTranslation(desiredActive, from, to, fontSize, twoWay)
+            // The phone only wants the far-party call downlink when translating with the
+            // "system" audio source. Update our gate and re-run the call-audio reconcile so
+            // a source switch mid-call takes effect without waiting for an SCO transition.
+            phoneWantsCallAudio = obj.optBoolean("wantsCallAudio", false)
+            reconcileCallAudio(callController.scoActive)
         } catch (e: Exception) {
             btErr("onTranslationState parse failed: ${e.message}")
         }
@@ -7010,6 +7025,10 @@ class ListenerService : LifecycleService(),
         }
         translationFrontMicRecorder = com.repository.glasses.listener.capture.TranslationFrontMicRecorder(btClient).apply {
             remoteLog = { btLog(it) }
+            // Seed the call-downlink tap in case a call is already active when translation
+            // starts. The phone's pushTranslationState on start will also arrive and run
+            // reconcileCallAudio, but seeding here avoids a first-block gap.
+            callAudioActive = callController.scoActive && phoneWantsCallAudio
             start(twoWay)
         }
     }
@@ -7213,6 +7232,46 @@ class ListenerService : LifecycleService(),
     private val tabChangedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             currentTabId = intent.getStringExtra(EXTRA_TAB_ID) ?: "CHAT"
+        }
+    }
+
+    /** Last call-audio-active state relayed to the phone, to avoid redundant CH_CALL_STATE sends. */
+    @Volatile private var lastRelayedCallAudioActive = false
+
+    /**
+     * Whether the phone currently wants the far-party call downlink (it is translating with
+     * the "system" audio source). Relayed via CH_TRANSLATION_STATE. Gates the c6 tap so a
+     * "glasses" source translation keeps its front beam during a call.
+     */
+    @Volatile private var phoneWantsCallAudio = false
+
+    private val callAudioStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != ACTION_CALL_UI_STATE) return
+            reconcileCallAudio(intent.getBooleanExtra("scoActive", false))
+        }
+    }
+
+    /**
+     * Reconcile the far-party call-downlink tap. The glasses are the HFP hands-free
+     * endpoint, so scoActive means far-party audio is on the 8ch array's echo channel.
+     * Tap it only when SCO is up AND translation is running (the recorder owns the 8ch
+     * buffer we read from) AND the phone actually wants call audio (it is translating the
+     * "system" source). Relay call-audio-active (not raw SCO) to the phone so it flips to
+     * the "call" sub-source only when audio will really flow -- otherwise a background call
+     * would freeze the phone's system-playback captions.
+     */
+    private fun reconcileCallAudio(scoActive: Boolean) {
+        val recorder = translationFrontMicRecorder
+        val tapActive = scoActive && recorder != null && phoneWantsCallAudio
+        if (recorder != null && recorder.callAudioActive != tapActive) {
+            recorder.callAudioActive = tapActive
+            btLog("CallAudio: tap ${if (tapActive) "enabled" else "disabled"} (sco=$scoActive, wantsCallAudio=$phoneWantsCallAudio)")
+        }
+        if (tapActive != lastRelayedCallAudioActive) {
+            lastRelayedCallAudioActive = tapActive
+            btClient.sendCallState(tapActive)
+            btLog("CallAudio: relayed call-audio-active to phone ($tapActive)")
         }
     }
 
@@ -9003,6 +9062,7 @@ class ListenerService : LifecycleService(),
         try { photoPreviewOverlay?.destroy() } catch (_: Exception) {}
         try { unregisterReceiver(callControlReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(debugCallReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(callAudioStateReceiver) } catch (_: Exception) {}
         try { callController.stop() } catch (_: Exception) {}
         try { batteryReporter?.stop() } catch (_: Exception) {}
         try { glassesBatteryMonitor?.stop(this) } catch (_: Exception) {}

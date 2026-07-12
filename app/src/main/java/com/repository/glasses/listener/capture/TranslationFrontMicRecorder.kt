@@ -35,6 +35,25 @@ class TranslationFrontMicRecorder(
     @Volatile private var usingCae = false
     @Volatile private var twoWayActive = false
 
+    /**
+     * When true, the far-party HFP call downlink (the 8ch array's hardware-echo channel)
+     * is extracted per block and streamed to the phone over CH_AUDIO_DATA_CALL, and the
+     * front-beam send is suspended (the wearer's near-party beam is out of scope for the
+     * phone's "system audio" translation during a call). Set by ListenerService on SCO
+     * transitions, gated on translation being active. Only effective on the 8ch CAE path
+     * (the 4ch fallback mask does not include the echo channel). Volatile: written on the
+     * main thread, read on the audio thread.
+     */
+    @Volatile var callAudioActive = false
+
+    /**
+     * Which raw 8ch channel carries the hardware echo / SCO downlink. Confirmed by ear to
+     * be c6 (c7 is the second echo channel). Left as a runtime-flippable var so the c6-vs-c7
+     * choice can be verified on-device during a live call without a rebuild.
+     */
+    @Volatile var callEchoChannel = 6
+    private var callFallbackWarned = false
+
     /* -- JNI: CAE beamformer -- */
     private external fun nativeCaeInit(workDir: String): Boolean
     private external fun nativeCaeProcess(input6ch: ByteArray): ByteArray?
@@ -176,6 +195,8 @@ class TranslationFrontMicRecorder(
             val rawBuf = ByteArray(CAE_BLOCK_BYTES_8CH)
             val sixChBuf = ByteArray(CAE_BLOCK_BYTES_6CH)
             val inwardBuf = if (twoWayActive) ByteArray(INWARD_BLOCK_BYTES) else null
+            // Reused mono buffer for the far-party call downlink (echo channel).
+            val callBuf = ByteArray(INWARD_BLOCK_BYTES)
             var consecutiveZeroBlocks = 0
             var deadMicRetried = false
             var currentRec: AudioRecord = initialRec
@@ -252,6 +273,21 @@ class TranslationFrontMicRecorder(
                     btClient.sendInwardAudioData(b64Inward)
                 }
 
+                /* Extract the far-party call downlink (echo channel, raw 8ch index
+                 * callEchoChannel = 6) per block while a call is active. Loud and clean
+                 * already, so no gain. Mirrors the ch0 inward extraction above. */
+                if (callAudioActive) {
+                    val ch = callEchoChannel
+                    for (i in 0 until CAE_BLOCK_FRAMES) {
+                        val srcIdx = (i * NUM_CHANNELS_8 + ch) * BYTES_PER_SAMPLE
+                        val dstIdx = i * BYTES_PER_SAMPLE
+                        callBuf[dstIdx] = rawBuf[srcIdx]
+                        callBuf[dstIdx + 1] = rawBuf[srcIdx + 1]
+                    }
+                    val b64Call = Base64.encodeToString(callBuf, Base64.NO_WRAP)
+                    btClient.sendCallAudioData(b64Call)
+                }
+
                 /* Extract channels [2,3,4,5,6,7] from 8ch interleaved */
                 for (f in 0 until CAE_BLOCK_FRAMES) {
                     for (c in 0 until CAE_INPUT_CHANNELS) {
@@ -262,7 +298,11 @@ class TranslationFrontMicRecorder(
                     }
                 }
 
-                /* Feed to CAE -- returns beamformed mono PCM or null if no output yet */
+                /* Feed to CAE -- returns beamformed mono PCM or null if no output yet.
+                 * Keep the beamformer warm even during a call, but do NOT send the front
+                 * beam while call audio is active: the front beam is the wearer's near
+                 * party, which is out of scope for the phone's "system audio" translation,
+                 * and suspending it halves RFCOMM load during the call. */
                 val beamOutput = try {
                     nativeCaeProcess(sixChBuf)
                 } catch (e: Exception) {
@@ -270,8 +310,10 @@ class TranslationFrontMicRecorder(
                     null
                 } ?: continue
 
-                val b64 = Base64.encodeToString(beamOutput, Base64.NO_WRAP)
-                btClient.sendAudioData(b64)
+                if (!callAudioActive) {
+                    val b64 = Base64.encodeToString(beamOutput, Base64.NO_WRAP)
+                    btClient.sendAudioData(b64)
+                }
             }
 
             // If we exited the loop while still supposed to be recording,
@@ -371,6 +413,14 @@ class TranslationFrontMicRecorder(
                     continue
                 } else {
                     consecutiveZeroBlocks = 0
+                }
+
+                // The 4ch fallback mask (0x3C) does not include the echo channel, so the
+                // far-party call downlink is unavailable on this path. Warn once so the
+                // silent-captions cause is diagnosable.
+                if (callAudioActive && !callFallbackWarned) {
+                    callFallbackWarned = true
+                    remoteLog?.invoke("FrontMic: WARNING -- call audio requested but on 4ch fallback; echo channel unavailable, no call downlink will stream")
                 }
 
                 val chOffset = EXTRACT_CHANNEL * BYTES_PER_SAMPLE
