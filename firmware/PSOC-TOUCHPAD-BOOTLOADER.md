@@ -1,6 +1,6 @@
 # PSoC4000R Touchpad MCU Bootloader Notes
 
-The Rokid AR Lite right-temple touchpad is a **Cypress / Infineon
+The Rokid Glasses right-temple touchpad is a **Cypress / Infineon
 PSoC4000R** capacitive slider MCU on I²C bus 1 @ 0x08. Its firmware is
 flashed in-system via the kernel module `psoc_ts_drv_right.ko`
 (installed at `/system/lib/modules/`, bind-mounted over

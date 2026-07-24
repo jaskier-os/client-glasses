@@ -1,6 +1,6 @@
 #!/system/bin/sh
 #
-# fn-button-daemon -- global function-button capture for Rokid AR Lite.
+# fn-button-daemon -- global function-button capture for Rokid Glasses.
 #
 # Reads /dev/input/event0 (qpnp_pon) via `getevent -lr` and converts button press events
 # into ACTION_FN_KEY broadcasts so the listener app's FunctionButtonHandler can run the

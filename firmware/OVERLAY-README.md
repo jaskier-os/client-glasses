@@ -1,6 +1,6 @@
-# Rokid AR Lite -- DIY Firmware Builder & Overlay Reference
+# Rokid Glasses -- DIY Firmware Builder & Overlay Reference
 
-Scripts in this directory build a rooted `super_4.img` for the Rokid AR Lite
+Scripts in this directory build a rooted `super_4.img` for the Rokid Glasses
 glasses and provide a two-tier file-overlay mechanism. No Magisk, no Xposed,
 no vbmeta modification -- just binary patches to the stock system partition
 plus a small init hook and an `LD_PRELOAD`'d library.
@@ -266,7 +266,7 @@ exist on the device, then reboots:
 - `/sys/devices/soc0/select_image`
 - `/proc/sys/kernel/reboot_mode`
 
-On the Rokid AR Lite (kernel 5.10) only `select_image` and `emmc_dload`
+On the Rokid Glasses (kernel 5.10) only `select_image` and `emmc_dload`
 currently exist. Reboot target `reboot edl` with fallback to plain `reboot`.
 
 ```bash

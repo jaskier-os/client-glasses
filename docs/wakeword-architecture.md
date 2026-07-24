@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Rokid AR Lite listener app runs an always-on wake-word detector entirely on the AP (no DSP/co-processor offload) when `useNativeAcd=false`. The pipeline subscribes to a shared mic bus, runs a Silero VAD gate followed by an openWakeWord ONNX chain (mel -> embedding -> sireneviy classifier), and on a hit fires an in-process broadcast (`ACTION_WAKE_WORD_HIT`) that the listener service consumes to start the BT live-utterance flow. ONNX execution prefers the QNN HTP execution provider with a CPU fallback.
+The Rokid Glasses listener app runs an always-on wake-word detector entirely on the AP (no DSP/co-processor offload) when `useNativeAcd=false`. The pipeline subscribes to a shared mic bus, runs a Silero VAD gate followed by an openWakeWord ONNX chain (mel -> embedding -> sireneviy classifier), and on a hit fires an in-process broadcast (`ACTION_WAKE_WORD_HIT`) that the listener service consumes to start the BT live-utterance flow. ONNX execution prefers the QNN HTP execution provider with a CPU fallback.
 
 Process layout (from `AndroidManifest.xml`):
 

@@ -1,6 +1,6 @@
 # Glasses Client -- Tabs UI & Feature Reference
 
-This document describes every tab/screen in the Rokid AR Lite glasses client, intended as a brief for a designer to redesign each surface against the existing design system (`system.md`, attached at the end).
+This document describes every tab/screen in the Rokid Glasses glasses client, intended as a brief for a designer to redesign each surface against the existing design system (`system.md`, attached at the end).
 
 ## Hardware & input model (read first)
 
@@ -284,7 +284,7 @@ Feel: A whisper projected onto air. Information that materializes and dissolves 
 
 ## Hardware Constraints
 
-Rokid AR Lite monochrome green micro-LED waveguide:
+Rokid Glasses monochrome green micro-LED waveguide:
 - Black (#000000) = pixels OFF = transparent see-through
 - Any non-black pixel = green light emitted at that intensity
 - No color. No gradients that blend to non-black (they glow). Only luminance variation within green channel.

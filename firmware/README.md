@@ -1,6 +1,6 @@
 # firmware
 
-Rooting / flashing tooling for the Rokid AR Lite (glass15 / Qualcomm "neo"). The
+Rooting / flashing tooling for the Rokid Glasses (glass15 / Qualcomm "neo"). The
 large OS images are NOT committed -- they are fetched on demand into a gitignored
 cache.
 

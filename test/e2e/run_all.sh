@@ -469,7 +469,7 @@ main() {
 
     echo
     echo "NOTE: scenarios 14-15 depend on filesync being able to open a LocalOnlyHotspot,"
-    echo "which on Rokid AR Lite (Android 12) requires UID-level appops FINE_LOCATION=allow."
+    echo "which on Rokid Glasses (Android 12) requires UID-level appops FINE_LOCATION=allow."
     echo "That UID mode is locked to 'foreground' for regular-install apps and cannot be"
     echo "overridden via 'appops set --uid <uid> ...'. Installing filesync into /system/priv-app/"
     echo "via the DIY overlay (Recon/rokid-docs/yodaos-root-full/) promotes it to system UID"

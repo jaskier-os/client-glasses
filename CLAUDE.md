@@ -158,15 +158,15 @@ When glasses are connected via USB cable, direct ADB access is available (`adb d
 
 ### Device Info
 
-- **Model:** RG-glasses (Rokid AR Lite, OEM model RV101)
+- **Model:** RG-glasses (Rokid Glasses, OEM model RV101)
 - **Android:** 12 (API 32)
 - **SoC:** Qualcomm ("neo" board), 4x Cortex-A55
 - **RAM:** 1.7 GB
 - **Storage:** 19 GB internal
-- **Display:** 480x640 @ 240dpi, JBD JBD4020 Micro-LED waveguide (right eye), up to 144 Hz
-- **Camera:** 1x front-facing, HAL v3.7, RAW + HDR support
-- **Microphones:** Built-in 8-channel mic (16 kHz, PCM 16-bit) + back mic (mono/stereo, 8k-48k)
-- **Sensors:** ICM-4x6xx IMU (accel + gyro), proximity sensor (UCS146E0, doubles as wear detection), ambient light sensor. No magnetometer.
+- **Display:** 480x640 @ 240dpi, JBD JBD4020 Micro-LED waveguide (right eye), 60 Hz
+- **Camera:** 1x world-facing (back), HAL v3.7
+- **Microphones:** Built-in DMIC array (up to 8 lines wired; default AudioRecord path captures mono 16 kHz PCM 16-bit) + back mic (mono/stereo, 8k-48k)
+- **Sensors:** ICM-4x6xx IMU (accel + gyro), proximity sensor (Sensortek UCS146E0 -- aimed outward, NOT a wear sensor; actual wear detection is the PSoC capacitive channel, see Wear Detection). No magnetometer (Game Rotation Vector only).
 - **BT:** A2DP Sink, HFP HF -- glasses act as audio receiver from phone
 - **WiFi:** 802.11, WiFi Aware, WiFi Direct supported
 
@@ -624,7 +624,7 @@ The orchestrator live-AI WS drivers that feed this end-to-end are in
 
 ## Rokid Waveguide Display Rules
 
-The Rokid AR Lite uses a monochrome green micro-LED waveguide. Black (#000000) = pixels OFF = transparent/see-through. Any non-black pixel = green light emitted. Luminance hierarchy is defined in `Lum.kt` (GLOW > BRIGHT > MID > DIM > SOFT > GHOST > TRACE > black/off).
+The Rokid Glasses use a monochrome green micro-LED waveguide. Black (#000000) = pixels OFF = transparent/see-through. Any non-black pixel = green light emitted. Luminance hierarchy is defined in `Lum.kt` (GLOW > BRIGHT > MID > DIM > SOFT > GHOST > TRACE > black/off).
 
 **Required attributes for any scrollable/focusable View (RecyclerView, ScrollView, etc.):**
 ```xml
@@ -652,14 +652,14 @@ android:scrollbars="none"
 
 ### Hardware Inputs
 
-Two physical inputs on the Rokid AR Lite. No volume buttons exist on these glasses.
+Two physical inputs on the Rokid Glasses. There is no volume rocker, though the power/functional button does generate a `KEY_VOLUMEDOWN` keycode at the kernel level.
 
 **Touch sensor** -- capacitive touchpad on right temple. Swipe gestures translate to DPAD keycodes:
 - Swipe forward: `KEYCODE_DPAD_RIGHT` (22)
 - Swipe back: `KEYCODE_DPAD_LEFT` (21)
 - Tap: `KEYCODE_DPAD_CENTER` (23) / `KEYCODE_ENTER`
 
-**Functional button** -- physical button on the glasses frame. Generates `KEYCODE_CAMERA` (27). Currently passed through to Rokid OS (not consumed by the app).
+**Functional button** -- physical button on the glasses frame (`qpnp_pon`, `/dev/input/event0`). Kernel emits `KEY_MENU` + `KEY_VOLUMEDOWN`. Currently passed through to Rokid OS (not consumed by the app).
 
 ### Key Input Mapping
 

@@ -1,6 +1,6 @@
 // JNI bridge to Rokid's HblVad implementation in /system/lib64/librokid_agc.so.
 //
-// HblVad is a tiny (~419 KB) classical-DSP VAD shipped on the Rokid AR Lite as
+// HblVad is a tiny (~419 KB) classical-DSP VAD shipped on the Rokid Glasses as
 // part of librokid_agc.so. It runs at fixed 16 kHz / 20 ms frames (mode=6) and
 // returns a per-frame speech/silence decision with effectively zero CPU cost
 // compared to silero_vad.onnx (~50 MB ONNX session, multi-ms inference per

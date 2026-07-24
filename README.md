@@ -123,7 +123,7 @@ These are the subprojects listed in `settings.gradle.kts`.
   `embedding_model.onnx`, `melspectrogram.onnx`) and includes scripts to record,
   synthesize, augment, and evaluate samples (`train_pipeline.py`, `record_samples.py`,
   `test_live.py`, etc.).
-- **`firmware/`** -- Rooting and flashing tooling for the Rokid AR Lite (Qualcomm
+- **`firmware/`** -- Rooting and flashing tooling for the Rokid Glasses (Qualcomm
   "neo"). `fetch-os.sh` downloads and extracts stock OTA images into a gitignored
   cache; `root-firmware.sh` builds the rooted `super_4.img` (root,
   SELinux-permissive, the diy-overlay engine, patched touchpad driver, and the

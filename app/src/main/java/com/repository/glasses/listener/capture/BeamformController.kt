@@ -6,7 +6,7 @@ import java.io.File
 import java.util.zip.ZipFile
 
 /**
- * Controls the Rokid AR Lite mic array beamforming via the native libaudigent.so.
+ * Controls the Rokid Glasses mic array beamforming via the native libaudigent.so.
  *
  * The library is extracted from RokidSpriteAssistServer.apk at first use.
  * It talks to the RT600 DSP chip via /dev/rt600_spidev (world-accessible).

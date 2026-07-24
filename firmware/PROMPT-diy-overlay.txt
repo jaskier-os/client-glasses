@@ -1,4 +1,4 @@
-SYSTEM PROMPT: Build a Magisk-style File Overlay for Rokid AR Lite Glasses
+SYSTEM PROMPT: Build a Magisk-style File Overlay for Rokid Glasses Glasses
 ================================================================================
 
 ROLE

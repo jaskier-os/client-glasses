@@ -1,5 +1,5 @@
 /*
- * app_process64 wrapper for Rokid AR Lite glasses.
+ * app_process64 wrapper for Rokid Glasses glasses.
  *
  * Bind-mounted over /system/bin/app_process64 by the DIY overlay. On every
  * exec (i.e. every Zygote spawn) it dlopen()'s libsinkconn_hook.so then execve()'s

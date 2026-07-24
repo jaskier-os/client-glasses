@@ -66,7 +66,7 @@ class LowLightCapturer(private val context: Context, private val cameraSession: 
         private const val MODEL_OUT_W = MODEL_IN_W * 2  // 4032
         private const val PACKED_SIZE = 4 * MODEL_IN_H * MODEL_IN_W
 
-        // Sensor calibration constants (Rokid AR Lite Bayer sensor).
+        // Sensor calibration constants (Rokid Glasses Bayer sensor).
         private const val BLACK_LEVEL = 64f
         private const val WHITE_LEVEL = 1023f
 

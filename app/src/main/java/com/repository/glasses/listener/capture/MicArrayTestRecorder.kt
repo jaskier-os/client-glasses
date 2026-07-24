@@ -10,7 +10,7 @@ import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Records all 8 channels of the Rokid AR Lite mic array to a raw PCM file.
+ * Records all 8 channels of the Rokid Glasses mic array to a raw PCM file.
  *
  * The Built-In Mic on this device supports AUDIO_CHANNEL_IN_8 at 16kHz.
  * Output: interleaved 8-channel 16-bit PCM at 16kHz.

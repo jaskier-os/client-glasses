@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# root-firmware.sh -- build the rooted super_4.img for the Rokid AR Lite.
+# root-firmware.sh -- build the rooted super_4.img for the Rokid Glasses.
 #
 # See OVERLAY-README.md for the architecture overview. This script is the
 # single source of truth for what ends up baked into the system partition:

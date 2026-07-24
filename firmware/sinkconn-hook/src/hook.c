@@ -1,5 +1,5 @@
 /*
- * libsinkconn_hook.so -- runtime A2DP sink_conn uncap for Rokid AR Lite.
+ * libsinkconn_hook.so -- runtime A2DP sink_conn uncap for Rokid Glasses.
  *
  * Loaded via `setenv LD_PRELOAD /system/lib64/libsinkconn_hook.so` on the
  * zygote service. Inherits into every zygote-forked app process.

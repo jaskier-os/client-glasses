@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Live-stream glasses microphones to PC speakers for testing.
 #
-# Rokid AR Lite mic routing (determined by channel count, NOT AudioSource):
+# Rokid Glasses mic routing (determined by channel count, NOT AudioSource):
 #   INWARD (back/temple) mic: AudioRecord MONO at 16kHz -- captures the WEARER
 #   FRONT (outward array) mic: AudioRecord 4-channel at 16kHz -- captures person you FACE
 #

@@ -105,7 +105,7 @@ Possible sources:
 1. **Open-source AGM/PAL** on CodeLinaro / Qualcomm's GitHub mirrors. Search
    for `vendor/qcom/opensource/pal` or `agm-aosp`. The header layout has been
    open-sourced by Qualcomm in some BSP drops.
-2. **Qualcomm BSP source drop** for the SoC variant on the Rokid AR Lite
+2. **Qualcomm BSP source drop** for the SoC variant on the Rokid Glasses
    ("neo" board, per CLAUDE.md). Would require vendor agreement with
    Rokid/Qualcomm.
 3. **Reverse-engineer** from the `libpalclient.so` binary plus the equivalent

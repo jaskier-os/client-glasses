@@ -6,7 +6,7 @@ import android.content.Intent
 
 /**
  * Detects glasses screen ON/OFF to control audio streaming.
- * Rokid AR Lite has no keyguard, so ACTION_SCREEN_ON = fully active.
+ * Rokid Glasses has no keyguard, so ACTION_SCREEN_ON = fully active.
  */
 class ScreenStateReceiver : BroadcastReceiver() {
 

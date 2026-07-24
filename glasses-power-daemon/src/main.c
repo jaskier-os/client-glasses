@@ -1112,7 +1112,7 @@ int main(int argc, char **argv) {
     // Push the configured screen-off timeout into Android's PowerManager
     // settings. This is the actual mechanism that makes the screen sleep --
     // the daemon's own ACTION_LOCK_SCREEN broadcast fires at the same
-    // threshold but on a Rokid AR Lite (no lock screen) it's effectively a
+    // threshold but on a Rokid Glasses (no lock screen) it's effectively a
     // no-op. The fold-power-off path is unaffected: when folded, the daemon
     // arms power_timeout_s independently, and the immediate fold-lock
     // broadcast still fires.

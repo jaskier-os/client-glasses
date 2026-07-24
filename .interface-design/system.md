@@ -10,7 +10,7 @@
 
 ## Hardware Constraints
 
-Rokid AR Lite monochrome green micro-LED waveguide:
+Rokid Glasses monochrome green micro-LED waveguide:
 - Resolution: 480x640 @ 240dpi (density bucket `hdpi`, so 1dp = 1.5px). Right eye only (monocular). Up to 144 Hz.
 - Black (#000000) = pixels OFF = transparent see-through
 - Any non-black pixel = green light emitted at that intensity

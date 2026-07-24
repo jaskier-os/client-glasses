@@ -20,7 +20,7 @@ import org.json.JSONObject
 /**
  * Glasses-side WiFi Direct group owner. One group at a time.
  *
- * Observed Rokid AR Lite quirks driving the choreography below:
+ * Observed Rokid Glasses quirks driving the choreography below:
  * - `p2p_no_group_iface=1` in `/data/vendor/wifi/wpa/p2p_supplicant.conf` -> the GO reuses wlan0;
  *   there is no separate p2p0 netns and wpa_cli can't drive it.
  * - CN regulatory domain disables most 5 GHz channels -> force 2.4 GHz.

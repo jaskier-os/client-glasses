@@ -1,6 +1,6 @@
-# Rokid AR Lite Touchpad -- Hardware & Driver Reference
+# Rokid Glasses Touchpad -- Hardware & Driver Reference
 
-Reference for the capacitive touch sensor on the right temple of the Rokid AR Lite glasses. Captured from a rooted device (Magisk, fw 144) via ADB + sysfs probing on 2026-04-19.
+Reference for the capacitive touch sensor on the right temple of the Rokid Glasses glasses. Captured from a rooted device (Magisk, fw 144) via ADB + sysfs probing on 2026-04-19.
 
 ## Hardware
 

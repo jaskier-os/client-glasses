@@ -2,11 +2,11 @@
 
 ## Problem
 
-Standard Android `AudioRecord` with `CHANNEL_IN_MONO` at 16kHz returns all zeros on Rokid AR Lite glasses. The AudioRecord initializes successfully (`STATE_INITIALIZED`) but the hardware returns silence.
+Standard Android `AudioRecord` with `CHANNEL_IN_MONO` at 16kHz returns all zeros on Rokid Glasses glasses. The AudioRecord initializes successfully (`STATE_INITIALIZED`) but the hardware returns silence.
 
 ## Root Cause
 
-The Rokid AR Lite has a multi-microphone array. The Built-In Mic hardware ONLY supports multi-channel input at 16kHz -- it cannot deliver mono. When `CHANNEL_IN_MONO` is requested, AudioRecord silently fails: it initializes but returns zero-filled buffers.
+The Rokid Glasses has a multi-microphone array. The Built-In Mic hardware ONLY supports multi-channel input at 16kHz -- it cannot deliver mono. When `CHANNEL_IN_MONO` is requested, AudioRecord silently fails: it initializes but returns zero-filled buffers.
 
 ## Solution
 

@@ -1,6 +1,6 @@
 # Glasses firmware flashing -- scripts and procedure
 
-Low-level EDL/QDL flashing for the Rokid AR Lite (glass15 / Qualcomm "neo" SoC).
+Low-level EDL/QDL flashing for the Rokid Glasses (glass15 / Qualcomm "neo" SoC).
 These are the STOCK-image flash helpers; the rooted-image builder is one level up
 (`../root-firmware.sh`). Stock images are not committed -- they live in the OS cache
 fetched by `../fetch-os.sh` into `../os-cache/current/`.
