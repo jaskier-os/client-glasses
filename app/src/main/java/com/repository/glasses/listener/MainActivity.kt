@@ -7058,11 +7058,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         replyArming = replyArming,
         hasActiveReply = activeReplyNotifId != null,
         replySendPending = replySendPending,
-        notificationRepliable = notificationRepliable,
         translationStarting = translationStarting,
         translationActive = translationActive,
-        mouseTracking = dpadHandler.trackingEnabled,
-        nvSliderLocked = nvSliderLocked,
+        mouseTracking = dpadHandler.trackingEnabled || rfcommMouseActive,
+        callPhase = callPhase.name,
     )
 
     /**
@@ -7079,20 +7078,35 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * code path from a remote event to that keycode, by construction rather than by a check.
      */
     override fun onRemoteInput(e: RemoteInputEvent) {
-        val verdict = RemoteActionGate.evaluate(remoteInputSnapshot(), e.action)
-        if (verdict != RemoteActionGate.Denial.ALLOWED) {
-            uiLog("[RemoteInput] refused ${e.action} in $focusState: $verdict")
-            return
-        }
-        when (e.action) {
+        val acted = when (e.action) {
             RemoteAction.SCROLL_STEP -> dispatchRemoteScroll(e.delta)
             // A tap is DPAD_CENTER, the keycode the physical tap actually proxies through as.
             // NUMPAD_2 would be wrong: it is consumed by the release/double-tap branches at the top
             // of onKeyDown and never reaches the focus dispatch at all, so it selects nothing.
-            RemoteAction.TAP -> dispatchRemoteKey(KeyEvent.KEYCODE_DPAD_CENTER)
-            RemoteAction.BACK -> dispatchRemoteKey(KeyEvent.KEYCODE_BACK)
+            RemoteAction.TAP -> dispatchRemoteAction(e.action, KeyEvent.KEYCODE_DPAD_CENTER)
+            RemoteAction.BACK -> dispatchRemoteAction(e.action, KeyEvent.KEYCODE_BACK)
         }
-        showRemoteActiveGlyph()
+        if (acted) showRemoteActiveGlyph()
+    }
+
+    /**
+     * Gate one action against the CURRENT state, then dispatch it if permitted.
+     *
+     * The gate is re-evaluated per synthesized key rather than once per event: a key changes the UI,
+     * and the next key in the same burst is judged against the state the previous one produced.
+     * Evaluating once up front would let a permitted first key walk the UI into a state where the
+     * rest of the burst is no longer permitted, and dispatch them anyway.
+     *
+     * @return true if the key was dispatched.
+     */
+    private fun dispatchRemoteAction(action: RemoteAction, keyCode: Int): Boolean {
+        val verdict = RemoteActionGate.evaluate(remoteInputSnapshot(), action)
+        if (verdict != RemoteActionGate.Denial.ALLOWED) {
+            uiLog("[RemoteInput] refused $action in $focusState: $verdict")
+            return false
+        }
+        dispatchRemoteKey(keyCode)
+        return true
     }
 
     /**
@@ -7102,12 +7116,19 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * The magnitude is bounded independently of anything the producer claimed: a coalesced event
      * legitimately carries several detents, but a single frame must never be able to fling the UI.
      */
-    private fun dispatchRemoteScroll(delta: Int) {
-        if (delta == 0) return
+    private fun dispatchRemoteScroll(delta: Int): Boolean {
+        if (delta == 0) return false
         val keyCode =
             if (delta > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
         val steps = kotlin.math.min(kotlin.math.abs(delta), MAX_REMOTE_SCROLL_STEPS)
-        repeat(steps) { dispatchRemoteKey(keyCode) }
+        var acted = false
+        // Stop at the first refusal: a burst must not carry on after an earlier key moved the UI
+        // somewhere a remote source is not allowed to act.
+        repeat(steps) {
+            if (!dispatchRemoteAction(RemoteAction.SCROLL_STEP, keyCode)) return acted
+            acted = true
+        }
+        return acted
     }
 
     /**

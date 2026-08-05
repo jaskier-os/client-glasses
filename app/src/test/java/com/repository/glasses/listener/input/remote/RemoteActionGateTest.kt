@@ -20,11 +20,10 @@ class RemoteActionGateTest {
         replyArming: Boolean = false,
         activeReply: Boolean = false,
         sendPending: Boolean = false,
-        repliable: Boolean = false,
         translationStarting: Boolean = false,
         translationActive: Boolean = false,
         mouseTracking: Boolean = false,
-        nvLocked: Boolean = false,
+        callPhase: String = "IDLE",
     ) = RemoteActionGate.UiInputSnapshot(
         focusState = focus,
         serviceState = service,
@@ -33,11 +32,10 @@ class RemoteActionGateTest {
         replyArming = replyArming,
         hasActiveReply = activeReply,
         replySendPending = sendPending,
-        notificationRepliable = repliable,
         translationStarting = translationStarting,
         translationActive = translationActive,
         mouseTracking = mouseTracking,
-        nvSliderLocked = nvLocked,
+        callPhase = callPhase,
     )
 
     private fun allowed(s: RemoteActionGate.UiInputSnapshot, a: RemoteAction) =
@@ -197,7 +195,6 @@ class RemoteActionGateTest {
     @Test
     fun `scroll cannot write persisted night vision settings`() {
         assertEquals(false, allowed(snap("NIGHTVISION_FOCUSED"), RemoteAction.SCROLL_STEP))
-        assertEquals(false, allowed(snap("NIGHTVISION_FOCUSED", nvLocked = true), RemoteAction.SCROLL_STEP))
     }
 
     @Test
@@ -269,8 +266,56 @@ class RemoteActionGateTest {
         assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.TAP))
         assertEquals(true, allowed(snap("CHAT_FOCUSED"), RemoteAction.SCROLL_STEP))
         assertEquals(true, allowed(snap("CHAT_FOCUSED"), RemoteAction.BACK))
-        assertEquals(true, allowed(snap("TELEGRAM_LIST_FOCUSED"), RemoteAction.SCROLL_STEP))
-        assertEquals(true, allowed(snap("TELEGRAM_LIST_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("TELEGRAM_TOPICS_FOCUSED"), RemoteAction.SCROLL_STEP))
+        assertEquals(true, allowed(snap("TELEGRAM_TOPICS_FOCUSED"), RemoteAction.TAP))
+    }
+
+    // --- Index hijack: scrolling that re-aims the user's own next tap ---
+
+    @Test
+    fun `scroll cannot re-aim the map onto the stop-journey entry`() {
+        // MAP_FOCUSED scroll moves mapFocusedIndex; one entry opens the stop-journey modal, whose
+        // own scroll then lands on "confirm". Two remote scrolls plus one innocent user tap would
+        // terminate navigation.
+        assertEquals(false, allowed(snap("MAP_FOCUSED"), RemoteAction.SCROLL_STEP))
+        assertEquals(false, allowed(snap("STOP_MODAL"), RemoteAction.SCROLL_STEP))
+    }
+
+    @Test
+    fun `scroll cannot re-aim the teleprompter onto stop`() {
+        assertEquals(false, allowed(snap("TELEPROMPTER_FOCUSED"), RemoteAction.SCROLL_STEP))
+        assertEquals(false, allowed(snap("TELEPROMPTER_FOCUSED"), RemoteAction.TAP))
+    }
+
+    @Test
+    fun `scroll cannot re-select which contact a later voice reply reaches`() {
+        // TELEGRAM_LIST_FOCUSED scroll changes the selected chat, so the user's own subsequent
+        // voice reply would go to a contact the remote source chose.
+        assertEquals(false, allowed(snap("TELEGRAM_LIST_FOCUSED"), RemoteAction.SCROLL_STEP))
+        assertEquals(false, allowed(snap("TELEGRAM_LIST_FOCUSED"), RemoteAction.TAP))
+    }
+
+    // --- Calls, checked on the phase rather than the focus state ---
+
+    @Test
+    fun `an active call refuses everything even though focusState is restored`() {
+        // On CallPhase.ACTIVE the UI deliberately restores the previous focus so the user can keep
+        // navigating while talking. focusState is therefore NEVER CALL_ACTIVE during a live call,
+        // and a gate keyed on focusState alone would permit remote input throughout.
+        for (phase in listOf("INCOMING", "ACTIVE", "ENDING")) {
+            for (action in RemoteAction.values()) {
+                assertEquals(
+                    "$action must be refused during a $phase call",
+                    RemoteActionGate.Denial.REFUSED_STATE,
+                    RemoteActionGate.evaluate(snap("CHAT_FOCUSED", callPhase = phase), action),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `an idle call phase does not block ordinary input`() {
+        assertEquals(true, allowed(snap("CHAT_FOCUSED", callPhase = "IDLE"), RemoteAction.SCROLL_STEP))
     }
 
     @Test

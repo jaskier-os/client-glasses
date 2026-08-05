@@ -33,11 +33,29 @@ import android.os.RemoteException
  * A `linkToDeath` callback is asynchronous: it can land AFTER the replacement UI process has already
  * registered. Clearing unconditionally on death would then kill the healthy new sink. Every
  * transition below is therefore conditional on the binder still being the current one.
+ *
+ * ## Why the router's sink is installed ONCE and never cleared
+ *
+ * The router's `clearSink` guards against a stale caller by comparing sink INSTANCES. That guard is
+ * degenerate here, because this bridge is a singleton and hands the router `this` for every UI
+ * process that ever attaches. A late death callback for a superseded process would therefore pass
+ * the comparison and clear the sink a healthy successor had just installed -- permanently, and
+ * silently, since every later event would simply count as dropped.
+ *
+ * So the bridge registers itself with the router once and stays registered for the service's whole
+ * life. UI presence is tracked HERE, in [current], where the binder identity that distinguishes one
+ * UI process from another is actually available.
  */
 class RemoteInputBridgeService(
     private val router: RemoteInputRouter,
     private val log: (String) -> Unit = {},
 ) : IRemoteInputBridge.Stub(), RemoteInputSink {
+
+    init {
+        // Installed once, for the service's whole life. See the class doc: per-UI-process identity
+        // is tracked here, not in the router, because only this class can see the binder.
+        router.setSink(this)
+    }
 
     private val lock = Any()
 
@@ -87,7 +105,8 @@ class RemoteInputBridgeService(
             try {
                 binder.linkToDeath(recipient, 0)
             } catch (e: RemoteException) {
-                // The peer died between marshalling and here. Nothing to attach.
+                // The peer died between marshalling and here. Nothing to attach, and the router
+                // stays pointed at this bridge, which will now count events as droppedNoSink.
                 log("[RemoteInput] registerSink: peer already dead (${e.message})")
                 return
             }
@@ -96,36 +115,30 @@ class RemoteInputBridgeService(
             deathRecipient = recipient
             log("[RemoteInput] sink attached (binder=${System.identityHashCode(binder)})")
         }
-        // Outside the lock: the router takes its own lock, and holding both invites a deadlock.
-        router.setSink(this)
     }
 
     override fun unregisterSink(sink: IRemoteInputSink?) {
         val binder = sink?.asBinder() ?: return
-        val cleared = synchronized(lock) {
+        synchronized(lock) {
             if (binder != currentBinder) {
                 // A departing screen tearing down after its replacement already registered. Ignore.
                 log("[RemoteInput] unregisterSink ignored: not the current sink")
                 return
             }
             detachCurrentLocked("unregistered")
-            true
         }
-        if (cleared) router.clearSink(this)
     }
 
     private fun onSinkDied(dead: IBinder) {
-        val cleared = synchronized(lock) {
+        synchronized(lock) {
             // Only act if the dead binder is STILL the current one. A late death callback for a
-            // superseded process must not clear the sink its successor just installed.
+            // superseded process must not detach the UI its successor just attached.
             if (dead != currentBinder) {
                 log("[RemoteInput] death of a superseded sink ignored")
                 return
             }
             detachCurrentLocked("died")
-            true
         }
-        if (cleared) router.clearSink(this)
     }
 
     /** Must hold [lock]. Idempotent. */
@@ -144,6 +157,7 @@ class RemoteInputBridgeService(
      */
     fun shutdown() {
         synchronized(lock) { detachCurrentLocked("shutdown") }
+        router.clearSink(this)
     }
 
     // --- RemoteInputSink (called by the router's drain thread) ---

@@ -447,6 +447,27 @@ class RemoteInputRouter(
     }
 
     /**
+     * Drop ONE source's live session, e.g. when that source's transport dropped.
+     *
+     * A transport loss belongs to the device that suffered it. Using [clearAllSessions] for this
+     * would mean one device's Bluetooth drop silently ended every other device's live session --
+     * invisible while there is only one source, and a real defect the moment a second one exists.
+     *
+     * As in [clearAllSessions], the durable sid and sequence floor survive, so a burst captured
+     * before the drop stays unreplayable after it.
+     */
+    fun clearSession(sourceId: String, reason: String) {
+        synchronized(sessionLock) {
+            val state = sources[sourceId] ?: return
+            val session = state.session ?: return
+            persistSeqLocked(state, session.lastSeq)
+            state.session = null
+            log("remote input: session cleared for '$sourceId' ($reason)")
+        }
+        publishStatusAll()
+    }
+
+    /**
      * Forget a source's durable replay state.
      *
      * The only legitimate need for this is a source device that was factory reset, regressing the

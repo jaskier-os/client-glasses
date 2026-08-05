@@ -46,11 +46,18 @@ object RemoteActionGate {
         val replyArming: Boolean,
         val hasActiveReply: Boolean,
         val replySendPending: Boolean,
-        val notificationRepliable: Boolean,
         val translationStarting: Boolean,
         val translationActive: Boolean,
         val mouseTracking: Boolean,
-        val nvSliderLocked: Boolean,
+        /**
+         * The call state machine's own phase, NOT `focusState`.
+         *
+         * Checking `focusState == CALL_ACTIVE` would be worthless: on `CallPhase.ACTIVE` the UI
+         * deliberately RESTORES the previous focus so the user can keep navigating while talking,
+         * so `focusState` is never `CALL_ACTIVE` during a live call. The phase is the only field
+         * that actually tells the truth about a call being up.
+         */
+        val callPhase: String,
     )
 
     /** Why an action was refused. Reported to the source so it can explain the silence. */
@@ -98,18 +105,34 @@ object RemoteActionGate {
         "TAB_NAV",
         "CHAT_FOCUSED",
         "LIST_FOCUSED",
-        "MAP_FOCUSED",
         "MAP_ZOOM_FOCUSED",
-        "STOP_MODAL",
         "STEPS_MODAL",
         "TRANSLATE_FOCUSED",
-        "TELEPROMPTER_FOCUSED",
         "REID_FOCUSED",
         "REID_INTEL_MODAL",
         "TODO_FOCUSED",
-        "TELEGRAM_LIST_FOCUSED",
         "TELEGRAM_TOPICS_FOCUSED",
         "TELEGRAM_CHAT_FOCUSED",
+    )
+
+    /**
+     * States where scrolling only LOOKS harmless.
+     *
+     * Scrolling moves a selection index, and in these states the index is what a subsequent tap
+     * acts on -- so a remote scroll re-aims the user's own next tap at something they did not
+     * choose. `MAP_FOCUSED` scrolls onto the entry that opens the stop-journey modal, whose own
+     * scroll then lands on "confirm"; `TELEPROMPTER_FOCUSED` scrolls onto the control that stops
+     * playback; `TELEGRAM_LIST_FOCUSED` re-selects which contact a later voice reply is sent to.
+     * These are excluded above and enumerated here so the omissions are not mistaken for oversights.
+     */
+    private val SCROLL_DENIED_INDEX_HIJACK = setOf(
+        "MAP_FOCUSED",
+        "STOP_MODAL",
+        "TELEPROMPTER_FOCUSED",
+        "TELEGRAM_LIST_FOCUSED",
+        "NIGHTVISION_FOCUSED",
+        "REID_FACES_FOCUSED",
+        "MUSIC_FOCUSED",
     )
 
     /**
@@ -128,8 +151,6 @@ object RemoteActionGate {
         "MAP_ZOOM_FOCUSED",
         "STEPS_MODAL",
         "REID_INTEL_MODAL",
-        "TELEPROMPTER_FOCUSED",
-        "TELEGRAM_LIST_FOCUSED",
         "TELEGRAM_TOPICS_FOCUSED",
         "TODO_FOCUSED",
     )
@@ -174,6 +195,12 @@ object RemoteActionGate {
 
         if (s.focusState in REFUSED_STATES) return Denial.REFUSED_STATE
 
+        // A call in progress. Checked on the phase, because focusState is restored to whatever the
+        // user was doing as soon as the call goes ACTIVE and so never reports the call.
+        if (s.callPhase == "INCOMING" || s.callPhase == "ACTIVE" || s.callPhase == "ENDING") {
+            return Denial.REFUSED_STATE
+        }
+
         // Armed-but-not-yet-transitioned windows. Each of these reaches microphone or send
         // machinery while focusState still reads as something permitted.
         if (s.replyArming || s.hasActiveReply || s.replySendPending ||
@@ -193,9 +220,7 @@ object RemoteActionGate {
 
         val allowed = when (action) {
             RemoteAction.SCROLL_STEP ->
-                s.focusState in SCROLL_ALLOWED &&
-                    // A locked night-vision slider turns scroll into a settings write.
-                    !(s.focusState == "NIGHTVISION_FOCUSED" && s.nvSliderLocked)
+                s.focusState in SCROLL_ALLOWED && s.focusState !in SCROLL_DENIED_INDEX_HIJACK
 
             RemoteAction.TAP ->
                 s.focusState in TAP_ALLOWED &&

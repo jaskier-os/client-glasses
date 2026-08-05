@@ -30,7 +30,6 @@ import java.io.IOException
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
-import android.os.Binder
 import android.os.Build
 import android.os.Debug
 import android.os.Environment
@@ -2425,15 +2424,29 @@ class ListenerService : LifecycleService(),
                 com.repository.glasses.listener.bt.MessageRelay.INPUT_SERVICE_NAME,
             )
             relay.remoteLog = { btLog(it) }
+            val auth = com.repository.glasses.listener.input.remote.RemoteInputAuth(
+                BuildConfig.REMOTE_INPUT_HMAC_KEY.toByteArray(Charsets.UTF_8)
+            )
+            // Say this once, loudly, at startup. The auth layer fails closed on a short or absent
+            // key, so a misconfigured build rejects 100% of real traffic and the only other trace
+            // is a rate-limited "rejected" line that reads like a transport problem.
+            if (!auth.isConfigured) {
+                btErr(
+                    "Remote input DISABLED: REMOTE_INPUT_HMAC_KEY is absent or shorter than " +
+                        "${com.repository.glasses.listener.input.remote.RemoteInputAuth.MIN_KEY_BYTES} " +
+                        "bytes. Every frame will be rejected."
+                )
+            }
             val source = com.repository.glasses.listener.input.remote.WatchRelaySource(
                 relay = relay,
-                auth = com.repository.glasses.listener.input.remote.RemoteInputAuth(
-                    BuildConfig.REMOTE_INPUT_HMAC_KEY.toByteArray(Charsets.UTF_8)
-                ),
+                auth = auth,
                 clock = { SystemClock.elapsedRealtime() },
                 log = { btLog(it) },
             )
-            source.onTransportLost = { remoteInputRouter.clearAllSessions("input transport lost") }
+            // Scoped to THIS source: another device's session must survive this one's link drop.
+            source.onTransportLost = {
+                remoteInputRouter.clearSession(source.sourceId, "transport lost")
+            }
             // THE registration extension point. A second device is one more registerSource call.
             remoteInputRouter.registerSource(source)
             remoteInputSource = source
@@ -9063,12 +9076,16 @@ class ListenerService : LifecycleService(),
 
     override fun onDestroy() = GT.section("svc.onDestroy") {
         Log.d(TAG_LIFE, "event=onDestroy")
-        remoteInputSource?.let { runCatching { remoteInputRouter.unregisterSource(it) } }
+        // Guarded on the source: if remote-input init failed, these lazies were never built, and
+        // touching them here would construct a router, a prefs store and a thread just to stop them.
+        remoteInputSource?.let { source ->
+            runCatching { remoteInputRouter.unregisterSource(source) }
+            runCatching { remoteInputBridge.shutdown() }
+            runCatching { remoteInputThread.quitSafely() }
+        }
         remoteInputSource = null
         runCatching { remoteInputRelay?.let { it.listener = null; it.stop() } }
         remoteInputRelay = null
-        runCatching { remoteInputBridge.shutdown() }
-        runCatching { remoteInputThread.quitSafely() }
         btLog("Service destroying")
         stopRfcommMouse()
         for (obs in dcimObservers) { try { obs.stopWatching() } catch (_: Throwable) {} }
