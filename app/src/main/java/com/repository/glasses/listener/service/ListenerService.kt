@@ -2447,6 +2447,10 @@ class ListenerService : LifecycleService(),
             source.onTransportLost = {
                 remoteInputRouter.clearSession(source.sourceId, "transport lost")
             }
+            // A reconnecting device has missed every transition that happened while it was gone.
+            source.onReconnected = {
+                runCatching { source.onSinkAttached(remoteInputBridge.sinkAttached) }
+            }
             // THE registration extension point. A second device is one more registerSource call.
             remoteInputRouter.registerSource(source)
             // Seed the new source with the CURRENT sink state rather than leaving it on a default

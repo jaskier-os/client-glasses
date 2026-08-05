@@ -6894,6 +6894,19 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private var pendingRemoteDoubleTap: Boolean? = null
 
     /**
+     * Arm the double-tap window for the NEXT press, as the tab-entry branches do.
+     *
+     * A no-op for remote input. The window is a touchpad-clock quantity, and a remote tap that
+     * stamped it would make the user's next PHYSICAL tap read as a double -- exactly the cross-talk
+     * the origin split exists to prevent. Remote taps carry their own interval from the source, so
+     * they need no armed window here.
+     */
+    private fun armDoubleTapWindow() {
+        if (currentInputOrigin == InputOrigin.REMOTE) return
+        lastCenterPressTime = SystemClock.elapsedRealtime()
+    }
+
+    /**
      * Origin of the key currently being dispatched.
      *
      * A field rather than an `onKeyDown` parameter because `onKeyDown` is an Android override whose
@@ -7134,7 +7147,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 // Refused, or consumed by a branch that never calls isDoubleTap(): drop the verdict
                 // rather than let it apply to some later press.
                 pendingRemoteDoubleTap = null
-                if (dispatched) showDoubleTapHintPersistent()
                 dispatched
             }
             RemoteAction.BACK -> dispatchRemoteAction(e.action, KeyEvent.KEYCODE_BACK)
@@ -7191,11 +7203,14 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * touchpad stay behaviourally identical for free, and they cannot drift apart later.
      */
     private fun dispatchRemoteKey(keyCode: Int) {
+        // Save and restore rather than resetting to TOUCHPAD: if a handler ever synthesizes another
+        // key, restoring a literal would silently misattribute the rest of the outer dispatch.
+        val previous = currentInputOrigin
         currentInputOrigin = InputOrigin.REMOTE
         try {
             onKeyDown(keyCode, KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
         } finally {
-            currentInputOrigin = InputOrigin.TOUCHPAD
+            currentInputOrigin = previous
         }
     }
 
@@ -7632,29 +7647,29 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                         when (activeTabs.getOrNull(currentTab)) {
                             TabId.TELEPROMPTER -> {
-                                lastCenterPressTime = SystemClock.elapsedRealtime()
+                                armDoubleTapWindow()
                                 tpFocusedIndex = 1  // start at content
                                 focusState = FocusState.TELEPROMPTER_FOCUSED
                                 teleprompterController?.resume()
                                 updateFocusVisual(focusState)
                             }
                             TabId.MAP -> {
-                                lastCenterPressTime = SystemClock.elapsedRealtime()
+                                armDoubleTapWindow()
                                 focusState = FocusState.MAP_FOCUSED
                                 updateFocusVisual(focusState)
                             }
                             TabId.TRANSLATE -> {
-                                lastCenterPressTime = SystemClock.elapsedRealtime()
+                                armDoubleTapWindow()
                                 focusState = FocusState.TRANSLATE_FOCUSED
                                 updateFocusVisual(focusState)
                             }
                             TabId.REID -> {
-                                lastCenterPressTime = SystemClock.elapsedRealtime()
+                                armDoubleTapWindow()
                                 focusState = FocusState.REID_FOCUSED
                                 updateFocusVisual(focusState)
                             }
                             TabId.TODO -> {
-                                lastCenterPressTime = SystemClock.elapsedRealtime()
+                                armDoubleTapWindow()
                                 focusState = FocusState.TODO_FOCUSED
                                 todoFocusLevel = 0  // start at sub-tab switcher
                                 todoChecklistAdapter.setFocused(false)
@@ -7663,7 +7678,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                                 updateFocusVisual(focusState)
                             }
                             TabId.NIGHTVISION -> {
-                                lastCenterPressTime = SystemClock.elapsedRealtime()
+                                armDoubleTapWindow()
                                 focusState = FocusState.NIGHTVISION_FOCUSED
                                 updateFocusVisual(focusState)
                             }
@@ -7672,24 +7687,24 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                                 updateFocusVisual(focusState)
                             }
                             TabId.MUSIC -> {
-                                lastCenterPressTime = SystemClock.elapsedRealtime()
+                                armDoubleTapWindow()
                                 focusState = FocusState.MUSIC_FOCUSED
                                 updateFocusVisual(focusState)
                             }
                             TabId.CHAT -> {
                                 if (chatAdapter.itemCount > 0) {
-                                    lastCenterPressTime = SystemClock.elapsedRealtime()
+                                    armDoubleTapWindow()
                                     focusState = FocusState.CHAT_FOCUSED
                                     updateFocusVisual(focusState)
                                 }
                             }
                             TabId.CHAT_LIST -> {
-                                lastCenterPressTime = SystemClock.elapsedRealtime()
+                                armDoubleTapWindow()
                                 focusState = FocusState.LIST_FOCUSED
                                 updateFocusVisual(focusState)
                             }
                             TabId.TELEGRAM -> {
-                                lastCenterPressTime = SystemClock.elapsedRealtime()
+                                armDoubleTapWindow()
                                 telegramEnterChatList()
                                 updateFocusVisual(focusState)
                             }

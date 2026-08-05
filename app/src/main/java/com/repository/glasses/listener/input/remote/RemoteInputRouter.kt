@@ -160,6 +160,18 @@ class RemoteInputRouter(
      * for the service's whole life while the UI process comes and goes. The owner of that
      * distinction is the bridge, so it drives this.
      */
+    /**
+     * Whether a delivered event would REALLY be acted on.
+     *
+     * Not simply `sinkRef != null`. When the sink is a cross-process bridge it installs itself once
+     * and stays installed for the service's whole life, so `sinkRef` is permanently non-null and
+     * says nothing about whether a UI process exists. Left as an overridable hook so the component
+     * that owns that knowledge supplies it, and so the status channel and the dedicated sink-state
+     * channel cannot report contradictory values.
+     */
+    @Volatile
+    var sinkReallyAttached: () -> Boolean = { sinkRef.get() != null }
+
     fun publishSinkAttached(attached: Boolean) {
         val targets = synchronized(sessionLock) { sources.values.map { it.source } }
         for (source in targets) {
@@ -601,7 +613,7 @@ class RemoteInputRouter(
         // Snapshot the queue's counter BEFORE taking sessionLock: reading it while holding
         // sessionLock would nest the two locks in the opposite order to the ingress path.
         val queueDropped = queue.dropped
-        val sinkAttached = sinkRef.get() != null
+        val sinkAttached = sinkReallyAttached()
         val status = synchronized(sessionLock) {
             val state = sources[source.sourceId] ?: return
             RemoteInputStatus(

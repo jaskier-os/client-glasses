@@ -55,6 +55,10 @@ class RemoteInputBridgeService(
         // Installed once, for the service's whole life. See the class doc: per-UI-process identity
         // is tracked here, not in the router, because only this class can see the binder.
         router.setSink(this)
+        // Because of that, the router's own sinkRef is permanently non-null and cannot answer
+        // "is a UI actually there". Point its status at the value that can, so the periodic status
+        // channel and the dedicated sink-state channel can never contradict each other.
+        router.sinkReallyAttached = { sinkAttached }
     }
 
     private val lock = Any()

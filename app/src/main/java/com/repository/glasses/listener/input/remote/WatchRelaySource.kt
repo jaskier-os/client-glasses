@@ -36,6 +36,11 @@ class WatchRelaySource(
     private val relayListener = object : MessageRelay.Listener {
         override fun onConnected() {
             log("watch input: transport connected")
+            // Re-announce on every reconnect. The sink state is only pushed on transitions, and any
+            // transition that happened while the link was down was published into a dead socket and
+            // lost. Without this the watch resumes on a stale value -- typically showing READY while
+            // the glasses UI is gone -- until the next attach or detach, which may never come.
+            onReconnected?.invoke()
         }
 
         override fun onDisconnected() {
@@ -54,6 +59,9 @@ class WatchRelaySource(
 
     /** Invoked when the transport drops, so the owner can clear live session state. */
     var onTransportLost: (() -> Unit)? = null
+
+    /** Invoked when the transport comes back up, so current state can be re-published. */
+    var onReconnected: (() -> Unit)? = null
 
     override fun attach(sink: (RemoteInputFrame) -> Unit) {
         this.sink = sink

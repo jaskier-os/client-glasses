@@ -27,17 +27,37 @@ class RemoteInputInjectionInstrumentedTest {
     private val mainHandler =
         android.os.Handler(InstrumentationRegistry.getInstrumentation().targetContext.mainLooper)
 
-    private fun newRouter(sink: RemoteInputSink): RemoteInputRouter =
+    /**
+     * @param maxEventsPerSecond the router's admission budget. The default (25/s) exists to bound
+     *   what a hostile peer can spend; a test that wants to prove the HAND-OFF loses nothing must
+     *   raise it, or the rate limiter drops most of the burst before it ever reaches the queue and
+     *   the test measures the limiter instead of the thing under test.
+     */
+    private fun newRouter(
+        sink: RemoteInputSink,
+        maxEventsPerSecond: Int = RemoteInputRouter.DEFAULT_MAX_EVENTS_PER_SECOND,
+    ): RemoteInputRouter =
         RemoteInputRouter(
+            maxEventsPerSecond = maxEventsPerSecond,
             clock = { android.os.SystemClock.elapsedRealtime() },
             post = { mainHandler.post(it) },
         ).also { it.setSink(sink) }
 
-    /** Blocks until every runnable already queued on the main thread has run. */
+    /**
+     * Blocks until the main thread has quiesced.
+     *
+     * More than one round trip, because a drain cycle can post a further one: a single latch would
+     * return while work was still queued and make every assertion below it racy.
+     */
     private fun drainMainThread(timeoutMs: Long = 5_000) {
-        val latch = CountDownLatch(1)
-        mainHandler.post { latch.countDown() }
-        assertTrue("main thread did not drain", latch.await(timeoutMs, TimeUnit.MILLISECONDS))
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+        repeat(5) {
+            val remaining = deadline - android.os.SystemClock.elapsedRealtime()
+            assertTrue("main thread did not drain", remaining > 0)
+            val latch = CountDownLatch(1)
+            mainHandler.post { latch.countDown() }
+            assertTrue("main thread did not drain", latch.await(remaining, TimeUnit.MILLISECONDS))
+        }
     }
 
     private class Collector : RemoteInputSink {
@@ -75,12 +95,14 @@ class RemoteInputInjectionInstrumentedTest {
      */
     @Test
     fun floodPreservesScrollDistanceWithoutStallingTheMainThread() {
+        val count = 600
         val sink = Collector()
-        val router = newRouter(sink)
+        // Raised so the rate limiter admits the whole burst: this test is about the hand-off not
+        // losing motion, not about the admission budget (which has its own JVM tests).
+        val router = newRouter(sink, maxEventsPerSecond = 10_000)
         val source = FakeInputSource("watch")
         router.registerSource(source)
 
-        val count = 600
         source.open(sid = 1L)
         val startMs = android.os.SystemClock.elapsedRealtime()
         repeat(count) { source.scroll(sid = 1L, steps = 1) }
@@ -216,15 +238,29 @@ class RemoteInputInjectionInstrumentedTest {
         assertEquals(setOf("watch", "gadget"), sink.events.map { it.sourceId }.toSet())
     }
 
+    /**
+     * The real transport delivers on a Bluetooth callback thread, so the router must be safe under
+     * concurrent producers.
+     *
+     * Sequence numbers are handed out by ONE atomic counter and each frame is emitted immediately
+     * after taking its number, but threads interleave, so frames genuinely arrive out of order. The
+     * router drops anything that is not a forward step -- that is its replay defence, and it is
+     * correct -- so this asserts the two properties that must hold regardless: what IS delivered is
+     * strictly increasing, and nothing is delivered twice or corrupted.
+     *
+     * Note the earlier version of this test asserted `seqs.sorted() == seqs` on the survivors only.
+     * That can never fail, because the drop rule makes the survivors monotonic by construction; it
+     * would have passed against a completely broken queue. The count assertion below is what gives
+     * the test teeth.
+     */
     @Test
     fun concurrentProducersDoNotLoseOrCorruptEvents() {
         val sink = Collector()
-        val router = newRouter(sink)
+        val router = newRouter(sink, maxEventsPerSecond = 10_000)
         val source = FakeInputSource("watch")
         router.registerSource(source)
         source.open(sid = 1L)
 
-        // The real transport delivers on a Bluetooth callback thread, so hammer from off-main.
         val perThread = 100
         val threads = 4
         val seq = AtomicInteger(1)
@@ -241,7 +277,14 @@ class RemoteInputInjectionInstrumentedTest {
         drainMainThread(timeoutMs = 10_000)
 
         val seqs = sink.events.map { it.seq }
-        assertEquals("delivery order must match admission order", seqs.sorted(), seqs)
-        assertTrue("nothing should have been delivered twice", seqs.toSet().size == seqs.size)
+        assertEquals("nothing may be delivered twice", seqs.toSet().size, seqs.size)
+        assertEquals("delivery order must be strictly increasing", seqs.sorted(), seqs)
+        // A crash, a lost wakeup or a wedged drain would show up as near-total loss. Reordering
+        // costs some frames to the drop rule, but the bulk must survive.
+        assertTrue(
+            "only ${seqs.size} of ${threads * perThread} survived; the hand-off is losing events",
+            seqs.size > threads * perThread / 4,
+        )
+        assertTrue("every delivered event must be a scroll of +1", sink.events.all { it.delta == 1 })
     }
 }
