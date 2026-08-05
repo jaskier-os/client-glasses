@@ -7141,8 +7141,20 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         onKeyDown(keyCode, KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
     }
 
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean = GT.section("ui.onKeyDown") {
-        GT.counter("ui.keycode", keyCode.toLong())
+    /**
+     * Touchpad key handling, lifted verbatim out of [onKeyDown].
+     *
+     * Sees EVERY keycode, not just the NUMPAD_* ones the touchpad daemon emits. That is not
+     * an oversight: the final `lastNumpad2Ms = 0L` is a fall-through reached by non-touchpad
+     * keys (DPAD_*, CAMERA, BACK, CENTER), and it is what makes any other key break the
+     * double-tap chain. Gating this function on NUMPAD_* would silently stop those keys from
+     * breaking the chain and turn unrelated presses into phantom double-taps.
+     *
+     * @return non-null when the event was fully handled here and [onKeyDown] must return it;
+     *   null when the key should fall through to the focus dispatch. A plain Boolean cannot
+     *   express that difference -- `false` already means "not handled, call super".
+     */
+    private fun handleTouchpadKey(keyCode: Int, event: KeyEvent?): Boolean? {
         // rokid-touchpad-daemon emits synthetic keycodes on its virtual input
         // device instead of the raw DPAD keys from the PSoC touchpad, so we
         // get finer-grained, velocity-scaled scroll steps and the AI-assistant
@@ -7164,7 +7176,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 keyCode == KeyEvent.KEYCODE_NUMPAD_2 ||
                 keyCode == KeyEvent.KEYCODE_NUMPAD_3) && foldedState) {
             lastNumpad2Ms = 0L
-            return@section true
+            return true
         }
         // Notification hold-to-reply intercept. The touchpad daemon emits a
         // single momentary NUMPAD_3 when a press reaches 500ms (there is no
@@ -7181,7 +7193,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             focusState == FocusState.MOUSE_FOCUSED && dpadHandler.trackingEnabled) {
             uiLog("[Mouse] HOLD -> right click")
             dpadHandler.listener?.onRightClick()
-            return@section true
+            return true
         }
         if (keyCode == KeyEvent.KEYCODE_NUMPAD_3) {
             uiLog("[NREPLY] NUMPAD_3 down: repliable=$notificationRepliable pendingNotifId=${pendingNotifId?.take(12)} activeReplyNotifId=${activeReplyNotifId?.take(12)} focus=$focusState replyArming=$replyArming")
@@ -7198,7 +7210,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             )) {
             uiLog("[NREPLY] -> arm branch (startReplyArm, replyArming was $replyArming)")
             if (!replyArming) startReplyArm()
-            return@section true
+            return true
         }
         // Time-based long-press from touchpad-daemon: finger on the pad for
         // 500ms with no motion -> KEY_KP3 (KEYCODE_NUMPAD_3). Forward to
@@ -7215,7 +7227,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             if (replyArming || focusState == FocusState.NOTIFICATION_REPLY ||
                 activeReplyNotifId != null) {
                 uiLog("[NREPLY] NUMPAD_3 consumed by in-flight-reply guard (NOT forwarding to AI)")
-                return@section true
+                return true
             }
             // Always forward to ListenerService. The service decides whether to
             // toggle HF mic mute (when SCO is live, with or without a call) or
@@ -7226,7 +7238,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             sendBroadcast(Intent(com.repository.glasses.listener.service.ListenerService.ACTION_SENSOR_LONG_PRESS).apply {
                 setPackage(packageName)
             })
-            return@section true
+            return true
         }
         // NUMPAD_2 (finger lifted / tap) during reply arming or NOTIFICATION_REPLY.
         // Handled before tap/double-tap/screen-off so a release that belongs to
@@ -7236,7 +7248,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 uiLog("[NREPLY] NUMPAD_2 replyArming=$replyArming focus=$focusState sendPending=$replySendPending activeReplyNotifId=${activeReplyNotifId?.take(12)}")
             }
             // Released before the progress bar filled -> cancel the arm.
-            if (replyArming) { uiLog("[NREPLY] release -> cancelReplyArm (bar not full)"); cancelReplyArm(); return@section true }
+            if (replyArming) { uiLog("[NREPLY] release -> cancelReplyArm (bar not full)"); cancelReplyArm(); return true }
             if (focusState == FocusState.NOTIFICATION_REPLY) {
                 // In the 3s post-transcript SENDING window a DOUBLE-tap cancels the
                 // pending send; a single tap is ignored. While still LISTENING
@@ -7254,7 +7266,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         lastReplyCancelTapMs = now
                     }
                 }
-                return@section true
+                return true
             }
         }
         // NUMPAD_2 doubletap in TAB_NAV -> turn screen off. Any other non-
@@ -7271,7 +7283,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             } else {
                 lastNumpad2Ms = now
             }
-            return@section true
+            return true
         }
         // Any non-NUMPAD_2 key (including the scroll remaps below) breaks the
         // doubletap chain.
@@ -7283,7 +7295,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             (keyCode == KeyEvent.KEYCODE_NUMPAD_0 ||
              keyCode == KeyEvent.KEYCODE_NUMPAD_1)) {
             notifReplyCancel()
-            return@section true
+            return true
         }
         // In TAB_NAV mode the new ABS_X path (TouchpadAbsListener -> drag pill
         // -> snap on release) owns tab selection. The kmsg-driven NUMPAD_0/1
@@ -7293,8 +7305,14 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         if (focusState == FocusState.TAB_NAV &&
             (keyCode == KeyEvent.KEYCODE_NUMPAD_0 ||
              keyCode == KeyEvent.KEYCODE_NUMPAD_1)) {
-            return@section true
+            return true
         }
+        return null
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean = GT.section("ui.onKeyDown") {
+        GT.counter("ui.keycode", keyCode.toLong())
+        handleTouchpadKey(keyCode, event)?.let { return@section it }
         val remapped = when (keyCode) {
             KeyEvent.KEYCODE_NUMPAD_0 -> KeyEvent.KEYCODE_DPAD_RIGHT   // fwd / next
             KeyEvent.KEYCODE_NUMPAD_1 -> KeyEvent.KEYCODE_DPAD_LEFT    // back / prev
