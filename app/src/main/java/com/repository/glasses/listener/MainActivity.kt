@@ -7398,7 +7398,12 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             else -> keyCode
         }
         @Suppress("NAME_SHADOWING") val keyCode = remapped
-        uiLog("KEY: code=$keyCode state=$serviceState focus=$focusState tab=$currentTab/${activeTabs.size} tabId=${activeTabs.getOrNull(currentTab)} sel=${chatAdapter.selectedPosition}")
+        // `origin` is logged because without it this line cannot distinguish a remote
+        // key from a physical touchpad one: the NUMPAD_0/1 remap immediately above
+        // rewrites a touchpad swipe into the SAME DPAD code a remote scroll
+        // synthesizes. Diagnosing the remote path then rests on correlating another
+        // device's log by timestamp, which is coincidence, not attribution.
+        uiLog("KEY: code=$keyCode origin=$currentInputOrigin state=$serviceState focus=$focusState tab=$currentTab/${activeTabs.size} tabId=${activeTabs.getOrNull(currentTab)} sel=${chatAdapter.selectedPosition}")
         // KEYCODE_CAMERA path: forward the event to ListenerService's FunctionButtonHandler
         // via broadcast so CaptureBridge can own the camera pipeline (single source of truth).
         // This also makes the broadcast driveable from adb + e2e harness for testing.
