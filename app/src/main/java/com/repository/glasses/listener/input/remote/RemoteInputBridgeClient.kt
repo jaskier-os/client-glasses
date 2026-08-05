@@ -24,11 +24,16 @@ class RemoteInputBridgeClient(
 ) {
     private val actions = RemoteAction.values()
 
-    /** Rolling IPC latency samples, in microseconds. Guarded by [statsLock]. */
+    /**
+     * IPC latency samples, in microseconds. Guarded by [statsLock].
+     *
+     * Kept as raw samples rather than a running mean, because this figure sits directly in the
+     * scroll path where the TAIL is what the user feels: a mean hides the occasional stall that a
+     * p99 exposes. Bounded so a long session cannot grow it without limit.
+     */
     private val statsLock = Any()
+    private val latencySamplesUs = ArrayDeque<Long>()
     private var latencyCount = 0L
-    private var latencySumUs = 0L
-    private var latencyMaxUs = 0L
 
     private var bridge: IRemoteInputBridge? = null
 
@@ -73,22 +78,43 @@ class RemoteInputBridgeClient(
 
     private fun recordLatency(emitNanos: Long, transportUs: Long) {
         val totalUs = (SystemClock.elapsedRealtimeNanos() - emitNanos) / 1000L
-        synchronized(statsLock) {
+        val count = synchronized(statsLock) {
             latencyCount++
-            latencySumUs += totalUs
-            if (totalUs > latencyMaxUs) latencyMaxUs = totalUs
+            latencySamplesUs.addLast(totalUs)
+            while (latencySamplesUs.size > MAX_LATENCY_SAMPLES) latencySamplesUs.removeFirst()
+            latencyCount
         }
-        if (latencyCount % LATENCY_LOG_EVERY == 0L) {
+        if (count % LATENCY_LOG_EVERY == 0L) {
             log("[RemoteInput] ipc latency: $latencySummary (last transport=${transportUs}us)")
         }
     }
 
-    /** Human-readable IPC latency summary: binder emit -> main-thread execution. */
+    /**
+     * IPC latency distribution: binder emit -> main-thread execution, in microseconds.
+     *
+     * Percentiles rather than a mean, because the scroll path is judged on its worst frames.
+     */
     val latencySummary: String
-        get() = synchronized(statsLock) {
-            if (latencyCount == 0L) "n=0"
-            else "n=$latencyCount mean=${latencySumUs / latencyCount}us max=${latencyMaxUs}us"
+        get() {
+            val (n, sorted) = synchronized(statsLock) {
+                latencyCount to latencySamplesUs.sorted()
+            }
+            if (sorted.isEmpty()) return "n=0"
+            fun pct(p: Int): Long = sorted[((sorted.size - 1) * p) / 100]
+            val mean = sorted.sum() / sorted.size
+            return "n=$n min=${sorted.first()}us p50=${pct(50)}us p90=${pct(90)}us " +
+                "p95=${pct(95)}us p99=${pct(99)}us max=${sorted.last()}us mean=${mean}us"
         }
+
+    /**
+     * The binder stub `:backend` calls.
+     *
+     * Public because the instrumented latency test drives it directly: measuring through the real
+     * stub keeps the figure honest, whereas a test-local copy would time a reimplementation. It is
+     * also the object handed to [registerSink], so this is simply naming what already crosses the
+     * process boundary rather than widening the surface for testing.
+     */
+    val sinkBinder: IRemoteInputSink get() = stub
 
     /** Called from the UI process's `onServiceConnected`. */
     fun onBackendConnected(service: IBinder?) {
@@ -98,7 +124,7 @@ class RemoteInputBridgeClient(
         }
         bridge = b
         try {
-            b.registerSink(stub)
+            b.registerSink(sinkBinder)
             log("[RemoteInput] sink registered with backend")
         } catch (e: RemoteException) {
             bridge = null
@@ -120,7 +146,7 @@ class RemoteInputBridgeClient(
     fun unregister() {
         val b = bridge ?: return
         try {
-            b.unregisterSink(stub)
+            b.unregisterSink(sinkBinder)
             log("[RemoteInput] sink unregistered")
         } catch (_: RemoteException) {
             // Backend already gone; its death recipient covers this.
@@ -130,5 +156,8 @@ class RemoteInputBridgeClient(
 
     private companion object {
         const val LATENCY_LOG_EVERY = 200L
+
+        /** Bounded so a long-running session cannot grow the sample buffer without limit. */
+        const val MAX_LATENCY_SAMPLES = 2_000
     }
 }

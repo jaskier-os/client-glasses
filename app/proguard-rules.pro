@@ -10,6 +10,15 @@
 -keep class com.repository.glasses.listener.MainActivity { *; }
 -keep class com.repository.glasses.listener.service.** { *; }
 -keep class com.repository.glasses.listener.boot.** { *; }
+
+# Remote input (watch bezel today, any future InputSource tomorrow). The
+# instrumented tests drive these directly and share the target app's dex, so R8
+# inlining a trivial accessor or dropping a member the app never calls from
+# Kotlin source makes them fail with NoSuchMethodError -- the same problem the
+# Kotlin stdlib keep below documents, observed here for
+# RemoteInputBridgeClient.sinkBinder. These are also the classes a new input
+# device is written against, so a stable shape is worth more than the bytes.
+-keep class com.repository.glasses.listener.input.remote.** { *; }
 -keep class com.repository.glasses.listener.ui.** { *; }
 
 # ----------------------------------------------------------------------------
