@@ -34,25 +34,59 @@ class GoldenVectorConformanceTest {
         val rfcommArgs: List<String>,
     )
 
-    private fun loadVectors(): List<Vector> {
+    /**
+     * A frame the SENDER says we must refuse, carried in the same file as the valid ones.
+     *
+     * This is the half of the contract a receiver can satisfy by accident. A set of only-valid
+     * tuples is reproduced byte-for-byte by a receiver still enforcing a superseded rule, so it
+     * cannot guard the rule it was written for -- which is exactly what happened when the steps cap
+     * moved from 16 to 8.
+     */
+    private data class RejectVector(
+        val reason: String,
+        val encoding: String,
+        val payloadHex: String?,
+        val rfcommArgs: List<String>?,
+    )
+
+    private fun lines(): List<String> {
         val stream = javaClass.classLoader!!.getResourceAsStream(RESOURCE)
             ?: error("missing $RESOURCE -- copy it from the sender repo")
-        return stream.bufferedReader().readLines()
-            .filter { it.isNotBlank() }
-            .map { line ->
-                Vector(
-                    sid = jsonLong(line, "sid"),
-                    seq = jsonLong(line, "seq"),
-                    type = jsonString(line, "type"),
-                    typeCode = jsonLong(line, "typeCode").toInt(),
-                    steps = jsonLong(line, "steps").toInt(),
-                    wms = jsonLong(line, "wms"),
-                    canonical = jsonString(line, "canonical"),
-                    tag = jsonString(line, "tag"),
-                    rfcommArgs = jsonStringArray(line, "rfcommArgs"),
-                )
-            }
+        return stream.bufferedReader().readLines().filter { it.isNotBlank() }
     }
+
+    private fun isReject(line: String): Boolean =
+        Regex("\"mustReject\"\\s*:\\s*true").containsMatchIn(line)
+
+    private fun loadVectors(): List<Vector> =
+        lines().filterNot { isReject(it) }.map { line ->
+            Vector(
+                sid = jsonLong(line, "sid"),
+                seq = jsonLong(line, "seq"),
+                type = jsonString(line, "type"),
+                typeCode = jsonLong(line, "typeCode").toInt(),
+                steps = jsonLong(line, "steps").toInt(),
+                wms = jsonLong(line, "wms"),
+                canonical = jsonString(line, "canonical"),
+                tag = jsonString(line, "tag"),
+                rfcommArgs = jsonStringArray(line, "rfcommArgs"),
+            )
+        }
+
+    private fun loadRejectVectors(): List<RejectVector> =
+        lines().filter { isReject(it) }.map { line ->
+            RejectVector(
+                reason = jsonString(line, "reason"),
+                encoding = jsonString(line, "encoding"),
+                payloadHex = Regex("\"payloadHex\"\\s*:\\s*\"([^\"]*)\"")
+                    .find(line)?.groupValues?.get(1),
+                rfcommArgs = Regex("\"rfcommArgs\"\\s*:\\s*\\[([^\\]]*)\\]").find(line)
+                    ?.groupValues?.get(1)
+                    ?.split(",")
+                    ?.map { it.trim().trim('"') }
+                    ?.filter { it.isNotEmpty() },
+            )
+        }
 
     // Minimal extraction rather than a JSON dependency: the schema is fixed and flat.
     private fun jsonLong(line: String, key: String): Long =
@@ -65,6 +99,58 @@ class GoldenVectorConformanceTest {
         Regex("\"$key\"\\s*:\\s*\\[([^\\]]*)\\]").find(line)!!.groupValues[1]
             .split(",")
             .map { it.trim().trim('"') }
+
+    /**
+     * Every reject vector the sender publishes that this receiver can actually be fed.
+     *
+     * Driven from the FILE, not from locally reconstructed cases: a hand-written case can only test
+     * the rule its author was already thinking about, which is how a superseded cap survives a
+     * green suite.
+     *
+     * Encoding A (the 26-byte binary framing) is deliberately not implemented here -- this receiver
+     * takes remote input as RFCOMM string args, i.e. Encoding B, and a decoder for a framing that
+     * never arrives would be untested code on the security path. Those vectors are counted and
+     * reported rather than silently skipped, so the gap stays visible.
+     */
+    @Test
+    fun `every applicable reject vector is refused`() {
+        val rejects = loadRejectVectors()
+        assertTrue("no reject vectors found -- is the file stale?", rejects.isNotEmpty())
+
+        val applicable = rejects.filter { !it.rfcommArgs.isNullOrEmpty() }
+        val notApplicable = rejects.size - applicable.size
+
+        val accepted = applicable.filter { v ->
+            RemoteInputCodec.decode(v.rfcommArgs!!, "watch", auth) is RemoteInputCodec.Result.Ok
+        }
+        assertEquals(
+            "these MUST-REJECT vectors were accepted: ${accepted.map { it.reason }}",
+            emptyList<String>(),
+            accepted.map { it.reason },
+        )
+
+        println(
+            "reject vectors: ${rejects.size} published, ${applicable.size} applicable to this " +
+                "receiver (all refused), $notApplicable Encoding-A only (no binary decoder here)",
+        )
+    }
+
+    /**
+     * The vector file must actually contain refusal cases.
+     *
+     * Guards against silently regressing to an only-valid file, which every receiver passes
+     * regardless of which rules it enforces.
+     */
+    @Test
+    fun `the vector file carries reject cases including the superseded steps cap`() {
+        val reasons = loadRejectVectors().map { it.reason }
+        assertTrue("expected reject vectors in the file", reasons.size >= 20)
+        // 9 and 16 are the values a receiver still on the old cap-of-16 would wrongly accept.
+        assertTrue(
+            "missing the steps-cap vectors that catch a stale MAX_STEPS=16",
+            reasons.any { it.contains("steps)=9") } && reasons.any { it.contains("steps)=16") },
+        )
+    }
 
     @Test
     fun `vectors are present`() {

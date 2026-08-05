@@ -637,11 +637,27 @@ class RemoteInputRouter(
         /**
          * Maximum in-flight age for an actionable event.
          *
-         * Floor value from the plan. The real figure is meant to come from the Data Layer latency
-         * measurement (plan task 0.4), which belongs to the watch/phone workstream; until that lands
-         * this stays at the floor. Raising it is a one-line change here.
+         * Derived from a MEASURED watch -> phone Data Layer round trip on the real hardware
+         * (n=17): `min=233 p50=453 p95=996 max=1068 ms`, i.e. one-way p50 ~227 ms and p95 ~498 ms.
+         * The plan's 20-50 ms estimate was wrong by roughly an order of magnitude, and the 400 ms
+         * value carried from it would have dropped legitimate input on a healthy link.
+         *
+         * 1500 is `one-way p95 x 3`, which also sits above the WORST observed round trip rather
+         * than merely above the estimated one-way. The margin is deliberately generous because
+         * n=17 is small.
+         *
+         * The error here is asymmetric, and that asymmetry is the whole justification: a TTL that
+         * is too LOW drops the event silently, which the user experiences as a dead bezel with no
+         * diagnostic; a TTL that is too HIGH merely lands a scroll slightly late. Favour the late
+         * scroll.
+         *
+         * **Known residual, not papered over:** this does NOT cover a cold GMS listener bind, which
+         * is ~1.5 s on its own and is currently unmeasured. Under a cold bind plus congestion,
+         * events will exceed this and be dropped. Every drop is logged with its actual age, so that
+         * case is diagnosable from the log rather than mysterious -- see the reject in
+         * [admitActionLocked]. Treat this as a measured recommendation, not a frozen constant.
          */
-        const val DEFAULT_TTL_MS = 400
+        const val DEFAULT_TTL_MS = 1500
 
         /** A session with no event and no PING for this long is gone. */
         const val DEFAULT_SESSION_EXPIRY_MS = 20_000L

@@ -276,9 +276,9 @@ class RemoteInputRouterTest {
     fun `an event older than the TTL is dropped`() {
         val openWms = now
         watch.open(sid = 1, wms = openWms)
-        // 1000 ms passes locally, but the source says the event was produced at session start:
-        // 1000 ms in flight, well past the 400 ms TTL.
-        tick(1000)
+        // 2000 ms passes locally, but the source says the event was produced at session start,
+        // so it has been 2000 ms in flight -- past the measured 1500 ms TTL.
+        tick(2000)
         watch.scroll(sid = 1, steps = 1, wms = openWms)
         flush()
         assertTrue(sink.events.isEmpty())
@@ -618,8 +618,11 @@ class RemoteInputRouterTest {
     }
 
     @Test
-    fun `TTL default is the documented floor`() {
-        assertEquals(400, RemoteInputRouter.DEFAULT_TTL_MS)
+    fun `TTL default matches the measured link budget`() {
+        // Derived from a measured watch->phone round trip (n=17, one-way p95 ~498 ms), NOT from
+        // the plan's 20-50 ms estimate, which was out by roughly an order of magnitude. A 400 ms
+        // value would drop legitimate input on a healthy link, and a TTL drop is silent.
+        assertEquals(1500, RemoteInputRouter.DEFAULT_TTL_MS)
         assertNotEquals(0, RemoteInputRouter.DEFAULT_TTL_MS)
     }
 
@@ -681,13 +684,13 @@ class RemoteInputRouterTest {
         // Otherwise the next tap would be timed against a long-superseded one and look like a
         // double tap the user never made.
         watch.open(sid = 1, wms = 0)
-        tick(1000)
-        watch.tap(sid = 1, wms = 0)      // stale, dropped
+        tick(2000)
+        watch.tap(sid = 1, wms = 0)      // 2000 ms in flight: past the 1500 ms TTL, dropped
         tick(10)
-        watch.tap(sid = 1, wms = 1000)
+        watch.tap(sid = 1, wms = 2000)
         flush()
         assertEquals(1, sink.events.size)
-        assertEquals(1000, sink.events[0].sinceLastMs)
+        assertEquals(2000, sink.events[0].sinceLastMs)
     }
 
     @Test
