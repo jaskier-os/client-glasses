@@ -5,7 +5,7 @@ package com.repository.glasses.listener.input.remote
  *
  * Everything the router keeps in memory is erased by a restart, and an attacker who captured a
  * session can simply wait for one. Without persistence the whole sequence defence is only as strong
- * as the process's uptime, and a captured TAP could be re-injected into the UI after a reboot.
+ * as the process's uptime, and a captured SELECT could be re-injected into the UI after a reboot.
  *
  * An interface so the router stays free of Android types and the rules stay unit-testable against an
  * in-memory implementation.

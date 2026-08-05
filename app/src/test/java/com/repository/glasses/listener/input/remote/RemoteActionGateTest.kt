@@ -111,7 +111,7 @@ class RemoteActionGateTest {
             val s = snap(focus, activeReply = true)
             assertNotEquals(
                 RemoteActionGate.Denial.ALLOWED,
-                RemoteActionGate.evaluate(s, RemoteAction.TAP),
+                RemoteActionGate.evaluate(s, RemoteAction.SELECT),
             )
         }
     }
@@ -119,7 +119,7 @@ class RemoteActionGateTest {
     @Test
     fun `pending send refuses`() {
         val s = snap("CHAT_FOCUSED", sendPending = true)
-        assertEquals(RemoteActionGate.Denial.REFUSED_ARMED, RemoteActionGate.evaluate(s, RemoteAction.TAP))
+        assertEquals(RemoteActionGate.Denial.REFUSED_ARMED, RemoteActionGate.evaluate(s, RemoteAction.SELECT))
     }
 
     @Test
@@ -143,7 +143,7 @@ class RemoteActionGateTest {
     fun `tap during a live voice session is refused so it cannot cancel the request`() {
         for (state in listOf("LISTENING", "RESPONDING")) {
             val s = snap("CHAT_FOCUSED", service = state)
-            assertEquals(RemoteActionGate.Denial.REFUSED_BUSY, RemoteActionGate.evaluate(s, RemoteAction.TAP))
+            assertEquals(RemoteActionGate.Denial.REFUSED_BUSY, RemoteActionGate.evaluate(s, RemoteAction.SELECT))
             assertEquals(RemoteActionGate.Denial.REFUSED_BUSY, RemoteActionGate.evaluate(s, RemoteAction.BACK))
         }
     }
@@ -170,25 +170,25 @@ class RemoteActionGateTest {
         // tap handler defers for double-tap detection -- so the refusal lives at the
         // point of action in MainActivity, keyed on the captured input origin.
         assertEquals(true, allowed(snap("LIST_FOCUSED"), RemoteAction.SCROLL_STEP))
-        assertEquals(true, allowed(snap("LIST_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("LIST_FOCUSED"), RemoteAction.SELECT))
         assertEquals(true, allowed(snap("LIST_FOCUSED"), RemoteAction.BACK))
     }
 
     @Test
     fun `tap cannot start a telegram voice recording`() {
         // TELEGRAM_CHAT_FOCUSED tap -> telegramStartVoice(), which opens the microphone.
-        assertEquals(false, allowed(snap("TELEGRAM_CHAT_FOCUSED"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("TELEGRAM_CHAT_FOCUSED"), RemoteAction.SELECT))
     }
 
     @Test
     fun `tap cannot confirm sending a message to a contact`() {
         // TELEGRAM_PREVIEW tap -> telegramConfirmSend().
-        assertEquals(false, allowed(snap("TELEGRAM_PREVIEW"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("TELEGRAM_PREVIEW"), RemoteAction.SELECT))
     }
 
     @Test
     fun `tap cannot toggle live translation`() {
-        assertEquals(false, allowed(snap("TRANSLATE_FOCUSED"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("TRANSLATE_FOCUSED"), RemoteAction.SELECT))
     }
 
     @Test
@@ -197,8 +197,8 @@ class RemoteActionGateTest {
         // screen, and neither is on the never-list. What stays refused is the
         // REID_FACES_FOCUSED scroll, because there the SCROLL ITSELF issues an OSINT
         // lookup that uploads an identifier -- that is not navigation.
-        assertEquals(true, allowed(snap("REID_FOCUSED"), RemoteAction.TAP))
-        assertEquals(true, allowed(snap("REID_FACES_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("REID_FOCUSED"), RemoteAction.SELECT))
+        assertEquals(true, allowed(snap("REID_FACES_FOCUSED"), RemoteAction.SELECT))
         assertEquals(false, allowed(snap("REID_FACES_FOCUSED"), RemoteAction.SCROLL_STEP))
     }
 
@@ -227,7 +227,7 @@ class RemoteActionGateTest {
         // Terminating navigation is destructive but it is not on the never-list, and a
         // remote control whose user cannot answer a modal that is on their own screen
         // is broken. BACK still dismisses it.
-        assertEquals(true, allowed(snap("STOP_MODAL"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("STOP_MODAL"), RemoteAction.SELECT))
         assertEquals(true, allowed(snap("STOP_MODAL"), RemoteAction.BACK))
     }
 
@@ -235,23 +235,23 @@ class RemoteActionGateTest {
     fun `the map is navigable`() {
         // Toggling a pin is a user-visible, user-reversible edit on the user's own
         // screen. Not on the never-list.
-        assertEquals(true, allowed(snap("MAP_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("MAP_FOCUSED"), RemoteAction.SELECT))
         assertEquals(true, allowed(snap("MAP_FOCUSED"), RemoteAction.SCROLL_STEP))
     }
 
     @Test
     fun `tap cannot mutate a todo item`() {
         // Level 1 toggles the checklist item; levels 0 and 2 only navigate.
-        assertEquals(false, allowed(snap("TODO_FOCUSED", todoLevel = 1), RemoteAction.TAP))
-        assertEquals(true, allowed(snap("TODO_FOCUSED", todoLevel = 0), RemoteAction.TAP))
-        assertEquals(true, allowed(snap("TODO_FOCUSED", todoLevel = 2), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("TODO_FOCUSED", todoLevel = 1), RemoteAction.SELECT))
+        assertEquals(true, allowed(snap("TODO_FOCUSED", todoLevel = 0), RemoteAction.SELECT))
+        assertEquals(true, allowed(snap("TODO_FOCUSED", todoLevel = 2), RemoteAction.SELECT))
     }
 
     @Test
     fun `media playback is controllable`() {
         // Play/pause and track skip are neither destructive nor on the never-list, and
         // controlling music from the wrist is an obvious use of a remote.
-        assertEquals(true, allowed(snap("MUSIC_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("MUSIC_FOCUSED"), RemoteAction.SELECT))
         assertEquals(true, allowed(snap("MUSIC_FOCUSED"), RemoteAction.SCROLL_STEP))
     }
 
@@ -277,7 +277,7 @@ class RemoteActionGateTest {
     @Test
     fun `mouse focused refuses the tap that toggles HID tracking but keeps its exit`() {
         // TAP toggles tracking, so it stays refused.
-        assertEquals(false, allowed(snap("MOUSE_FOCUSED"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("MOUSE_FOCUSED"), RemoteAction.SELECT))
         // BACK only toggles tracking on the branch where tracking is ALREADY on, and
         // that branch is unreachable from a remote source because mouseTracking is
         // refused as REFUSED_BUSY. With tracking off, BACK just returns to TAB_NAV --
@@ -306,11 +306,11 @@ class RemoteActionGateTest {
     @Test
     fun `scrolling and tab entry work in the ordinary navigation states`() {
         assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.SCROLL_STEP))
-        assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.SELECT))
         assertEquals(true, allowed(snap("CHAT_FOCUSED"), RemoteAction.SCROLL_STEP))
         assertEquals(true, allowed(snap("CHAT_FOCUSED"), RemoteAction.BACK))
         assertEquals(true, allowed(snap("TELEGRAM_TOPICS_FOCUSED"), RemoteAction.SCROLL_STEP))
-        assertEquals(true, allowed(snap("TELEGRAM_TOPICS_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("TELEGRAM_TOPICS_FOCUSED"), RemoteAction.SELECT))
     }
 
     // --- Index hijack: scrolling that re-aims the user's own next tap ---
@@ -329,7 +329,7 @@ class RemoteActionGateTest {
         // tap -- does not survive the fact that this IS a remote control: the remote
         // user IS the user, and re-aiming your own selection is what scrolling is for.
         assertEquals(true, allowed(snap("TELEPROMPTER_FOCUSED"), RemoteAction.SCROLL_STEP))
-        assertEquals(true, allowed(snap("TELEPROMPTER_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("TELEPROMPTER_FOCUSED"), RemoteAction.SELECT))
     }
 
     @Test
@@ -337,8 +337,8 @@ class RemoteActionGateTest {
         // Choosing a contact is navigation. What must never happen is STARTING the
         // voice recording, which lives one state deeper.
         assertEquals(true, allowed(snap("TELEGRAM_LIST_FOCUSED"), RemoteAction.SCROLL_STEP))
-        assertEquals(true, allowed(snap("TELEGRAM_LIST_FOCUSED"), RemoteAction.TAP))
-        assertEquals(false, allowed(snap("TELEGRAM_CHAT_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("TELEGRAM_LIST_FOCUSED"), RemoteAction.SELECT))
+        assertEquals(false, allowed(snap("TELEGRAM_CHAT_FOCUSED"), RemoteAction.SELECT))
     }
 
     // --- Calls, checked on the phase rather than the focus state ---
@@ -394,17 +394,17 @@ class RemoteActionGateTest {
     @Test
     fun `the never-list stays unreachable after the allowlist rework`() {
         // Starting or confirming a voice recording.
-        assertEquals(false, allowed(snap("TELEGRAM_CHAT_FOCUSED"), RemoteAction.TAP))
-        assertEquals(false, allowed(snap("TELEGRAM_RECORDING"), RemoteAction.TAP))
-        assertEquals(false, allowed(snap("TELEGRAM_PREVIEW"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("TELEGRAM_CHAT_FOCUSED"), RemoteAction.SELECT))
+        assertEquals(false, allowed(snap("TELEGRAM_RECORDING"), RemoteAction.SELECT))
+        assertEquals(false, allowed(snap("TELEGRAM_PREVIEW"), RemoteAction.SELECT))
         // Toggling the translation microphone.
-        assertEquals(false, allowed(snap("TRANSLATE_FOCUSED"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("TRANSLATE_FOCUSED"), RemoteAction.SELECT))
         // Turning the screen off: BACK at the top level does that, which would drop the
         // sink and strand the session with no way back from the remote device.
         assertEquals(false, allowed(snap("TAB_NAV"), RemoteAction.BACK))
         // Taking ownership of the input device. Only TAP toggles tracking unconditionally;
         // the BACK toggle sits behind tracking already being on, which is REFUSED_BUSY.
-        assertEquals(false, allowed(snap("MOUSE_FOCUSED"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("MOUSE_FOCUSED"), RemoteAction.SELECT))
         assertEquals(
             false,
             allowed(snap("MOUSE_FOCUSED", mouseTracking = true), RemoteAction.BACK),
@@ -438,7 +438,7 @@ class RemoteActionGateTest {
     fun `the primary navigation states are usable`() {
         for (state in listOf("TAB_NAV", "LIST_FOCUSED", "CHAT_FOCUSED", "TODO_FOCUSED")) {
             assertEquals("scroll in " + state, true, allowed(snap(state), RemoteAction.SCROLL_STEP))
-            assertEquals("tap in " + state, true, allowed(snap(state), RemoteAction.TAP))
+            assertEquals("tap in " + state, true, allowed(snap(state), RemoteAction.SELECT))
         }
         // ...and every state except the top level must be leaveable.
         for (state in listOf("LIST_FOCUSED", "CHAT_FOCUSED", "TODO_FOCUSED", "MAP_FOCUSED")) {
@@ -485,7 +485,7 @@ class RemoteActionGateTest {
     @Test
     fun `TAB_NAV refuses BACK but stays navigable`() {
         assertEquals(false, allowed(snap("TAB_NAV"), RemoteAction.BACK))
-        assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.SELECT))
         assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.SCROLL_STEP))
     }
 }

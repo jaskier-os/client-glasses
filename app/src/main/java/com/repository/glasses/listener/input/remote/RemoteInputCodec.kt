@@ -14,7 +14,7 @@ object RemoteInputCodec {
 
     /** Wire opcodes. These, not the readable names, are what the HMAC covers. */
     const val TYPE_SCROLL = 1
-    const val TYPE_TAP = 2
+    const val TYPE_SELECT = 2
     const val TYPE_BACK = 3
     const val TYPE_OPEN = 4
     const val TYPE_CLOSE = 5
@@ -98,8 +98,8 @@ object RemoteInputCodec {
             val frame = when (typeCode) {
                 TYPE_SCROLL ->
                     RemoteInputFrame.Action(version, src, sid, seq, wms, RemoteAction.SCROLL_STEP, steps)
-                TYPE_TAP ->
-                    RemoteInputFrame.Action(version, src, sid, seq, wms, RemoteAction.TAP, 0)
+                TYPE_SELECT ->
+                    RemoteInputFrame.Action(version, src, sid, seq, wms, RemoteAction.SELECT, 0)
                 TYPE_BACK ->
                     RemoteInputFrame.Action(version, src, sid, seq, wms, RemoteAction.BACK, 0)
                 TYPE_OPEN ->
@@ -123,7 +123,7 @@ object RemoteInputCodec {
      */
     fun parseTypeCode(raw: String): Int? = when (raw) {
         "SCROLL" -> TYPE_SCROLL
-        "TAP", "SELECT" -> TYPE_TAP
+        "SELECT" -> TYPE_SELECT
         "BACK" -> TYPE_BACK
         "OPEN" -> TYPE_OPEN
         "CLOSE" -> TYPE_CLOSE

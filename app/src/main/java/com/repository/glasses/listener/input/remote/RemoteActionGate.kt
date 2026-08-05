@@ -205,16 +205,15 @@ object RemoteActionGate {
                     // slider is locked; unlocked it is ordinary navigation.
                     !(s.focusState == "NIGHTVISION_FOCUSED" && s.nightVisionSliderLocked)
 
-            // Taps are permitted except where the tap reaches a hazard. Note this is
+            // SELECT is permitted except where selecting reaches a hazard. Note this is
             // now a DENYLIST of outcomes rather than an allowlist of screens: the old
-            // rule refused TAP across whole states because SOME element in them was
-            // dangerous, which cost the user selection in LIST_FOCUSED -- the primary
-            // navigation state -- to protect one row out of three. Where the hazard
-            // depends on which element is selected, the check belongs at the point of
-            // action, not here; MainActivity re-checks inside its deferred tap
-            // runnable, because the selection can move during the 400 ms it waits.
-            RemoteAction.TAP ->
-                s.focusState !in TAP_REACHES_HAZARD &&
+            // rule refused selection across whole states because SOME element in them
+            // was dangerous, which cost the user selection in LIST_FOCUSED -- the
+            // primary navigation state -- to protect one row out of three. Where the
+            // hazard depends on which element is selected, the check belongs at the
+            // point of action, not here; MainActivity re-checks inside the tap runnable.
+            RemoteAction.SELECT ->
+                s.focusState !in SELECT_REACHES_HAZARD &&
                     !(s.focusState == "TODO_FOCUSED" && s.todoFocusLevel == TODO_LEVEL_MUTATES)
 
             RemoteAction.BACK -> s.focusState !in BACK_REACHES_HAZARD
@@ -236,17 +235,17 @@ object RemoteActionGate {
     )
 
     /**
-     * States where a TAP unavoidably reaches one of the hazards remote input must
+     * States where a SELECT unavoidably reaches one of the hazards remote input must
      * never touch: starting or confirming a voice recording, or toggling the
      * translation microphone.
      *
-     * `LIST_FOCUSED` is deliberately NOT here. Only one of its three tap outcomes is
+     * `LIST_FOCUSED` is deliberately NOT here. Only one of its three outcomes is
      * dangerous (the Assistant row, which toggles the mic); the other two open a chat
      * and start a new one. Refusing the whole state to cover one row is what made the
      * feature unusable, since this is the state the user is in most of the time. The
      * Assistant row is refused at the point of action instead.
      */
-    private val TAP_REACHES_HAZARD = setOf(
+    private val SELECT_REACHES_HAZARD = setOf(
         // Toggles live translation, i.e. the microphone.
         "TRANSLATE_FOCUSED",
         // Starts a voice recording addressed to a real contact.
@@ -266,7 +265,7 @@ object RemoteActionGate {
      * the branch where tracking is ALREADY on -- and that branch is unreachable from a
      * remote source, because `mouseTracking` is refused as REFUSED_BUSY above. With
      * tracking off, BACK is an ordinary "return to TAB_NAV". Listing it here made the
-     * state a trap the moment BACK became producible: TAP is refused (it toggles
+     * state a trap the moment BACK became producible: SELECT is refused (it toggles
      * tracking) and BACK was refused too, so a user who entered the mouse tab from the
      * watch could not leave it from the watch.
      */

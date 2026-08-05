@@ -6872,14 +6872,18 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         uiLog("Screen off: lock screen requested via accessibility service")
     }
 
+    /**
+     * The PHYSICAL touchpad's single-versus-double decision. Unchanged, and the user relies on it
+     * daily.
+     *
+     * Always false for remote input, and it never stamps the touchpad's clock in that case. A remote
+     * SELECT is already the source's final verdict -- the source ran its own recogniser locally --
+     * so treating a pair of them as a double here would re-introduce the very reconstruction that
+     * layer exists to remove. Sharing the timestamp would also be cross-talk in both directions: a
+     * remote SELECT would make the user's next physical tap read as a double, and vice versa.
+     */
     private fun isDoubleTap(): Boolean {
-        // A remote tap carries the interval the SOURCE measured, so it must not be timed by arrival
-        // here, and it must not disturb the touchpad's timestamp: sharing one would let a remote tap
-        // make the user's next physical tap read as a double, and vice versa.
-        pendingRemoteDoubleTap?.let { remote ->
-            pendingRemoteDoubleTap = null
-            return remote
-        }
+        if (currentInputOrigin == InputOrigin.REMOTE) return false
         val now = SystemClock.elapsedRealtime()
         val isDouble = (now - lastCenterPressTime) < DOUBLE_TAP_THRESHOLD_MS
         lastCenterPressTime = now
@@ -6887,24 +6891,44 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     }
 
     /**
-     * Verdict for the remote tap currently being dispatched, consumed by the next [isDoubleTap].
-     *
-     * Set immediately before synthesizing the key and cleared as it is read, so it cannot leak into
-     * an unrelated physical press. Null whenever the touchpad is the origin.
-     */
-    private var pendingRemoteDoubleTap: Boolean? = null
-
-    /**
      * Arm the double-tap window for the NEXT press, as the tab-entry branches do.
      *
-     * A no-op for remote input. The window is a touchpad-clock quantity, and a remote tap that
-     * stamped it would make the user's next PHYSICAL tap read as a double -- exactly the cross-talk
-     * the origin split exists to prevent. Remote taps carry their own interval from the source, so
-     * they need no armed window here.
+     * A no-op for remote input, for the same reason [isDoubleTap] is: the window is a
+     * touchpad-clock quantity, and a remote action that stamped it would make the user's next
+     * PHYSICAL tap read as a double.
      */
     private fun armDoubleTapWindow() {
         if (currentInputOrigin == InputOrigin.REMOTE) return
         lastCenterPressTime = SystemClock.elapsedRealtime()
+    }
+
+    /**
+     * Run a tap's action either after the touchpad's disambiguation window or immediately.
+     *
+     * The physical touchpad MUST wait: `onKeyDown` cannot know yet whether a second tap is coming,
+     * and acting now would make every double tap also perform the single-tap action first. That
+     * deferral is preserved exactly as it was.
+     *
+     * A remote SELECT must NOT wait. The source already waited out its own window before deciding to
+     * send SELECT at all; waiting again here would charge the user two windows plus the transport
+     * round trip for one tap, and no second key can arrive to cancel it -- a remote double tap
+     * arrives as one BACK, never as two SELECTs.
+     *
+     * [pendingTapRunnable] is left null on the remote path rather than set and cleared. It exists
+     * only so a later key can CANCEL a deferred tap, and nothing is deferred here -- parking a
+     * runnable that has already run would leave a stale handle for some later branch to remove
+     * callbacks for.
+     */
+    private fun runAfterTapWindow(runnable: Runnable) {
+        if (currentInputOrigin == InputOrigin.REMOTE) {
+            // Synchronous, so this still executes inside dispatchRemoteKey's try/finally and any
+            // origin the runnable captured is still REMOTE -- which is what keeps the Assistant-row
+            // guard inside it working.
+            runnable.run()
+            return
+        }
+        pendingTapRunnable = runnable
+        mainHandler.postDelayed(runnable, DOUBLE_TAP_THRESHOLD_MS)
     }
 
     /**
@@ -6916,22 +6940,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * thread, and is restored in a `finally`, so a handler that throws cannot leave it stuck.
      */
     private var currentInputOrigin = InputOrigin.TOUCHPAD
-
-    /**
-     * Decide single-versus-double for a remote tap using the SOURCE's own clock.
-     *
-     * `sinceLastMs` was stamped when the finger landed on the remote device, so it survives every
-     * kind of transport jitter -- coalescing, a queue stall, a connection interval. Timing the same
-     * two taps by arrival here would routinely stretch a deliberate 350 ms double tap past the
-     * 400 ms threshold and deliver two singles instead.
-     *
-     * The 40 ms floor the touchpad applies is deliberately NOT enforced: it debounces capacitive
-     * hardware that can report one physical touch twice, which is not a failure mode a remote
-     * source has.
-     */
-    private fun remoteTapIsDouble(sinceLastMs: Int): Boolean =
-        sinceLastMs != RemoteInputEvent.NO_PREDECESSOR &&
-            sinceLastMs < DOUBLE_TAP_THRESHOLD_MS
 
     // --- Night Vision ML slider controls ---
     // Design system: monospace, dim text, no decorative borders, focus = glow text + 0.5->1.5dp border animated
@@ -7100,6 +7108,86 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     }
 
     /**
+     * The panel was off and this event woke it. Reuse the same lock rather than stacking.
+     *
+     * Timed, never indefinite: it exists to survive the wake itself, after which the ordinary
+     * screen-timeout policy owns the panel again. Matching the `[SvcWake]` pattern in
+     * `ListenerService`, which is the only other place in this app that turns the panel on.
+     */
+    private var remoteWakeLock: android.os.PowerManager.WakeLock? = null
+
+    /** How long the wake lock is held. The panel's own timeout takes over after this. */
+    private val REMOTE_WAKE_HOLD_MS = 5_000L
+
+    /**
+     * True when the panel is genuinely dark.
+     *
+     * DISPLAY STATE, not `PowerManager.isInteractive`: `isInteractive` reports true in DOZE and
+     * ON_SUSPEND on this device, so a screen the user cannot read would be treated as visible and
+     * the event acted on invisibly -- the exact defect this exists to fix. `ListenerService`'s solo
+     * notification path learned the same thing and reads the same node.
+     */
+    private fun panelIsOff(): Boolean = try {
+        (getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+            .getDisplay(android.view.Display.DEFAULT_DISPLAY)?.state ==
+            android.view.Display.STATE_OFF
+    } catch (e: Exception) {
+        // Unreadable display state must not silently become "the screen is on", which would
+        // reinstate blind dispatch. Assume nothing and let the event through: acting on a screen
+        // that IS on is correct, and this branch is not reachable in practice.
+        uiLog("[RemoteInput] display state unreadable: ${e.message}")
+        false
+    }
+
+    /**
+     * Wake the panel for a remote event, CONSUMING that event.
+     *
+     * The first event after the screen went dark is spent on the wake and does nothing else. The
+     * alternative -- wake and also act -- means the user selects, enters or leaves something they
+     * cannot see, and on this UI several of those are one keypress from a microphone. A remote user
+     * has no way to know the panel was off, so "your first press turns it on" is the only rule they
+     * can predict. It also matches the phone/watch convention the user already has in their hands.
+     *
+     * A FOLDED device is NOT woken. Folded means the glasses are in a pocket or a case; lighting the
+     * waveguide there drains the battery to show nothing, and [RemoteActionGate] refuses every
+     * action in that state anyway, so waking would light a panel that then does nothing.
+     *
+     * Either way the source is TOLD, over the existing refusal backchannel, so its haptic reports
+     * "nothing happened" rather than confirming an action the user never got.
+     *
+     * @return true when the event was consumed here and must not be dispatched.
+     */
+    private fun consumeForScreenWake(e: RemoteInputEvent): Boolean {
+        if (!panelIsOff()) return false
+
+        if (foldedState) {
+            uiLog("[RemoteInput] ${e.action} consumed: panel off and folded, not waking")
+            reportRemoteRefusal(RemoteActionGate.Denial.REFUSED_FOLDED)
+            return true
+        }
+
+        try {
+            val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+            remoteWakeLock?.let { if (it.isHeld) it.release() }
+            @Suppress("DEPRECATION")
+            remoteWakeLock = pm.newWakeLock(
+                android.os.PowerManager.FULL_WAKE_LOCK or
+                    android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "GlassesListener::RemoteWake",
+            ).apply { acquire(REMOTE_WAKE_HOLD_MS) }
+            uiLog("[RemoteInput] ${e.action} consumed to WAKE the panel (held ${REMOTE_WAKE_HOLD_MS}ms)")
+        } catch (ex: Exception) {
+            uiLog("[RemoteInput] wake failed: ${ex.message}")
+        }
+
+        // The action did not happen. Reported as NOT_ALLOWED because that is the closest existing
+        // reason and it is honest about the outcome; the alternatives claim a fold or a busy UI that
+        // are not the case, and inventing a wire reason for this would be a protocol change.
+        reportRemoteRefusal(RemoteActionGate.Denial.REFUSED_NOT_ALLOWED)
+        return true
+    }
+
+    /**
      * Snapshot every input the gate needs, read on the main thread at dispatch time.
      *
      * Taken as one value rather than read piecemeal inside the gate so the decision and the
@@ -7135,38 +7223,23 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * code path from a remote event to that keycode, by construction rather than by a check.
      */
     override fun onRemoteInput(e: RemoteInputEvent) {
+        // The SOURCE already recognised its own gestures, so every action arriving here is what the
+        // user MEANT. There is deliberately no gesture reconstruction: no arrival-interval
+        // arithmetic, no deferral, and no path from two SELECTs to a BACK. That reconstruction is
+        // exactly what produced the bug this replaced -- a remote double tap dispatched
+        // DPAD_CENTER and then KEYCODE_BACK 15 ms later, so the user entered something and was
+        // instantly taken back out of it, and the two cancelled to nothing.
+        //
+        // The physical touchpad is untouched by this. It still does its own local recognition in
+        // isDoubleTap()/handleTouchpadKey(), because for the touchpad the recognition delay IS
+        // local and therefore free -- which is the same reason the watch now does its own.
+        if (consumeForScreenWake(e)) return
         val acted = when (e.action) {
             RemoteAction.SCROLL_STEP -> dispatchRemoteScroll(e.delta)
-            // A tap is DPAD_CENTER, the keycode the physical tap actually proxies through as.
+            // SELECT is DPAD_CENTER, the keycode a physical tap actually proxies through as.
             // NUMPAD_2 would be wrong: it is consumed by the release/double-tap branches at the top
             // of onKeyDown and never reaches the focus dispatch at all, so it selects nothing.
-            RemoteAction.TAP -> {
-                // Disambiguate on the source's clock, before dispatch, so the handler's own
-                // isDoubleTap() sees the user's real intent rather than the arrival interval.
-                if (remoteTapIsDouble(e.sinceLastMs)) {
-                    // The SECOND tap of a remote double tap is the user asking to LEAVE, so it is
-                    // gated and dispatched as BACK rather than as another TAP.
-                    //
-                    // This is what makes the exit exist at all. The watch sends only raw taps
-                    // (EventType.SELECT) and nothing anywhere produces EventType.BACK, so before
-                    // this a double tap was gated as TAP -- and in every TAP_REACHES_HAZARD state
-                    // the user could ENTER from the watch and then neither select nor leave, with
-                    // the physical touchpad the only way out.
-                    //
-                    // Deciding it here rather than on the watch is deliberate: the glasses own
-                    // double-tap disambiguation for the touchpad too, so both sources keep the
-                    // same feel and cannot drift apart.
-                    dispatchRemoteAction(RemoteAction.BACK, KeyEvent.KEYCODE_BACK)
-                } else {
-                    pendingRemoteDoubleTap = false
-                    val dispatched =
-                        dispatchRemoteAction(e.action, KeyEvent.KEYCODE_DPAD_CENTER)
-                    // Refused, or consumed by a branch that never calls isDoubleTap(): drop the
-                    // verdict rather than let it apply to some later press.
-                    pendingRemoteDoubleTap = null
-                    dispatched
-                }
-            }
+            RemoteAction.SELECT -> dispatchRemoteAction(e.action, KeyEvent.KEYCODE_DPAD_CENTER)
             RemoteAction.BACK -> dispatchRemoteAction(e.action, KeyEvent.KEYCODE_BACK)
         }
         if (acted) showRemoteActiveGlyph()
@@ -7846,7 +7919,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                                     // in the same burst would otherwise re-aim a tap that
                                     // was judged safe onto this row.
                                     if (tapOrigin == InputOrigin.REMOTE) {
-                                        uiLog("[RemoteInput] refused TAP on the Assistant row (starts the mic)")
+                                        uiLog("[RemoteInput] refused SELECT on the Assistant row (starts the mic)")
                                     } else {
                                         openAssistant()
                                     }
@@ -7854,8 +7927,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                                     openSelectedChat()
                                 }
                             }
-                            pendingTapRunnable = runnable
-                            mainHandler.postDelayed(runnable, DOUBLE_TAP_THRESHOLD_MS)
+                            runAfterTapWindow(runnable)
                         }
                         return true
                     }
@@ -7905,8 +7977,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                                     MAP_FOCUS_PIN -> toggleMapPin()
                                 }
                             }
-                            pendingTapRunnable = runnable
-                            mainHandler.postDelayed(runnable, DOUBLE_TAP_THRESHOLD_MS)
+                            runAfterTapWindow(runnable)
                         }
                         return true
                     }

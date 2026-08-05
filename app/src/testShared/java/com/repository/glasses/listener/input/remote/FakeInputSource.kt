@@ -65,7 +65,7 @@ class FakeInputSource(
 
     fun tap(sid: Long, wms: Long = clock(), seqOverride: Long? = null) {
         val s = seqOverride ?: ++seq
-        emit(RemoteInputFrame.Action(1, sourceId, sid, s, wms, RemoteAction.TAP, 0))
+        emit(RemoteInputFrame.Action(1, sourceId, sid, s, wms, RemoteAction.SELECT, 0))
     }
 
     fun back(sid: Long, wms: Long = clock(), seqOverride: Long? = null) {

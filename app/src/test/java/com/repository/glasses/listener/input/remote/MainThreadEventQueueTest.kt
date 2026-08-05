@@ -12,7 +12,7 @@ class MainThreadEventQueueTest {
     )
 
     private fun tap(seq: Long = 1L) = RemoteInputEvent(
-        action = RemoteAction.TAP, delta = 0,
+        action = RemoteAction.SELECT, delta = 0,
         sourceId = "watch", sid = 1L, seq = seq, ageMs = 0, sinceLastMs = -1,
     )
 
@@ -37,7 +37,7 @@ class MainThreadEventQueueTest {
         h.queue.enqueue(scroll(-1, 3))
         h.flush()
         assertEquals(
-            listOf(RemoteAction.SCROLL_STEP, RemoteAction.TAP, RemoteAction.SCROLL_STEP),
+            listOf(RemoteAction.SCROLL_STEP, RemoteAction.SELECT, RemoteAction.SCROLL_STEP),
             h.delivered.map { it.action },
         )
     }
@@ -164,7 +164,7 @@ class MainThreadEventQueueTest {
         h.queue.enqueue(scroll(1, 1))
         h.flush()
         assertEquals("the re-entrant event must not be stranded", 2, h.delivered.size)
-        assertEquals(RemoteAction.TAP, h.delivered[1].action)
+        assertEquals(RemoteAction.SELECT, h.delivered[1].action)
     }
 
     @Test
@@ -219,7 +219,7 @@ class MainThreadEventQueueTest {
         h.queue.enqueue(tap(4))
         h.queue.enqueue(scroll(20, 5))   // overflow: sheds the FIRST tap
         h.flush()
-        val tapIndex = h.delivered.indexOfFirst { it.action == RemoteAction.TAP }
+        val tapIndex = h.delivered.indexOfFirst { it.action == RemoteAction.SELECT }
         assertTrue("a tap must still be present", tapIndex >= 0)
         val before = h.delivered.take(tapIndex).sumOf { it.delta }
         assertEquals("motion after the tap must not be applied before it", 0, before)

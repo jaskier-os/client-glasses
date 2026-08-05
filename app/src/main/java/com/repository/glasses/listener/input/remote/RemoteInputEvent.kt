@@ -7,37 +7,44 @@ package com.repository.glasses.listener.input.remote
  * That is what makes a second input device (a direct BLE gadget, another phone, a USB dongle) a
  * matter of writing one new [InputSource] rather than editing the UI.
  *
+ * ## Actions, not gestures
+ *
+ * Every value below is what the user MEANT, never what their finger did. Gesture recognition is the
+ * SOURCE's job and happens on the source, where the recognition delay is free; interpreting the
+ * resulting action against the current UI is this side's job. Nothing here or downstream may try to
+ * reconstruct a gesture from a sequence of actions.
+ *
  * ## Extension axes
  * - **New DEVICE**: implement [InputSource], register it from `ListenerService`. Zero changes here,
  *   zero changes in `RemoteInputRouter`, zero changes in `MainActivity`.
- * - **New ACTION** (a 4th gesture): that is a new UI capability, not a new device. It requires
- *   adding a [RemoteAction] value AND teaching `MainActivity` what it means. That is deliberate and
- *   is expected to go through review -- it is not a failure of the abstraction.
+ * - **New GESTURE on an existing device**: entirely the source's business, as long as it resolves to
+ *   one of the actions below. Zero changes anywhere in this repo.
+ * - **New ACTION**: that is a new UI capability, not a new device. It requires adding a
+ *   [RemoteAction] value AND teaching `MainActivity` what it means. That is deliberate and is
+ *   expected to go through review -- it is not a failure of the abstraction.
  */
 enum class RemoteAction {
     /** A scroll detent, or several coalesced into one. Direction lives in the sign of `delta`. */
     SCROLL_STEP,
 
     /**
-     * A RAW tap. Deliberately not "select": single-versus-double is NOT decided here.
+     * Select / enter. A SEMANTIC action: the user asked to activate what is focused.
      *
-     * The glasses already disambiguate taps in exactly one place -- `MainActivity.isDoubleTap()`,
-     * a 400 ms threshold the user has tuned by feel on the physical touchpad -- and single = select
-     * while double = back. A remote source therefore sends raw taps and inherits that behaviour for
-     * free, which is the entire point of this layer: the watch feels identical to the touchpad
-     * without reimplementing anything, and so does the next device.
+     * The source decided this. On the watch it is what one tap resolves to, after the watch waited
+     * out its own double-tap window locally. The glasses do NOT re-derive gestures from it: there is
+     * no arrival-time arithmetic, no deferral, and no path from two of these to a [BACK].
      *
-     * A source MUST NOT run its own double-tap detector. Two detectors with different thresholds
-     * fight: the source's would consume the pair and mask the glasses' logic, and the two input
-     * devices would diverge.
+     * That split is what makes the abstraction real. A source with a bezel, a source with a real
+     * back button and a source with a voice trigger all emit the same three actions, and the UI
+     * needs no knowledge of any of their gesture vocabularies.
      */
-    TAP,
+    SELECT,
 
     /**
-     * An explicit back action from a source that has a dedicated control for it.
+     * Back / exit. A SEMANTIC action: the user asked to leave where they are.
      *
-     * Distinct from a double [TAP], which also reaches back through the shared detector. This exists
-     * for devices with a real back button; the watch does not use it.
+     * Produced by whatever affordance the source has for it -- a dedicated button, or, on the watch,
+     * a locally recognised double tap. What produced it is the source's business.
      */
     BACK,
 }

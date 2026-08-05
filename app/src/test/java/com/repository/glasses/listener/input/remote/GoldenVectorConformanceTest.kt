@@ -200,7 +200,7 @@ class GoldenVectorConformanceTest {
                     assertEquals("steps sign or magnitude drifted", v.steps, frame.delta)
                     val expected = when (v.typeCode) {
                         RemoteInputCodec.TYPE_SCROLL -> RemoteAction.SCROLL_STEP
-                        RemoteInputCodec.TYPE_TAP -> RemoteAction.TAP
+                        RemoteInputCodec.TYPE_SELECT -> RemoteAction.SELECT
                         else -> RemoteAction.BACK
                     }
                     assertEquals(expected, frame.action)
@@ -299,7 +299,7 @@ class GoldenVectorConformanceTest {
     @Test
     fun `a non-SCROLL frame carrying steps is rejected`() {
         for ((code, name) in listOf(
-            RemoteInputCodec.TYPE_TAP to "TAP",
+            RemoteInputCodec.TYPE_SELECT to "TAP",
             RemoteInputCodec.TYPE_BACK to "BACK",
             RemoteInputCodec.TYPE_OPEN to "OPEN",
             RemoteInputCodec.TYPE_CLOSE to "CLOSE",

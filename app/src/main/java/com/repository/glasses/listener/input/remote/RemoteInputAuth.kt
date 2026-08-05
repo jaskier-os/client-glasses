@@ -152,7 +152,7 @@ class RemoteInputAuth(key: ByteArray) {
          *   A sender holding `wms` in a signed 32-bit int would otherwise render `-1234` where the
          *   receiver renders `4294966062`, and `wms` crosses the sign bit routinely.
          * - [steps] is rendered by [steps]: signed decimal, no leading `+`, no leading zeros.
-         * - [typeCode] is the NUMERIC opcode (`1=SCROLL 2=TAP 3=BACK 4=OPEN 5=CLOSE 6=PING`), the
+         * - [typeCode] is the NUMERIC opcode (`1=SCROLL 2=SELECT 3=BACK 4=OPEN 5=CLOSE 6=PING`), the
          *   same value the binary encoding carries, never the readable name.
          *
          * `src` is the only variable-length field, so a bare separator join is not injective in

@@ -146,7 +146,7 @@ class RemoteInputInjectionInstrumentedTest {
         }
         drainMainThread()
 
-        val taps = sink.events.filter { it.action == RemoteAction.TAP }
+        val taps = sink.events.filter { it.action == RemoteAction.SELECT }
         assertEquals(spacings.size + 1, taps.size)
         assertEquals(
             "the first tap of a session has no predecessor",
@@ -173,7 +173,7 @@ class RemoteInputInjectionInstrumentedTest {
         drainMainThread()
 
         // Taps are discrete and must never be merged the way scrolls are.
-        assertEquals(3, sink.events.count { it.action == RemoteAction.TAP })
+        assertEquals(3, sink.events.count { it.action == RemoteAction.SELECT })
     }
 
     @Test
@@ -195,9 +195,9 @@ class RemoteInputInjectionInstrumentedTest {
         assertEquals(
             listOf(
                 RemoteAction.SCROLL_STEP,
-                RemoteAction.TAP,
+                RemoteAction.SELECT,
                 RemoteAction.SCROLL_STEP,
-                RemoteAction.TAP,
+                RemoteAction.SELECT,
             ),
             actions,
         )

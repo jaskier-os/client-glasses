@@ -72,7 +72,7 @@ class RemoteInputRouterTest {
         watch.tap(sid = 1)
         watch.back(sid = 1)
         flush()
-        assertEquals(listOf(RemoteAction.TAP, RemoteAction.BACK), sink.actions)
+        assertEquals(listOf(RemoteAction.SELECT, RemoteAction.BACK), sink.actions)
         assertEquals(listOf(0, 0), sink.deltas)
     }
 
@@ -894,7 +894,7 @@ class RemoteInputRouterTest {
         val src2 = restart(store, s2)
         // Replay the captured burst verbatim.
         src2.emit(RemoteInputFrame.Lifecycle(1, "watch", 100L, 9L, now, RemoteLifecycle.OPEN))
-        src2.emit(RemoteInputFrame.Action(1, "watch", 100L, 10L, now, RemoteAction.TAP, 0))
+        src2.emit(RemoteInputFrame.Action(1, "watch", 100L, 10L, now, RemoteAction.SELECT, 0))
         src2.emit(
             RemoteInputFrame.Action(1, "watch", 100L, 11L, now, RemoteAction.SCROLL_STEP, 3)
         )
