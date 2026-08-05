@@ -35,7 +35,10 @@ import android.os.Build
 import android.os.Debug
 import android.os.Environment
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
+import com.repository.glasses.listener.BuildConfig
+import com.repository.glasses.listener.input.remote.RemoteInputBridgeService
 import android.os.Looper
 import android.os.PowerManager
 import android.os.StatFs
@@ -2181,11 +2184,43 @@ class ListenerService : LifecycleService(),
         }
     }
 
-    private val binder = Binder()
+    /**
+     * Delivery thread for remote input. Deliberately NOT this process's main looper: that looper
+     * serves Bluetooth and audio callbacks, and a binder transaction to a busy UI process stalling
+     * it would stall those too. One thread, so the oneway per-thread FIFO ordering the bridge relies
+     * on actually holds.
+     */
+    private val remoteInputThread: HandlerThread by lazy {
+        HandlerThread("remote-input").also { it.start() }
+    }
+    private val remoteInputHandler: Handler by lazy { Handler(remoteInputThread.looper) }
+
+    private val remoteInputRouter: com.repository.glasses.listener.input.remote.RemoteInputRouter by lazy {
+        com.repository.glasses.listener.input.remote.RemoteInputRouter(
+            store = com.repository.glasses.listener.input.remote.PrefsSessionStore(applicationContext),
+            clock = { SystemClock.elapsedRealtime() },
+            post = { remoteInputHandler.post(it) },
+            log = { btLog(it) },
+        )
+    }
+
+    private var remoteInputSource: com.repository.glasses.listener.input.remote.WatchRelaySource? = null
+    private var remoteInputRelay: com.repository.glasses.listener.bt.MessageRelay? = null
+
+    /**
+     * Remote input (watch bezel etc.) arrives on this process's Bluetooth sockets, but the UI it
+     * drives lives in the DEFAULT process -- this service is `android:process=":backend"`. The two
+     * share no memory, so the router's sink has to be a binder. `MainActivity` already binds this
+     * service for backend health monitoring, so the bridge rides that single existing binding rather
+     * than opening a second one that would race it.
+     */
+    private val remoteInputBridge: RemoteInputBridgeService by lazy {
+        RemoteInputBridgeService(remoteInputRouter) { btLog(it) }
+    }
 
     override fun onBind(intent: Intent): IBinder = GT.section("svc.onBind") {
         super.onBind(intent)
-        binder
+        remoteInputBridge
     }
 
     override fun onCreate() = GT.section("svc.onCreate") {
@@ -2379,6 +2414,34 @@ class ListenerService : LifecycleService(),
             btErr("Map relay init failed: ${e.message}")
         }
 
+        // Remote input (watch bezel / future devices) on its own RFCOMM socket. Kept off the main
+        // messaging relay so a burst of scroll detents can never queue behind a photo or a TTS
+        // chunk -- scroll latency is the whole feature.
+        try {
+            val relay = com.repository.glasses.listener.bt.MessageRelay(
+                btManagerBridge,
+                applicationContext,
+                com.repository.glasses.listener.bt.MessageRelay.INPUT_UUID,
+                com.repository.glasses.listener.bt.MessageRelay.INPUT_SERVICE_NAME,
+            )
+            relay.remoteLog = { btLog(it) }
+            val source = com.repository.glasses.listener.input.remote.WatchRelaySource(
+                relay = relay,
+                auth = com.repository.glasses.listener.input.remote.RemoteInputAuth(
+                    BuildConfig.REMOTE_INPUT_HMAC_KEY.toByteArray(Charsets.UTF_8)
+                ),
+                clock = { SystemClock.elapsedRealtime() },
+                log = { btLog(it) },
+            )
+            source.onTransportLost = { remoteInputRouter.clearAllSessions("input transport lost") }
+            // THE registration extension point. A second device is one more registerSource call.
+            remoteInputRouter.registerSource(source)
+            remoteInputSource = source
+            remoteInputRelay = relay
+        } catch (e: Exception) {
+            btErr("Remote input init failed: ${e.message}")
+        }
+
         // Init CaptureBridge + FunctionButtonHandler. ScreenOffAccessibilityService is the
         // source of KEYCODE_CAMERA events (system-wide, foreground-independent) and posts
         // them here via ACTION_FN_KEY broadcasts, which drive the long-press state machine
@@ -2468,6 +2531,12 @@ class ListenerService : LifecycleService(),
                     btLog("Map relay started")
                 } catch (e: Exception) {
                     btErr("Map relay start failed: ${e.message}")
+                }
+                try {
+                    remoteInputRelay?.start()
+                    btLog("Remote input relay started")
+                } catch (e: Exception) {
+                    btErr("Remote input relay start failed: ${e.message}")
                 }
             } catch (e: Exception) {
                 broadcastDebugStatus("BT:init_exception:${e.message}")
@@ -8994,6 +9063,12 @@ class ListenerService : LifecycleService(),
 
     override fun onDestroy() = GT.section("svc.onDestroy") {
         Log.d(TAG_LIFE, "event=onDestroy")
+        remoteInputSource?.let { runCatching { remoteInputRouter.unregisterSource(it) } }
+        remoteInputSource = null
+        runCatching { remoteInputRelay?.let { it.listener = null; it.stop() } }
+        remoteInputRelay = null
+        runCatching { remoteInputBridge.shutdown() }
+        runCatching { remoteInputThread.quitSafely() }
         btLog("Service destroying")
         stopRfcommMouse()
         for (obs in dcimObservers) { try { obs.stopWatching() } catch (_: Throwable) {} }

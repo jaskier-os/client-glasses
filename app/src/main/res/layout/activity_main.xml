@@ -90,6 +90,24 @@
                     android:focusableInTouchMode="false"
                     android:defaultFocusHighlightEnabled="false" />
 
+                <!-- Remote input active indicator. Shown briefly whenever a remote source
+                     (watch bezel etc.) actually drives the UI, so the user can tell an
+                     unresponsive remote from an unresponsive app. -->
+                <TextView
+                    android:id="@+id/remoteInputGlyph"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:gravity="center_vertical"
+                    android:text="[R]"
+                    android:textColor="#00AA00"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace"
+                    android:background="#000000"
+                    android:layout_marginEnd="4dp"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false" />
+
                 <TextView
                     android:id="@+id/statusBar"
                     android:layout_width="0dp"

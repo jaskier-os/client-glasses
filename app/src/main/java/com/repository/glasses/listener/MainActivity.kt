@@ -28,6 +28,11 @@ import android.util.Base64
 import android.view.KeyEvent
 import android.view.TextureView
 import com.repository.glasses.listener.input.TouchpadAbsListener
+import com.repository.glasses.listener.input.remote.RemoteAction
+import com.repository.glasses.listener.input.remote.RemoteActionGate
+import com.repository.glasses.listener.input.remote.RemoteInputBridgeClient
+import com.repository.glasses.listener.input.remote.RemoteInputEvent
+import com.repository.glasses.listener.input.remote.RemoteInputSink
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
@@ -86,7 +91,7 @@ import com.repository.glasses.listener.mouse.DpadInputHandler
 import com.repository.glasses.listener.mouse.HidMouseService
 import java.util.UUID
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), RemoteInputSink {
 
     companion object {
         private const val TAG = "MainActivityUI"
@@ -98,6 +103,17 @@ class MainActivity : AppCompatActivity() {
         // app-side throttle just swallows legitimate events during fast
         // swipes. Set to 0 -- daemon is the sole pacing authority.
         private const val SCROLL_THROTTLE_MS = 0L
+
+        /**
+         * Hard ceiling on how far ONE remote event may scroll, regardless of the detent count it
+         * carries. Coalescing legitimately merges a few detents into one event, but the cap is
+         * enforced by the receiver rather than by trusting the producer -- a source that claims a
+         * large magnitude must not be able to fling the list past everything the user can track.
+         */
+        private const val MAX_REMOTE_SCROLL_STEPS = 8
+
+        /** How long the "remote active" glyph lingers after the last acted-on remote event. */
+        private const val REMOTE_GLYPH_LINGER_MS = 1500L
         private const val TAB_ICON_SCALE_SELECTED = 1.3f
         private const val TAB_ICON_SCALE_DEFAULT = 1.0f
         const val TAB_SLOT_DP = 29
@@ -296,12 +312,33 @@ class MainActivity : AppCompatActivity() {
     private val backendConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             backendBound = true
+            // Remote input is produced in :backend and consumed here. This is the only moment a
+            // live binder to it exists, so it is where the sink attaches.
+            remoteInputBridge.onBackendConnected(service)
         }
         override fun onServiceDisconnected(name: ComponentName?) {
             backendBound = false
+            remoteInputBridge.onBackendDisconnected()
             startForegroundService(Intent(this@MainActivity, ListenerService::class.java))
             mainHandler.postDelayed({ bindBackend() }, 2000)
         }
+        override fun onBindingDied(name: ComponentName?) {
+            // Distinct from onServiceDisconnected: the binding itself is dead and Android will NOT
+            // auto-rebind it. Without an explicit unbind+rebind the UI never receives input again.
+            backendBound = false
+            remoteInputBridge.onBackendDisconnected()
+            try { unbindService(this) } catch (_: Throwable) {}
+            mainHandler.postDelayed({ bindBackend() }, 2000)
+        }
+    }
+
+    /**
+     * UI-process end of the remote-input bridge. Turns cross-process deliveries back into the plain
+     * in-process [RemoteInputSink] callback this Activity implements, so nothing below this line
+     * knows a process boundary exists.
+     */
+    private val remoteInputBridge by lazy {
+        RemoteInputBridgeClient(mainHandler, this) { uiLog(it) }
     }
 
     // --- Views ---
@@ -316,6 +353,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusBar: TextView
     private lateinit var doubleTapHint: View
     private var doubleTapHintRunnable: Runnable? = null
+    private lateinit var remoteInputGlyph: TextView
     private lateinit var statusIcon: ImageView
     private lateinit var progressBar: TextView
     private lateinit var cameraPreview: TextureView
@@ -3508,6 +3546,7 @@ class MainActivity : AppCompatActivity() {
             chatListRecycler = findViewById(R.id.chatListRecycler)
             statusArea = findViewById(R.id.statusArea)
             statusBar = findViewById(R.id.statusBar)
+            remoteInputGlyph = findViewById(R.id.remoteInputGlyph)
             doubleTapHint = findViewById(R.id.doubleTapHint)
             statusIcon = findViewById(R.id.statusIcon)
             progressBar = findViewById(R.id.progressBar)
@@ -6984,6 +7023,103 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
+    // --- Remote input sink (watch bezel and any future InputSource) ---
+
+    private var remoteGlyphHideRunnable: Runnable? = null
+
+    /**
+     * Flash the "remote is driving this" indicator.
+     *
+     * Deliberately driven by ACTED-ON events rather than by session state: a session can be open
+     * while every event is being refused, and an indicator that is lit in that case tells the user
+     * the opposite of the truth.
+     */
+    private fun showRemoteActiveGlyph() {
+        if (!::remoteInputGlyph.isInitialized) return
+        remoteGlyphHideRunnable?.let { mainHandler.removeCallbacks(it) }
+        remoteInputGlyph.visibility = View.VISIBLE
+        val hide = Runnable { remoteInputGlyph.visibility = View.GONE }
+        remoteGlyphHideRunnable = hide
+        mainHandler.postDelayed(hide, REMOTE_GLYPH_LINGER_MS)
+    }
+
+    /**
+     * Snapshot every input the gate needs, read on the main thread at dispatch time.
+     *
+     * Taken as one value rather than read piecemeal inside the gate so the decision and the
+     * dispatch cannot straddle a state change -- several of these flags flip from broadcast
+     * callbacks that also run on this thread.
+     */
+    private fun remoteInputSnapshot() = RemoteActionGate.UiInputSnapshot(
+        focusState = focusState.name,
+        serviceState = serviceState,
+        foldedState = foldedState,
+        todoFocusLevel = todoFocusLevel,
+        replyArming = replyArming,
+        hasActiveReply = activeReplyNotifId != null,
+        replySendPending = replySendPending,
+        notificationRepliable = notificationRepliable,
+        translationStarting = translationStarting,
+        translationActive = translationActive,
+        mouseTracking = dpadHandler.trackingEnabled,
+        nvSliderLocked = nvSliderLocked,
+    )
+
+    /**
+     * Act on one authenticated remote event. Always on the main thread.
+     *
+     * This method owns EVERY glasses-UI decision about remote input -- which keycode an action
+     * becomes and whether it is permitted -- because the layer below it
+     * ([com.repository.glasses.listener.input.remote.RemoteInputRouter]) is deliberately free of
+     * keycodes and focus states. Adding a new input device therefore changes nothing here.
+     *
+     * Note what is NOT reachable: `KEYCODE_NUMPAD_3` (the touchpad hold) is never synthesized from
+     * any remote source. On the physical pad it arms a notification voice reply that records the
+     * microphone and sends a message to a real contact, and it launches the assistant. There is no
+     * code path from a remote event to that keycode, by construction rather than by a check.
+     */
+    override fun onRemoteInput(e: RemoteInputEvent) {
+        val verdict = RemoteActionGate.evaluate(remoteInputSnapshot(), e.action)
+        if (verdict != RemoteActionGate.Denial.ALLOWED) {
+            uiLog("[RemoteInput] refused ${e.action} in $focusState: $verdict")
+            return
+        }
+        when (e.action) {
+            RemoteAction.SCROLL_STEP -> dispatchRemoteScroll(e.delta)
+            // A tap is DPAD_CENTER, the keycode the physical tap actually proxies through as.
+            // NUMPAD_2 would be wrong: it is consumed by the release/double-tap branches at the top
+            // of onKeyDown and never reaches the focus dispatch at all, so it selects nothing.
+            RemoteAction.TAP -> dispatchRemoteKey(KeyEvent.KEYCODE_DPAD_CENTER)
+            RemoteAction.BACK -> dispatchRemoteKey(KeyEvent.KEYCODE_BACK)
+        }
+        showRemoteActiveGlyph()
+    }
+
+    /**
+     * Feed a scroll as the same repeated keycodes the touchpad daemon emits, so remote scrolling
+     * lands in the identical per-focus-state handlers and inherits `ScrollDrainer` pacing.
+     *
+     * The magnitude is bounded independently of anything the producer claimed: a coalesced event
+     * legitimately carries several detents, but a single frame must never be able to fling the UI.
+     */
+    private fun dispatchRemoteScroll(delta: Int) {
+        if (delta == 0) return
+        val keyCode =
+            if (delta > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+        val steps = kotlin.math.min(kotlin.math.abs(delta), MAX_REMOTE_SCROLL_STEPS)
+        repeat(steps) { dispatchRemoteKey(keyCode) }
+    }
+
+    /**
+     * Route a synthesized keycode through the ordinary handler.
+     *
+     * Reusing `onKeyDown` rather than duplicating its logic is the point: remote input and the
+     * touchpad stay behaviourally identical for free, and they cannot drift apart later.
+     */
+    private fun dispatchRemoteKey(keyCode: Int) {
+        onKeyDown(keyCode, KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean = GT.section("ui.onKeyDown") {
         GT.counter("ui.keycode", keyCode.toLong())
         // rokid-touchpad-daemon emits synthetic keycodes on its virtual input
@@ -9267,7 +9403,12 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Throwable) {}
         try { unregisterReceiver(wifiStateReceiver) } catch (_: Throwable) {}
         // captureBridge lives in ListenerService now; its onDestroy handles unbind.
+        remoteGlyphHideRunnable?.let { mainHandler.removeCallbacks(it) }
+        remoteGlyphHideRunnable = null
         if (backendBound) {
+            // Detach the sink BEFORE dropping the binding, while the binder is still alive. After
+            // unbindService the backend only learns of this via its death recipient.
+            runCatching { remoteInputBridge.unregister() }
             unbindService(backendConnection)
             backendBound = false
         }
