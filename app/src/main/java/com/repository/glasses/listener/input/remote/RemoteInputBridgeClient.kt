@@ -142,6 +142,22 @@ class RemoteInputBridgeClient(
         log("[RemoteInput] backend disconnected")
     }
 
+    /**
+     * Tell `:backend` the UI declined an action, so it can put the reason on the status
+     * backchannel and the remote device can explain the silence.
+     *
+     * Silently dropped when the backend is not bound: with no backend there is no status
+     * channel to carry the refusal anyway, and a refusal is not worth a crash.
+     */
+    fun reportRefusal(reason: RemoteRefusalReason) {
+        val b = bridge ?: return
+        try {
+            b.reportRefusal(reason.ordinal)
+        } catch (e: RemoteException) {
+            log("[RemoteInput] reportRefusal failed: ${e.message}")
+        }
+    }
+
     /** Called on an orderly UI teardown, while the binder is still alive. */
     fun unregister() {
         val b = bridge ?: return

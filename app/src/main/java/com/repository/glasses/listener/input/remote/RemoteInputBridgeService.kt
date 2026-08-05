@@ -135,6 +135,17 @@ class RemoteInputBridgeService(
         announceSinkState()
     }
 
+    override fun reportRefusal(reasonOrdinal: Int) {
+        // Validate rather than index blindly: this arrives over IPC, and an ordinal from a
+        // mismatched build would otherwise throw inside a binder thread.
+        val reason = RemoteRefusalReason.values().getOrNull(reasonOrdinal)
+        if (reason == null) {
+            log("[RemoteInput] reportRefusal: unknown reason ordinal $reasonOrdinal")
+            return
+        }
+        router.reportRefusal(reason)
+    }
+
     private fun onSinkDied(dead: IBinder) {
         synchronized(lock) {
             // Only act if the dead binder is STILL the current one. A late death callback for a

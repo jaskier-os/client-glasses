@@ -143,4 +143,46 @@ data class RemoteInputStatus(
     val sinkAttached: Boolean,
     /** Cumulative events dropped for this source since the router was created. */
     val droppedTotal: Long,
+    /**
+     * The UI refused an action recently, and why.
+     *
+     * Distinct from [droppedTotal], which counts events the TRANSPORT discarded (no
+     * session, rate limit, TTL). This counts events that arrived intact and were then
+     * declined by the UI. The two have opposite remedies -- one is a link problem, the
+     * other is "you are folded" or "go back first" -- and collapsing them is what let
+     * the watch say "Connected" while every event was being refused.
+     *
+     * Null when nothing has been refused recently.
+     */
+    val refusal: RemoteRefusal? = null,
+)
+
+/**
+ * Why the glasses UI is declining input, in terms a remote device can render.
+ *
+ * Deliberately coarse: the watch needs to distinguish "wake your glasses" from "you
+ * cannot do that here", because those are the two cases with different user actions.
+ * Finer reasons would be noise on a 1-inch screen.
+ */
+enum class RemoteRefusalReason {
+    /** The action is not permitted in the current UI state. Go back, or do it here. */
+    NOT_ALLOWED,
+
+    /** The glasses are folded. Unfold them. */
+    FOLDED,
+
+    /** A call, recording or reply owns the UI. Wait, or finish it on the glasses. */
+    LOCKED,
+}
+
+/**
+ * A refusal, with the count so a source can tell a fresh refusal from a stale one
+ * without needing a synchronized clock.
+ */
+data class RemoteRefusal(
+    val reason: RemoteRefusalReason,
+    /** Cumulative refusals for this source since the router was created. */
+    val total: Long,
+    /** Elapsed-realtime ms on the GLASSES when the most recent refusal happened. */
+    val atWms: Long,
 )

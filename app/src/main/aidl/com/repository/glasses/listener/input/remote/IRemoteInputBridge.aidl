@@ -25,4 +25,20 @@ interface IRemoteInputBridge {
      * arriving screen has already registered, from clearing the newcomer's sink.
      */
     void unregisterSink(IRemoteInputSink sink);
+
+    /**
+     * Report that the UI declined an action it received, so the source can explain the
+     * silence to the user.
+     *
+     * The refusal decision is made in the UI process (only it knows the focus state) but
+     * the status backchannel lives in `:backend`. Without this call every refusal
+     * terminated in a log line on the glasses' internal flash while the watch went on
+     * saying "Connected" -- the single biggest UX failure of this feature.
+     *
+     * `oneway` on purpose: a refusal is already the unhappy path and the UI thread must
+     * not block on the backend to report one.
+     *
+     * @param reasonOrdinal ordinal of RemoteRefusalReason.
+     */
+    oneway void reportRefusal(int reasonOrdinal);
 }

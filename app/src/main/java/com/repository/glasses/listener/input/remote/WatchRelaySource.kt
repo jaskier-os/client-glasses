@@ -86,11 +86,18 @@ class WatchRelaySource(
         // Best-effort: the watch uses this to show why input is being ignored. A failure here must
         // never affect the input path.
         try {
+            // The refusal fields are APPENDED, so a phone build that only reads the first
+            // three positional args keeps working against a glasses build that sends five.
+            // Absent refusal is sent as the empty reason plus a zero count rather than by
+            // omitting the args, so the arity is fixed and the reader needs no special case.
+            val refusal = status.refusal
             relay.publish(
                 BtProtocol.CH_REMOTE_INPUT_STATUS,
                 if (status.sessionOpen) "1" else "0",
                 if (status.sinkAttached) "1" else "0",
                 status.droppedTotal.toString(),
+                refusal?.reason?.name ?: "",
+                (refusal?.total ?: 0L).toString(),
             )
         } catch (e: Exception) {
             log("watch input: status publish failed: ${e.javaClass.simpleName}")

@@ -276,12 +276,39 @@ class RemoteInputRouterTest {
     fun `an event older than the TTL is dropped`() {
         val openWms = now
         watch.open(sid = 1, wms = openWms)
+        // Spend the session's first-action TTL exemption on a fresh event, so what is under
+        // test here is the ordinary steady-state cutoff rather than the cold-bind allowance.
+        watch.scroll(sid = 1, steps = 1, wms = openWms)
+        flush()
+        sink.events.clear()
         // 2000 ms passes locally, but the source says the event was produced at session start,
         // so it has been 2000 ms in flight -- past the measured 1500 ms TTL.
         tick(2000)
         watch.scroll(sid = 1, steps = 1, wms = openWms)
         flush()
         assertTrue(sink.events.isEmpty())
+    }
+
+    /**
+     * The first action of a session is exempt, because a cold GMS listener bind (~1.5 s)
+     * exceeds the TTL on its own. Without the exemption the first bezel turn after an idle
+     * period silently did nothing and the second worked, which reads as flakiness.
+     */
+    @Test
+    fun `the first action of a session survives a cold-bind delay`() {
+        val openWms = now
+        watch.open(sid = 1, wms = openWms)
+        tick(2000)
+        watch.scroll(sid = 1, steps = 1, wms = openWms)
+        flush()
+        assertEquals(1, sink.events.size)
+
+        // The exemption is spent: the NEXT equally stale event is still dropped, so the
+        // TTL is not disabled for the session, only for its first action.
+        tick(2000)
+        watch.scroll(sid = 1, steps = 1, wms = openWms)
+        flush()
+        assertEquals(1, sink.events.size)
     }
 
     @Test
@@ -684,6 +711,11 @@ class RemoteInputRouterTest {
         // Otherwise the next tap would be timed against a long-superseded one and look like a
         // double tap the user never made.
         watch.open(sid = 1, wms = 0)
+        // Spend the session's first-action TTL exemption, so the stale tap below is actually
+        // dropped rather than admitted as the session's opener.
+        watch.scroll(sid = 1, steps = 1, wms = 0)
+        flush()
+        sink.events.clear()
         tick(2000)
         watch.tap(sid = 1, wms = 0)      // 2000 ms in flight: past the 1500 ms TTL, dropped
         tick(10)

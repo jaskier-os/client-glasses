@@ -90,6 +90,11 @@ class RemoteInputRouter(
         var dropped = 0L
         var lastRejectLogMs = 0L
         var suppressedRejectLogs = 0L
+
+        /** Refusals reported by the UI process, and the most recent one. */
+        var refusedTotal = 0L
+        var lastRefusalReason: RemoteRefusalReason? = null
+        var lastRefusalWms = 0L
     }
 
     private val sessionLock = Any()
@@ -399,12 +404,26 @@ class RemoteInputRouter(
         persistSeqLocked(state, frame.seq)
 
         val ageMs = ageOf(session, frame.wms, now)
-        if (ageMs > ttlMs) {
+        // The FIRST action of a session is exempt from the TTL.
+        //
+        // A cold GMS listener bind on the watch takes ~1.5 s, which exceeds the TTL on its
+        // own, so the first bezel turn after an idle period was silently dropped and the
+        // second worked. That is the most confusing behaviour available: the user concludes
+        // the feature is flaky rather than that one frame was late.
+        //
+        // The exemption is safe precisely because it is the first: the TTL exists to stop a
+        // BACKLOG of stale events replaying after a stall, and a session's first action has
+        // no backlog behind it by definition. Every subsequent event is still bounded.
+        val firstActionOfSession = session.lastActionWms < 0
+        if (ageMs > ttlMs && !firstActionOfSession) {
             rejectLocked(state, "stale by ${ageMs}ms (ttl $ttlMs)", now)
             // The stamp still advances: a dropped event is still an event the user produced, and
             // the NEXT one must be timed from it, not from whatever preceded the drop.
             session.lastActionWms = frame.wms
             return null
+        }
+        if (firstActionOfSession && ageMs > ttlMs) {
+            log("remote input: first action of session admitted late (${ageMs}ms > ttl $ttlMs)")
         }
 
         // Interval on the SOURCE's clock, so transport jitter cannot turn a double tap into two
@@ -590,6 +609,31 @@ class RemoteInputRouter(
         targets.forEach { publishStatus(it) }
     }
 
+    /**
+     * Record that the UI declined an action, and tell the sources immediately.
+     *
+     * Pushed rather than left for the next periodic tick: a refusal is exactly the moment
+     * the user is staring at an unresponsive screen, and the whole point of the signal is
+     * that it arrives while they are still wondering why nothing happened.
+     *
+     * The refusal is attributed to EVERY registered source rather than to the one that
+     * sent the event, because the UI process reports across a `oneway` binder call that
+     * carries no source identity. With a single remote device this is exact; with several
+     * it is deliberately pessimistic, which is the safe direction for a signal whose only
+     * effect is to explain a silence.
+     */
+    fun reportRefusal(reason: RemoteRefusalReason) {
+        val now = clock()
+        synchronized(sessionLock) {
+            for (state in sources.values) {
+                state.refusedTotal++
+                state.lastRefusalReason = reason
+                state.lastRefusalWms = now
+            }
+        }
+        publishStatusAll()
+    }
+
     private fun publishStatus(source: InputSource) {
         // Snapshot the queue's counter BEFORE taking sessionLock: reading it while holding
         // sessionLock would nest the two locks in the opposite order to the ingress path.
@@ -601,6 +645,13 @@ class RemoteInputRouter(
                 sessionOpen = state.session != null,
                 sinkAttached = sinkAttached,
                 droppedTotal = state.dropped + queueDropped,
+                refusal = state.lastRefusalReason?.let {
+                    RemoteRefusal(
+                        reason = it,
+                        total = state.refusedTotal,
+                        atWms = state.lastRefusalWms,
+                    )
+                },
             )
         }
         try {

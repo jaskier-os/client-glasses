@@ -34,6 +34,7 @@ import com.repository.glasses.listener.input.remote.RemoteActionGate
 import com.repository.glasses.listener.input.remote.RemoteInputBridgeClient
 import com.repository.glasses.listener.input.remote.RemoteInputEvent
 import com.repository.glasses.listener.input.remote.RemoteInputSink
+import com.repository.glasses.listener.input.remote.RemoteRefusalReason
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
@@ -7181,10 +7182,35 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      *
      * @return true if the key was dispatched.
      */
+    /**
+     * Translate the gate's verdict into the coarse reason a remote device can render, and
+     * push it to `:backend` for the status backchannel.
+     *
+     * The mapping collapses six denials into three reasons on purpose: what a watch face
+     * can usefully say is "unfold your glasses", "finish what you are doing on them", or
+     * "you cannot do that from here". Finer detail is noise on a 1-inch screen, and the
+     * full verdict is already in the glasses log for anyone debugging.
+     */
+    private fun reportRemoteRefusal(verdict: RemoteActionGate.Denial) {
+        val reason = when (verdict) {
+            RemoteActionGate.Denial.REFUSED_FOLDED -> RemoteRefusalReason.FOLDED
+            RemoteActionGate.Denial.REFUSED_STATE,
+            RemoteActionGate.Denial.REFUSED_ARMED,
+            RemoteActionGate.Denial.REFUSED_BUSY -> RemoteRefusalReason.LOCKED
+            RemoteActionGate.Denial.REFUSED_NOT_ALLOWED -> RemoteRefusalReason.NOT_ALLOWED
+            RemoteActionGate.Denial.ALLOWED -> return
+        }
+        remoteInputBridge.reportRefusal(reason)
+    }
+
     private fun dispatchRemoteAction(action: RemoteAction, keyCode: Int): Boolean {
         val verdict = RemoteActionGate.evaluate(remoteInputSnapshot(), action)
         if (verdict != RemoteActionGate.Denial.ALLOWED) {
             uiLog("[RemoteInput] refused $action in $focusState: $verdict")
+            // Tell the source, not just the log file. A refusal that only reaches the glasses'
+            // internal flash is indistinguishable, from the watch, from a dead link -- the watch
+            // kept showing "Connected" while every event was being declined.
+            reportRemoteRefusal(verdict)
             return false
         }
         dispatchRemoteKey(keyCode)
