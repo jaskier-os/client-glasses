@@ -28,6 +28,7 @@ import android.util.Base64
 import android.view.KeyEvent
 import android.view.TextureView
 import com.repository.glasses.listener.input.TouchpadAbsListener
+import com.repository.glasses.listener.input.remote.InputOrigin
 import com.repository.glasses.listener.input.remote.RemoteAction
 import com.repository.glasses.listener.input.remote.RemoteActionGate
 import com.repository.glasses.listener.input.remote.RemoteInputBridgeClient
@@ -6871,11 +6872,52 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     }
 
     private fun isDoubleTap(): Boolean {
+        // A remote tap carries the interval the SOURCE measured, so it must not be timed by arrival
+        // here, and it must not disturb the touchpad's timestamp: sharing one would let a remote tap
+        // make the user's next physical tap read as a double, and vice versa.
+        pendingRemoteDoubleTap?.let { remote ->
+            pendingRemoteDoubleTap = null
+            return remote
+        }
         val now = SystemClock.elapsedRealtime()
         val isDouble = (now - lastCenterPressTime) < DOUBLE_TAP_THRESHOLD_MS
         lastCenterPressTime = now
         return isDouble
     }
+
+    /**
+     * Verdict for the remote tap currently being dispatched, consumed by the next [isDoubleTap].
+     *
+     * Set immediately before synthesizing the key and cleared as it is read, so it cannot leak into
+     * an unrelated physical press. Null whenever the touchpad is the origin.
+     */
+    private var pendingRemoteDoubleTap: Boolean? = null
+
+    /**
+     * Origin of the key currently being dispatched.
+     *
+     * A field rather than an `onKeyDown` parameter because `onKeyDown` is an Android override whose
+     * signature is not ours to change, and every real hardware press arrives through it. It is only
+     * ever [InputOrigin.REMOTE] for the duration of one synchronous synthesized dispatch on the main
+     * thread, and is restored in a `finally`, so a handler that throws cannot leave it stuck.
+     */
+    private var currentInputOrigin = InputOrigin.TOUCHPAD
+
+    /**
+     * Decide single-versus-double for a remote tap using the SOURCE's own clock.
+     *
+     * `sinceLastMs` was stamped when the finger landed on the remote device, so it survives every
+     * kind of transport jitter -- coalescing, a queue stall, a connection interval. Timing the same
+     * two taps by arrival here would routinely stretch a deliberate 350 ms double tap past the
+     * 400 ms threshold and deliver two singles instead.
+     *
+     * The 40 ms floor the touchpad applies is deliberately NOT enforced: it debounces capacitive
+     * hardware that can report one physical touch twice, which is not a failure mode a remote
+     * source has.
+     */
+    private fun remoteTapIsDouble(sinceLastMs: Int): Boolean =
+        sinceLastMs != RemoteInputEvent.NO_PREDECESSOR &&
+            sinceLastMs < DOUBLE_TAP_THRESHOLD_MS
 
     // --- Night Vision ML slider controls ---
     // Design system: monospace, dim text, no decorative borders, focus = glow text + 0.5->1.5dp border animated
@@ -7083,7 +7125,18 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             // A tap is DPAD_CENTER, the keycode the physical tap actually proxies through as.
             // NUMPAD_2 would be wrong: it is consumed by the release/double-tap branches at the top
             // of onKeyDown and never reaches the focus dispatch at all, so it selects nothing.
-            RemoteAction.TAP -> dispatchRemoteAction(e.action, KeyEvent.KEYCODE_DPAD_CENTER)
+            RemoteAction.TAP -> {
+                // Disambiguate on the source's clock, before dispatch, so the handler's own
+                // isDoubleTap() sees the user's real intent rather than the arrival interval.
+                pendingRemoteDoubleTap = remoteTapIsDouble(e.sinceLastMs)
+                val dispatched =
+                    dispatchRemoteAction(e.action, KeyEvent.KEYCODE_DPAD_CENTER)
+                // Refused, or consumed by a branch that never calls isDoubleTap(): drop the verdict
+                // rather than let it apply to some later press.
+                pendingRemoteDoubleTap = null
+                if (dispatched) showDoubleTapHintPersistent()
+                dispatched
+            }
             RemoteAction.BACK -> dispatchRemoteAction(e.action, KeyEvent.KEYCODE_BACK)
         }
         if (acted) showRemoteActiveGlyph()
@@ -7138,7 +7191,12 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * touchpad stay behaviourally identical for free, and they cannot drift apart later.
      */
     private fun dispatchRemoteKey(keyCode: Int) {
-        onKeyDown(keyCode, KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+        currentInputOrigin = InputOrigin.REMOTE
+        try {
+            onKeyDown(keyCode, KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+        } finally {
+            currentInputOrigin = InputOrigin.TOUCHPAD
+        }
     }
 
     /**
@@ -7154,7 +7212,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      *   null when the key should fall through to the focus dispatch. A plain Boolean cannot
      *   express that difference -- `false` already means "not handled, call super".
      */
-    private fun handleTouchpadKey(keyCode: Int, event: KeyEvent?): Boolean? {
+    private fun handleTouchpadKey(keyCode: Int, event: KeyEvent?, origin: InputOrigin): Boolean? {
+        // Everything below this line is touchpad gesture decoding: the hold/release state machine,
+        // the fold gate, and the NUMPAD_2 double-tap chain that ends in turnScreenOff(). A remote
+        // source produces none of those raw gestures -- it sends decided actions -- and must never
+        // reach this machinery, most of all the screen-off branch, which would pause the UI process,
+        // drop the sink, and strand the session with no way back from the remote device.
+        if (origin == InputOrigin.REMOTE) return null
         // rokid-touchpad-daemon emits synthetic keycodes on its virtual input
         // device instead of the raw DPAD keys from the PSoC touchpad, so we
         // get finer-grained, velocity-scaled scroll steps and the AI-assistant
@@ -7312,7 +7376,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean = GT.section("ui.onKeyDown") {
         GT.counter("ui.keycode", keyCode.toLong())
-        handleTouchpadKey(keyCode, event)?.let { return@section it }
+        handleTouchpadKey(keyCode, event, currentInputOrigin)?.let { return@section it }
         val remapped = when (keyCode) {
             KeyEvent.KEYCODE_NUMPAD_0 -> KeyEvent.KEYCODE_DPAD_RIGHT   // fwd / next
             KeyEvent.KEYCODE_NUMPAD_1 -> KeyEvent.KEYCODE_DPAD_LEFT    // back / prev
