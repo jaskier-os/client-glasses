@@ -27,29 +27,47 @@ object ScrollDrainer {
 
     private fun drain(view: View, generation: Int) {
         val p = view.getTag(R.id.scroll_drainer_pending) as? ScrollBuffer ?: return
-        // A cancel() between the post and this callback bumped the generation. This chain is dead;
-        // a new one may already be running, so do not touch `posted`.
-        if (p.generation != generation) return
+        // A cancel(), or a chain started after this callback was queued, bumped the generation.
+        // This chain is dead; another may be live, so do not touch ownership.
+        if (!p.isOwnedBy(generation)) return
         if (p.isEmpty) {
-            p.posted = false
+            p.endChain(generation)
+            return
+        }
+        // A detached view never runs its animation callbacks (postOnAnimation falls back to the
+        // deferred HandlerActionQueue, which only drains on re-attach). Continuing would strand the
+        // chain and make the view permanently un-drainable, so drop the motion instead.
+        if (!view.isAttachedToWindow) {
+            p.clear()
             return
         }
         val (dx, dy) = p.takeSlice()
-        view.scrollBy(dx, dy)
-        if (!p.isEmpty) {
-            // Keep `posted` true: this chain continues, and enqueue() must not start a second one.
+        try {
+            view.scrollBy(dx, dy)
+        } catch (e: IllegalStateException) {
+            // RecyclerView.scrollBy throws when called during layout or scroll computation, and
+            // scrollBy dispatches listeners synchronously so re-entrancy is reachable. Abandoning
+            // the buffer here is what keeps the chain from dying with ownership still held.
+            p.clear()
+            return
+        }
+        if (!p.isEmpty && p.isOwnedBy(generation)) {
             view.postOnAnimation { drain(view, generation) }
         } else {
-            p.posted = false
+            p.endChain(generation)
         }
     }
 
     fun enqueue(view: View, dx: Int, dy: Int) {
         val p = bufferOf(view)
+        // Nothing will ever drain a detached view, so do not accumulate motion it cannot render.
+        if (!view.isAttachedToWindow) {
+            p.clear()
+            return
+        }
         p.add(dx, dy)
-        if (!p.posted) {
-            p.posted = true
-            val generation = p.generation
+        if (!p.isDraining) {
+            val generation = p.startChain()
             view.postOnAnimation { drain(view, generation) }
         }
     }
@@ -60,9 +78,8 @@ object ScrollDrainer {
     /**
      * Drop any pending motion for [view] (e.g. on finger release).
      *
-     * Clears `posted` as well: an in-flight drain chain has already captured [view], and leaving the
-     * flag set after emptying the buffer would make the view permanently un-drainable (the chain
-     * exits on the empty buffer, and every later enqueue sees `posted == true` and never re-posts).
+     * Also abandons any chain in flight: a callback already queued under the old generation becomes
+     * a no-op, and the next [enqueue] is free to start a fresh chain.
      */
     fun cancel(view: View) {
         (view.getTag(R.id.scroll_drainer_pending) as? ScrollBuffer)?.clear()

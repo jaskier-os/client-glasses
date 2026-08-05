@@ -36,9 +36,13 @@ import javax.crypto.spec.SecretKeySpec
  */
 class RemoteInputAuth(key: ByteArray) {
 
-    /** Blank key -> fail closed. Every verification returns false rather than silently trusting. */
+    /**
+     * Absent or too-short key -> fail closed. Every verification returns false rather than
+     * silently trusting. A one-byte or whitespace key is treated as unconfigured: accepting it
+     * would give the appearance of authentication with none of the substance.
+     */
     private val keySpec: SecretKeySpec? =
-        if (key.isEmpty()) null else SecretKeySpec(key, HMAC_ALGORITHM)
+        if (key.size < MIN_KEY_BYTES) null else SecretKeySpec(key, HMAC_ALGORITHM)
 
     val isConfigured: Boolean get() = keySpec != null
 
@@ -63,8 +67,12 @@ class RemoteInputAuth(key: ByteArray) {
         }
     }
 
-    /** Test/tooling helper: produce the tag this verifier would accept for [message]. */
-    fun sign(message: String): String {
+    /**
+     * Produce the tag this verifier would accept for [message]. Test and golden-vector tooling
+     * only -- nothing on the receive path signs anything, and unlike [verify] this can throw.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun sign(message: String): String {
         val spec = keySpec ?: return ""
         val mac = Mac.getInstance(HMAC_ALGORITHM)
         mac.init(spec)
@@ -73,15 +81,27 @@ class RemoteInputAuth(key: ByteArray) {
             .joinToString("") { "%02x".format(it) }
     }
 
+    /**
+     * Strict ASCII hex. Deliberately not `Character.digit`, which also resolves Unicode decimal
+     * digits (fullwidth, Devanagari, ...) and would make more than one string decode to the same
+     * tag, destroying the canonicality the wire format depends on.
+     */
     private fun decodeHex(s: String): ByteArray? {
         val out = ByteArray(s.length / 2)
         for (i in out.indices) {
-            val hi = Character.digit(s[i * 2], 16)
-            val lo = Character.digit(s[i * 2 + 1], 16)
+            val hi = hexNibble(s[i * 2])
+            val lo = hexNibble(s[i * 2 + 1])
             if (hi < 0 || lo < 0) return null
             out[i] = ((hi shl 4) or lo).toByte()
         }
         return out
+    }
+
+    private fun hexNibble(c: Char): Int = when (c) {
+        in '0'..'9' -> c - '0'
+        in 'a'..'f' -> c - 'a' + 10
+        in 'A'..'F' -> c - 'A' + 10
+        else -> -1
     }
 
     companion object {
@@ -100,7 +120,32 @@ class RemoteInputAuth(key: ByteArray) {
         /** Source ids are constrained so they cannot smuggle a field separator into the digest. */
         private val SOURCE_ID_RE = Regex("^[a-z0-9_]{1,16}$")
 
+        /**
+         * Shorter than this and the key is treated as absent. 16 bytes is the floor for a value
+         * that is supposed to resist offline guessing.
+         */
+        const val MIN_KEY_BYTES = 16
+
         fun isValidSourceId(src: String): Boolean = SOURCE_ID_RE.matches(src)
+
+        /**
+         * Render a uint32 wire field for the digest: plain decimal in `0..4294967295`, no sign, no
+         * leading zeros.
+         *
+         * `sid`, `seq` and `wms` are unsigned 32-bit on the wire. A sender holding them in a signed
+         * 32-bit int renders `-1234` where a receiver holding them in a 64-bit long renders
+         * `4294966062`, and the two digests never match. `wms` (a monotonic clock's low 32 bits)
+         * crosses the sign bit routinely, so this is a matter of when, not if. Both sides MUST run
+         * their value through this function.
+         */
+        fun u32(value: Long): String = (value and 0xFFFFFFFFL).toString()
+
+        /**
+         * Render the `steps` field for the digest: plain signed decimal, e.g. `3`, `-3`, `0`.
+         * Never a leading `+`, never leading zeros. The sign carries the direction (positive =
+         * forward/down); it is not a literal character in the wire format.
+         */
+        fun steps(value: Int): String = value.toString()
 
         /**
          * The canonical signed string. Both sides MUST build it with this exact function.
@@ -110,9 +155,18 @@ class RemoteInputAuth(key: ByteArray) {
          * same digest for two different frames. Every field here is preceded by its byte length, so
          * the encoding is injective.
          *
+         * Field rendering is pinned, because every one of these is a silent cross-device desync
+         * waiting to happen:
+         * - [sid], [seq], [wms] are rendered by [u32]: unsigned decimal, no sign, no leading zeros.
+         * - [steps] is rendered by [steps]: signed decimal, no leading `+`.
+         * - [type] is the wire NAME (`SCROLL`, `SELECT`, `BACK`, `OPEN`, `CLOSE`, `PING`), never the
+         *   numeric opcode the watch->phone encoding uses on the wire. A sender that signs `"1"`
+         *   where the receiver signs `"SCROLL"` gets every frame rejected with no clue why.
+         *
          * [nonce] is reserved for the glasses-issued per-connection challenge that will close the
          * session-replay hole. It is the empty string in v1 and MUST be empty on both sides until
-         * the wire contract is revised together with Workstream B.
+         * the wire contract is revised together with Workstream B. When it becomes non-empty the
+         * domain tag must move to `ri2:evt` so a v1 tag can never be replayed into v2.
          */
         fun canonicalMessage(
             v: Int,
@@ -127,8 +181,7 @@ class RemoteInputAuth(key: ByteArray) {
             val sb = StringBuilder(96)
             sb.append(DOMAIN_EVENT)
             for (field in listOf(
-                v.toString(), src, sid.toString(), seq.toString(), type, steps.toString(),
-                wms.toString(), nonce,
+                v.toString(), src, u32(sid), u32(seq), type, steps(steps), u32(wms), nonce,
             )) {
                 // UTF-8 byte length, not char count, so the prefix is unambiguous for any input.
                 sb.append('|').append(field.toByteArray(Charsets.UTF_8).size).append(':').append(field)

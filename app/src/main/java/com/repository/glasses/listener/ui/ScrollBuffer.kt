@@ -14,36 +14,58 @@ class ScrollBuffer {
         private set
 
     /**
-     * True while a drain chain is already scheduled for this buffer.
+     * Monotonic chain id. Incremented every time a drain chain is started or abandoned.
      *
-     * Without this flag every [add] starts an independent, self-sustaining `postOnAnimation` chain
-     * over the SAME buffer, so N enqueues in one main-thread turn produce N `scrollBy()` calls and
-     * N layout passes per frame. A burst of remote input events makes that pathological on the
-     * glasses SoC.
-     */
-    var posted: Boolean = false
-
-    /**
-     * Incremented every time a chain is abandoned ([clear]). A drain callback captures the
-     * generation it was posted under and exits immediately if it no longer matches, so a Runnable
-     * that is already sitting in the Choreographer queue when [clear] runs cannot resurrect itself
-     * or race a freshly started chain.
+     * A callback captures the generation it was posted under and does nothing if it no longer
+     * matches, so a Runnable still sitting in the Choreographer queue when the chain is abandoned
+     * cannot resurrect itself or interleave with a freshly started chain.
      */
     var generation: Int = 0
         private set
 
+    /**
+     * The generation of the chain that currently owns this buffer, or null when no chain is running.
+     *
+     * This is an owning id rather than a bare boolean so that only the chain that actually started
+     * can release it. A bare boolean let an unrelated code path clear the flag while a chain was
+     * still live (two chains over one buffer), or leave it set after a chain died (the buffer became
+     * permanently un-drainable, because every later enqueue saw the flag and declined to post).
+     */
+    var owner: Int? = null
+        private set
+
     val isEmpty: Boolean get() = dx == 0 && dy == 0
+
+    val isDraining: Boolean get() = owner != null
 
     fun add(dx: Int, dy: Int) {
         this.dx += dx
         this.dy += dy
     }
 
-    /** Abandon the pending motion AND invalidate any drain callback already in flight. */
+    /** Claim the buffer for a new drain chain and return that chain's generation. */
+    fun startChain(): Int {
+        generation++
+        owner = generation
+        return generation
+    }
+
+    /** True if [generation] identifies the chain that currently owns the buffer. */
+    fun isOwnedBy(generation: Int): Boolean = owner == generation
+
+    /** Release ownership, but only if [generation] is the owning chain. */
+    fun endChain(generation: Int) {
+        if (owner == generation) owner = null
+    }
+
+    /**
+     * Abandon the pending motion AND any chain in flight. Callbacks already queued under the old
+     * generation become no-ops, and the next [add] is free to start a fresh chain.
+     */
     fun clear() {
         dx = 0
         dy = 0
-        posted = false
+        owner = null
         generation++
     }
 

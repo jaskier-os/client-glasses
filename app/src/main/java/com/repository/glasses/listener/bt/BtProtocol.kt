@@ -215,21 +215,38 @@ object BtProtocol {
     // Args: [v, src, sid, seq, type, steps, wms, tag]  -- all decimal ASCII except src, type, tag.
     //   v:     protocol version, always "1". Receivers drop anything else.
     //   src:   source id, matched against the registered InputSource ids. [a-z0-9_]{1,16}.
-    //   sid:   session id minted by the source, uint32 decimal.
-    //   seq:   monotonic per (src, sid), uint32 decimal, incremented for EVERY event.
-    //   type:  "SCROLL"|"SELECT"|"BACK"|"OPEN"|"CLOSE"|"PING"
-    //   steps: signed detent count; "+" = forward/down, "-" = back/up; "0" for non-SCROLL
+    //   sid:   session id minted by the source. UNSIGNED decimal 0..4294967295, no sign character,
+    //          no leading zeros. A sender holding this in a signed 32-bit int MUST convert before
+    //          rendering, or its digest will not match the receiver's.
+    //   seq:   monotonic per (src, sid), incremented for EVERY event including OPEN/CLOSE/PING.
+    //          Same unsigned decimal rendering as sid.
+    //   type:  "SCROLL"|"SELECT"|"BACK"|"OPEN"|"CLOSE"|"PING". The NAME, not a numeric opcode --
+    //          including inside the HMAC input.
+    //   steps: coalesced detent count as SIGNED decimal ("3", "-3", "0"). Positive = forward/down,
+    //          negative = back/up. No leading "+", no leading zeros. "0" for non-SCROLL types.
     //   wms:   source elapsedRealtime low 32 bits at detent time. Age is derived against the
     //          OPEN frame's baseline, so it is a single-clock delta with no cross-device skew.
-    //   tag:   16 hex chars, HMAC-SHA256 truncated to 8 bytes. See RemoteInputAuth for the exact
-    //          canonical string -- it is NOT a bare "|"-join.
+    //          Same unsigned decimal rendering as sid -- this field crosses the sign bit routinely.
+    //   tag:   16 lowercase hex chars, HMAC-SHA256 truncated to 8 bytes. The signed string is
+    //          RemoteInputAuth.canonicalMessage() -- a domain-separated, length-prefixed encoding,
+    //          NOT a bare "|"-join. Senders must port that exact function.
     // Receivers MUST check args.size >= 8, use toIntOrNull()/toLongOrNull(), and wrap the whole
     // parse in try/catch -- onMessage runs on a Binder thread and an uncaught throw kills the
     // service. Extra trailing args MUST be ignored (forward compatibility inside v1); fewer than
     // 8 MUST be rejected.
     const val CH_REMOTE_INPUT = "listener_remote_input"
 
-    // Glasses -> source status backchannel on the same dedicated input socket.
+    // Glasses -> source status backchannel on the same dedicated input socket. Lets a source tell
+    // its user why nothing is happening rather than showing a connected state while events are
+    // silently dropped.
     // Args: [sessionOpen, sinkAttached, droppedTotal] -- decimal ASCII, "1"/"0" for the flags.
+    //   sessionOpen:  the glasses hold an open session for this source.
+    //   sinkAttached: a UI sink is attached, i.e. events will be acted on rather than dropped.
+    //                 This is the glasses-side input to the relaying phone's `glassesSinkAttached`
+    //                 status bit; sessionOpen=1 with sinkAttached=0 means the glasses screen is not
+    //                 active and the source should say so instead of showing a ready state.
+    //   droppedTotal: cumulative events dropped for this source since the router was created.
+    //                 A rising value is the source's `lastSendDropped` signal.
+    // Sent on session open/close, on sink attach/detach, and at most once per second otherwise.
     const val CH_REMOTE_INPUT_STATUS = "listener_remote_input_status"
 }

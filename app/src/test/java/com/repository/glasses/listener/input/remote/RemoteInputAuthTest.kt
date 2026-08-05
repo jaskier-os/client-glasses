@@ -12,6 +12,56 @@ class RemoteInputAuthTest {
     private val key = "test-key-not-the-real-one".toByteArray()
     private val auth = RemoteInputAuth(key)
 
+    @Test
+    fun `keys shorter than the floor are treated as unconfigured`() {
+        assertFalse(RemoteInputAuth("short".toByteArray()).isConfigured)
+        assertFalse(RemoteInputAuth(" ".toByteArray()).isConfigured)
+        assertFalse(RemoteInputAuth(ByteArray(RemoteInputAuth.MIN_KEY_BYTES - 1)).isConfigured)
+        assertTrue(RemoteInputAuth(ByteArray(RemoteInputAuth.MIN_KEY_BYTES)).isConfigured)
+        // ...and an under-length key verifies nothing.
+        val weak = RemoteInputAuth("abc".toByteArray())
+        assertFalse(weak.verify(msg(), auth.sign(msg())))
+    }
+
+    @Test
+    fun `u32 fields render unsigned so a signed-int sender cannot desync`() {
+        // The canonical desync: a sender holding wms in a signed 32-bit int.
+        assertEquals("4294966062", RemoteInputAuth.u32(-1234L and 0xFFFFFFFFL))
+        assertEquals("4294967295", RemoteInputAuth.u32(0xFFFFFFFFL))
+        assertEquals("0", RemoteInputAuth.u32(0L))
+        assertEquals("2147483648", RemoteInputAuth.u32(2147483648L))
+        // A value already truncated to the low 32 bits round-trips identically.
+        assertEquals(RemoteInputAuth.u32(-1L), RemoteInputAuth.u32(0xFFFFFFFFL))
+        // No sign character ever appears.
+        for (v in listOf(-1L, -2147483648L, -1234L, 0L, 1L, 0xFFFFFFFFL)) {
+            assertFalse("u32 must never emit a sign", RemoteInputAuth.u32(v).contains('-'))
+        }
+    }
+
+    @Test
+    fun `steps renders signed decimal with no leading plus`() {
+        assertEquals("3", RemoteInputAuth.steps(3))
+        assertEquals("-3", RemoteInputAuth.steps(-3))
+        assertEquals("0", RemoteInputAuth.steps(0))
+        assertFalse(RemoteInputAuth.steps(3).contains('+'))
+    }
+
+    @Test
+    fun `canonical message uses the type NAME not a numeric opcode`() {
+        // A sender that signs the wire opcode "1" must NOT accidentally match "SCROLL".
+        val byName = RemoteInputAuth.canonicalMessage(1, "watch", 1L, 1L, "SCROLL", 1, 1L)
+        val byOpcode = RemoteInputAuth.canonicalMessage(1, "watch", 1L, 1L, "1", 1, 1L)
+        assertNotEquals(byName, byOpcode)
+        assertTrue(byName.contains("SCROLL"))
+    }
+
+    @Test
+    fun `unicode digits in a tag are rejected`() {
+        val m = msg()
+        // Character.digit would resolve these as hex; strict ASCII decoding must not.
+        assertFalse(auth.verify(m, "\uFF10\uFF11\uFF12\uFF13456789abcdef"))
+    }
+
     private fun msg(
         v: Int = 1,
         src: String = "watch",
@@ -64,6 +114,15 @@ class RemoteInputAuthTest {
         val plus = msg(steps = 3)
         val minus = msg(steps = -3)
         assertFalse(auth.verify(minus, auth.sign(plus)))
+    }
+
+    @Test
+    fun `sid seq and wms are covered as unsigned values`() {
+        // Two frames whose sid differs only above the sign bit must not share a tag.
+        val a = RemoteInputAuth.canonicalMessage(1, "watch", 0x7FFFFFFFL, 1L, "SCROLL", 1, 1L)
+        val b = RemoteInputAuth.canonicalMessage(1, "watch", 0x80000000L, 1L, "SCROLL", 1, 1L)
+        assertNotEquals(a, b)
+        assertFalse(auth.verify(b, auth.sign(a)))
     }
 
     @Test

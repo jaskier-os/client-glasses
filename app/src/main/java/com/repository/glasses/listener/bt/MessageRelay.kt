@@ -62,6 +62,8 @@ class MessageRelay(
         /** Frame ceiling for the input socket. Its largest legitimate frame is ~200 bytes. */
         const val INPUT_MAX_FRAME_BYTES = 4 * 1024
         private const val MAX_FRAME_BYTES = 8 * 1024 * 1024  // 8MB sanity cap
+        /** Minimum spacing between malformed-frame log lines, per relay. */
+        private const val MALFORMED_LOG_INTERVAL_MS = 1000L
     }
 
     /**
@@ -90,6 +92,29 @@ class MessageRelay(
 
     private val recvBuffer = ByteArrayOutputStream()
     private val recvLock = Any()
+
+    /**
+     * Throttle for malformed-frame logging. A peer that streams garbage would otherwise append one
+     * line per inbound chunk to the persistent log on /sdcard forever -- the log itself becomes the
+     * denial of service. Guarded by recvLock, which is always held at the call sites.
+     */
+    private var lastMalformedLogMs = 0L
+    private var suppressedMalformedLogs = 0L
+
+    private fun logMalformed(msg: String) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastMalformedLogMs < MALFORMED_LOG_INTERVAL_MS) {
+            suppressedMalformedLogs++
+            return
+        }
+        lastMalformedLogMs = now
+        val suppressed = suppressedMalformedLogs
+        suppressedMalformedLogs = 0
+        remoteLog?.invoke(
+            if (suppressed > 0) "MessageRelay[$serviceName]: $msg (+$suppressed suppressed)"
+            else "MessageRelay[$serviceName]: $msg"
+        )
+    }
 
     private val onBridgeBound: () -> Unit = {
         // Bridge was (re)bound to bt-manager. Open a fresh inbound server socket.
@@ -354,7 +379,7 @@ class MessageRelay(
     private fun handleIncomingBytes(data: ByteArray) {
         synchronized(recvLock) {
             if (recvBuffer.size() + data.size > maxFrameBytes) {
-                remoteLog?.invoke("MessageRelay: recv buffer overflow (size=${recvBuffer.size()} + ${data.size} > $maxFrameBytes); resetting")
+                logMalformed("recv buffer overflow (size=${recvBuffer.size()} + ${data.size} > $maxFrameBytes); resetting")
                 recvBuffer.reset()
             }
             recvBuffer.write(data)
@@ -363,7 +388,7 @@ class MessageRelay(
             while (buf.size - offset >= 4) {
                 val len = ByteBuffer.wrap(buf, offset, 4).int
                 if (len < 0 || len > maxFrameBytes) {
-                    remoteLog?.invoke("MessageRelay: invalid frame length=$len, resetting buffer")
+                    logMalformed("invalid frame length=$len, resetting buffer")
                     recvBuffer.reset()
                     return
                 }
@@ -371,7 +396,7 @@ class MessageRelay(
                 try {
                     parseFrame(buf, offset + 4, len)
                 } catch (e: Exception) {
-                    remoteLog?.invoke("MessageRelay: frame parse failed: ${e.message}")
+                    logMalformed("frame parse failed: ${e.message}")
                 }
                 offset += 4 + len
             }
