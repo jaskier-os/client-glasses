@@ -111,7 +111,12 @@ class ProfileAutoConnector(
                         BluetoothDevice.EXTRA_DEVICE
                     )
                     val addr = dev?.address
-                    if (addr != null) {
+                    // LE-only bonds can't carry A2DP Sink. An iPhone's LE random
+                    // addresses go ACL-up often, and deviceCanSourceA2dp() returns
+                    // true when SDP hasn't returned UUIDs -- so without this guard
+                    // the swap below would fire connectExclusive() on an LE address
+                    // and drop the working A2DP link on the classic one.
+                    if (dev != null && addr != null && supportsClassicProfiles(dev)) {
                         // Distinguish a self-initiated ACL (our own sweep's
                         // a2dp.connect raised it) from a genuine user-initiated
                         // connection. Our connect attempt to an asleep device
@@ -217,6 +222,24 @@ class ProfileAutoConnector(
     }
 
     /**
+     * True when [dev] can carry BR/EDR profiles at all. HFP-HF and A2DP Sink are
+     * BR/EDR-only, so an LE-only bond can never satisfy them.
+     *
+     * An iPhone bonds three times against these glasses: once on its public
+     * BR/EDR address and twice on LE random addresses. Sweeping the LE bonds
+     * fired hfp.connect()/a2dp.connect() every 60s forever -- each attempt
+     * flapped CONNECTING -> DISCONNECTED without ever succeeding, churning the
+     * profile state machines on the same piconet that carries the live HFP link.
+     * DUAL and UNKNOWN both stay eligible: UNKNOWN just means SDP/type hasn't
+     * resolved yet, and treating that as ineligible would strand a real classic
+     * device that is merely slow to report.
+     */
+    private fun supportsClassicProfiles(dev: BluetoothDevice): Boolean {
+        val type = try { dev.type } catch (_: Throwable) { BluetoothDevice.DEVICE_TYPE_UNKNOWN }
+        return type != BluetoothDevice.DEVICE_TYPE_LE
+    }
+
+    /**
      * True when [dev] advertises an A2DP Source UUID (0x110A) -- i.e. it can
      * push music to us. Phones, PCs, and most BT speakers/laptops match.
      * If SDP hasn't returned UUIDs yet, fall back to true so we don't miss
@@ -252,9 +275,20 @@ class ProfileAutoConnector(
             log("autoconnect($reason): no bonded devices")
             return@section
         }
-        var needHfp = 0; var needA2dp = 0; var skippedStale = 0
+        var needHfp = 0; var needA2dp = 0; var skippedStale = 0; var skippedLe = 0
         for (dev in bonded) {
             val addr = dev.address ?: continue
+            // LE-only bonds can't carry HFP-HF / A2DP Sink. Skip before the stale
+            // counters so they never accumulate sweeps for a device that is not a
+            // candidate in the first place.
+            if (!supportsClassicProfiles(dev)) {
+                skippedLe++
+                // Drop any counter accrued before this guard existed, so the
+                // un-stale probe never burns its one-device-per-10-min slot
+                // resetting an address the sweep will never act on again.
+                disconnectedSweeps.remove(addr)
+                continue
+            }
             val hfpUp = hfp.isConnected(addr)
             val a2dpUp = a2dp.isConnected(addr)
             // Stale bond suppression: count consecutive sweeps where BOTH
@@ -291,8 +325,8 @@ class ProfileAutoConnector(
                 if (!ok) log("autoconnect($reason) a2dp.connect FAILED addr=$addr")
             }
         }
-        if (needHfp > 0 || needA2dp > 0 || skippedStale > 0) {
-            log("autoconnect($reason) done bonded=${bonded.size} need_hfp=$needHfp need_a2dp=$needA2dp skipped_stale=$skippedStale folded=$folded")
+        if (needHfp > 0 || needA2dp > 0 || skippedStale > 0 || skippedLe > 0) {
+            log("autoconnect($reason) done bonded=${bonded.size} need_hfp=$needHfp need_a2dp=$needA2dp skipped_stale=$skippedStale skipped_le=$skippedLe folded=$folded")
         }
     }
 }
