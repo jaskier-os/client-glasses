@@ -108,4 +108,50 @@ class RemoteInputRouterSinkTest {
         gadget.scroll(sid = 1L, steps = 1)
         assertEquals("the other source's session must survive", 1, sink.count)
     }
+
+    /**
+     * The remote device must be told when its input would be dropped. Showing a ready state while
+     * every event is discarded is the failure the user experiences as "I turn the bezel and nothing
+     * happens, with no explanation".
+     */
+    @Test
+    fun `sink state is announced to every registered source`() {
+        val router = newRouter()
+        val watch = FakeInputSource("watch")
+        val gadget = FakeInputSource("gadget")
+        router.registerSource(watch)
+        router.registerSource(gadget)
+
+        router.publishSinkAttached(true)
+        router.publishSinkAttached(false)
+
+        assertEquals(listOf(true, false), watch.sinkStates)
+        assertEquals(
+            "a second device must inherit the signal without any extra wiring",
+            listOf(true, false),
+            gadget.sinkStates,
+        )
+    }
+
+    @Test
+    fun `sink state announcements survive a source that throws`() {
+        val router = newRouter()
+        val broken = object : InputSource {
+            override val sourceId = "broken"
+            override fun attach(sink: (RemoteInputFrame) -> Unit) {}
+            override fun detach() {}
+            override fun onSinkAttached(attached: Boolean) = throw RuntimeException("transport down")
+        }
+        val healthy = FakeInputSource("watch")
+        router.registerSource(broken)
+        router.registerSource(healthy)
+
+        router.publishSinkAttached(true)
+
+        assertEquals(
+            "one source's failing back channel must not silence another's",
+            listOf(true),
+            healthy.sinkStates,
+        )
+    }
 }

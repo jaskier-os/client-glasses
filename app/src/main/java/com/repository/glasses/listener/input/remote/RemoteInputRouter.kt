@@ -153,6 +153,25 @@ class RemoteInputRouter(
     }
 
     /**
+     * Announce to every source whether a delivered event would actually be acted on.
+     *
+     * Separate from [setSink]/[clearSink] because holding the router's sink and having a live UI
+     * are not the same thing once the sink is a cross-process bridge: the bridge stays installed
+     * for the service's whole life while the UI process comes and goes. The owner of that
+     * distinction is the bridge, so it drives this.
+     */
+    fun publishSinkAttached(attached: Boolean) {
+        val targets = synchronized(sessionLock) { sources.values.map { it.source } }
+        for (source in targets) {
+            try {
+                source.onSinkAttached(attached)
+            } catch (e: Exception) {
+                log("remote input: sink-state push failed for '${source.sourceId}': ${e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /**
      * Clear the sink, but only if [s] is the one currently installed.
      *
      * A bare `setSink(null)` from an outgoing screen's teardown can run AFTER the incoming screen

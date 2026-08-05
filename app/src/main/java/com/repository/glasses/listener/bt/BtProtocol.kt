@@ -249,4 +249,16 @@ object BtProtocol {
     //                 A rising value is the source's `lastSendDropped` signal.
     // Sent on session open/close, on sink attach/detach, and at most once per second otherwise.
     const val CH_REMOTE_INPUT_STATUS = "listener_remote_input_status"
+
+    // Sink attach/detach, as a standalone signal. Args: ["1"] attached, ["0"] detached.
+    //
+    // Narrower than CH_REMOTE_INPUT_STATUS on purpose: this one bit answers "would an event sent
+    // right now actually be acted on", which is the only thing the remote device needs in order to
+    // avoid showing READY while every event is being dropped. It is genuinely dynamic, because the
+    // sink lives in a different process from the Bluetooth transport -- the UI process can be
+    // unstarted, unbound, or dead while the backend is perfectly healthy.
+    //
+    // Emitted from the SAME transitions that attach and detach the AIDL sink, so the two cannot
+    // disagree. A sink state that lies is worse than none.
+    const val CH_REMOTE_INPUT_SINK = "listener_remote_input_sink"
 }

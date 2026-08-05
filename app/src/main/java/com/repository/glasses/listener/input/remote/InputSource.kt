@@ -44,6 +44,21 @@ interface InputSource {
      */
     fun onStatus(status: RemoteInputStatus) {}
 
+    /**
+     * Router -> source push carrying ONE bit: would an event sent right now actually be acted on?
+     *
+     * Separate from [onStatus] because it is the only signal a device needs to avoid showing a
+     * ready state while every event is being dropped, and because it is genuinely dynamic in a way
+     * the rest of the status is not -- the UI sink lives in a different process from the transport,
+     * so it can be absent while the transport is perfectly healthy.
+     *
+     * Pushed on every attach and detach, and once on registration so a source that connects late
+     * learns the current state without waiting for a transition.
+     *
+     * Default no-op: a source with no back channel simply ignores it.
+     */
+    fun onSinkAttached(attached: Boolean) {}
+
     companion object {
         const val SOURCE_ID_PATTERN = "[a-z0-9_]{1,16}"
 

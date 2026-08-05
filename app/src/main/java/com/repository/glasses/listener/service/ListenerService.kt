@@ -2449,6 +2449,11 @@ class ListenerService : LifecycleService(),
             }
             // THE registration extension point. A second device is one more registerSource call.
             remoteInputRouter.registerSource(source)
+            // Seed the new source with the CURRENT sink state rather than leaving it on a default
+            // until the next attach/detach. A device that links up while the UI is already attached
+            // would otherwise show "not ready" indefinitely. The bridge is the only thing that
+            // knows whether a UI process is really there.
+            runCatching { source.onSinkAttached(remoteInputBridge.sinkAttached) }
             remoteInputSource = source
             remoteInputRelay = relay
         } catch (e: Exception) {

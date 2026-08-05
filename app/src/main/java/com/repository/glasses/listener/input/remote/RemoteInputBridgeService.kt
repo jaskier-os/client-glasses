@@ -115,6 +115,7 @@ class RemoteInputBridgeService(
             deathRecipient = recipient
             log("[RemoteInput] sink attached (binder=${System.identityHashCode(binder)})")
         }
+        announceSinkState()
     }
 
     override fun unregisterSink(sink: IRemoteInputSink?) {
@@ -127,6 +128,7 @@ class RemoteInputBridgeService(
             }
             detachCurrentLocked("unregistered")
         }
+        announceSinkState()
     }
 
     private fun onSinkDied(dead: IBinder) {
@@ -139,6 +141,18 @@ class RemoteInputBridgeService(
             }
             detachCurrentLocked("died")
         }
+        announceSinkState()
+    }
+
+    /**
+     * Tell every source whether an event sent right now would be acted on.
+     *
+     * Called from every transition that changes [current], and nowhere else, so the announced state
+     * and the real one cannot drift. Read outside the lock deliberately: the push does transport IO,
+     * and a source blocking on its socket must not stall a registration.
+     */
+    private fun announceSinkState() {
+        router.publishSinkAttached(sinkAttached)
     }
 
     /** Must hold [lock]. Idempotent. */
@@ -157,6 +171,7 @@ class RemoteInputBridgeService(
      */
     fun shutdown() {
         synchronized(lock) { detachCurrentLocked("shutdown") }
+        announceSinkState()
         router.clearSink(this)
     }
 

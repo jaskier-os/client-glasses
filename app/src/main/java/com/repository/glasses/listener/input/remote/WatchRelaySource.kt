@@ -65,6 +65,15 @@ class WatchRelaySource(
         if (relay.listener === relayListener) relay.listener = null
     }
 
+    override fun onSinkAttached(attached: Boolean) {
+        // Best-effort, like onStatus: the input path must never depend on the back channel.
+        try {
+            relay.publish(BtProtocol.CH_REMOTE_INPUT_SINK, if (attached) "1" else "0")
+        } catch (e: Exception) {
+            log("watch input: sink-state publish failed: ${e.javaClass.simpleName}")
+        }
+    }
+
     override fun onStatus(status: RemoteInputStatus) {
         // Best-effort: the watch uses this to show why input is being ignored. A failure here must
         // never affect the input path.

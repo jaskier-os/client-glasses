@@ -37,6 +37,13 @@ class FakeInputSource(
         statuses.add(status)
     }
 
+    /** Every sink attach/detach announcement, in order. */
+    val sinkStates = mutableListOf<Boolean>()
+
+    override fun onSinkAttached(attached: Boolean) {
+        sinkStates.add(attached)
+    }
+
     private var seq = 0L
 
     fun open(sid: Long, wms: Long = clock()): RemoteInputFrame.Lifecycle =
