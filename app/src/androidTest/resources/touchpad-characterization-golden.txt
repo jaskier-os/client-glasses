@@ -1,240 +1,960 @@
-folded=false focus=TAB_NAV key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV dtArmed=false arming=false
-folded=false focus=TAB_NAV key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV dtArmed=false arming=false
-folded=false focus=TAB_NAV key=NUMPAD_2 -> ret=true focusAfter=TAB_NAV dtArmed=true arming=false
-folded=false focus=TAB_NAV key=NUMPAD_3 -> ret=true focusAfter=TAB_NAV dtArmed=true arming=false
-folded=false focus=TAB_NAV key=DPAD_CENTER -> ret=null focusAfter=TAB_NAV dtArmed=false arming=false
-folded=false focus=CHAT_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=CHAT_FOCUSED dtArmed=false arming=false
-folded=false focus=CHAT_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=CHAT_FOCUSED dtArmed=false arming=false
-folded=false focus=CHAT_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=CHAT_FOCUSED dtArmed=true arming=false
-folded=false focus=CHAT_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=CHAT_FOCUSED dtArmed=true arming=false
-folded=false focus=CHAT_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=CHAT_FOCUSED dtArmed=false arming=false
-folded=false focus=LIST_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=LIST_FOCUSED dtArmed=false arming=false
-folded=false focus=LIST_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=LIST_FOCUSED dtArmed=false arming=false
-folded=false focus=LIST_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=LIST_FOCUSED dtArmed=true arming=false
-folded=false focus=LIST_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=LIST_FOCUSED dtArmed=true arming=false
-folded=false focus=LIST_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=LIST_FOCUSED dtArmed=false arming=false
-folded=false focus=MAP_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=MAP_FOCUSED dtArmed=false arming=false
-folded=false focus=MAP_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=MAP_FOCUSED dtArmed=false arming=false
-folded=false focus=MAP_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=MAP_FOCUSED dtArmed=true arming=false
-folded=false focus=MAP_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=MAP_FOCUSED dtArmed=true arming=false
-folded=false focus=MAP_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=MAP_FOCUSED dtArmed=false arming=false
-folded=false focus=MAP_ZOOM_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=MAP_ZOOM_FOCUSED dtArmed=false arming=false
-folded=false focus=MAP_ZOOM_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=MAP_ZOOM_FOCUSED dtArmed=false arming=false
-folded=false focus=MAP_ZOOM_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=MAP_ZOOM_FOCUSED dtArmed=true arming=false
-folded=false focus=MAP_ZOOM_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=MAP_ZOOM_FOCUSED dtArmed=true arming=false
-folded=false focus=MAP_ZOOM_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=MAP_ZOOM_FOCUSED dtArmed=false arming=false
-folded=false focus=STOP_MODAL key=NUMPAD_0 -> ret=null focusAfter=STOP_MODAL dtArmed=false arming=false
-folded=false focus=STOP_MODAL key=NUMPAD_1 -> ret=null focusAfter=STOP_MODAL dtArmed=false arming=false
-folded=false focus=STOP_MODAL key=NUMPAD_2 -> ret=true focusAfter=STOP_MODAL dtArmed=true arming=false
-folded=false focus=STOP_MODAL key=NUMPAD_3 -> ret=true focusAfter=STOP_MODAL dtArmed=true arming=false
-folded=false focus=STOP_MODAL key=DPAD_CENTER -> ret=null focusAfter=STOP_MODAL dtArmed=false arming=false
-folded=false focus=STEPS_MODAL key=NUMPAD_0 -> ret=null focusAfter=STEPS_MODAL dtArmed=false arming=false
-folded=false focus=STEPS_MODAL key=NUMPAD_1 -> ret=null focusAfter=STEPS_MODAL dtArmed=false arming=false
-folded=false focus=STEPS_MODAL key=NUMPAD_2 -> ret=true focusAfter=STEPS_MODAL dtArmed=true arming=false
-folded=false focus=STEPS_MODAL key=NUMPAD_3 -> ret=true focusAfter=STEPS_MODAL dtArmed=true arming=false
-folded=false focus=STEPS_MODAL key=DPAD_CENTER -> ret=null focusAfter=STEPS_MODAL dtArmed=false arming=false
-folded=false focus=TRANSLATE_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=TRANSLATE_FOCUSED dtArmed=false arming=false
-folded=false focus=TRANSLATE_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=TRANSLATE_FOCUSED dtArmed=false arming=false
-folded=false focus=TRANSLATE_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TRANSLATE_FOCUSED dtArmed=true arming=false
-folded=false focus=TRANSLATE_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TRANSLATE_FOCUSED dtArmed=true arming=false
-folded=false focus=TRANSLATE_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TRANSLATE_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEPROMPTER_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=TELEPROMPTER_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEPROMPTER_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=TELEPROMPTER_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEPROMPTER_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TELEPROMPTER_FOCUSED dtArmed=true arming=false
-folded=false focus=TELEPROMPTER_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TELEPROMPTER_FOCUSED dtArmed=true arming=false
-folded=false focus=TELEPROMPTER_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TELEPROMPTER_FOCUSED dtArmed=false arming=false
-folded=false focus=REID_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=REID_FOCUSED dtArmed=false arming=false
-folded=false focus=REID_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=REID_FOCUSED dtArmed=false arming=false
-folded=false focus=REID_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=REID_FOCUSED dtArmed=true arming=false
-folded=false focus=REID_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=REID_FOCUSED dtArmed=true arming=false
-folded=false focus=REID_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=REID_FOCUSED dtArmed=false arming=false
-folded=false focus=REID_FACES_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=REID_FACES_FOCUSED dtArmed=false arming=false
-folded=false focus=REID_FACES_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=REID_FACES_FOCUSED dtArmed=false arming=false
-folded=false focus=REID_FACES_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=REID_FACES_FOCUSED dtArmed=true arming=false
-folded=false focus=REID_FACES_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=REID_FACES_FOCUSED dtArmed=true arming=false
-folded=false focus=REID_FACES_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=REID_FACES_FOCUSED dtArmed=false arming=false
-folded=false focus=REID_INTEL_MODAL key=NUMPAD_0 -> ret=null focusAfter=REID_INTEL_MODAL dtArmed=false arming=false
-folded=false focus=REID_INTEL_MODAL key=NUMPAD_1 -> ret=null focusAfter=REID_INTEL_MODAL dtArmed=false arming=false
-folded=false focus=REID_INTEL_MODAL key=NUMPAD_2 -> ret=true focusAfter=REID_INTEL_MODAL dtArmed=true arming=false
-folded=false focus=REID_INTEL_MODAL key=NUMPAD_3 -> ret=true focusAfter=REID_INTEL_MODAL dtArmed=true arming=false
-folded=false focus=REID_INTEL_MODAL key=DPAD_CENTER -> ret=null focusAfter=REID_INTEL_MODAL dtArmed=false arming=false
-folded=false focus=TODO_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=TODO_FOCUSED dtArmed=false arming=false
-folded=false focus=TODO_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=TODO_FOCUSED dtArmed=false arming=false
-folded=false focus=TODO_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TODO_FOCUSED dtArmed=true arming=false
-folded=false focus=TODO_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TODO_FOCUSED dtArmed=true arming=false
-folded=false focus=TODO_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TODO_FOCUSED dtArmed=false arming=false
-folded=false focus=NIGHTVISION_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=NIGHTVISION_FOCUSED dtArmed=false arming=false
-folded=false focus=NIGHTVISION_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=NIGHTVISION_FOCUSED dtArmed=false arming=false
-folded=false focus=NIGHTVISION_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=NIGHTVISION_FOCUSED dtArmed=true arming=false
-folded=false focus=NIGHTVISION_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=NIGHTVISION_FOCUSED dtArmed=true arming=false
-folded=false focus=NIGHTVISION_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=NIGHTVISION_FOCUSED dtArmed=false arming=false
-folded=false focus=MOUSE_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=MOUSE_FOCUSED dtArmed=false arming=false
-folded=false focus=MOUSE_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=MOUSE_FOCUSED dtArmed=false arming=false
-folded=false focus=MOUSE_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=MOUSE_FOCUSED dtArmed=true arming=false
-folded=false focus=MOUSE_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=MOUSE_FOCUSED dtArmed=true arming=false
-folded=false focus=MOUSE_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=MOUSE_FOCUSED dtArmed=false arming=false
-folded=false focus=MUSIC_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=MUSIC_FOCUSED dtArmed=false arming=false
-folded=false focus=MUSIC_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=MUSIC_FOCUSED dtArmed=false arming=false
-folded=false focus=MUSIC_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=MUSIC_FOCUSED dtArmed=true arming=false
-folded=false focus=MUSIC_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=MUSIC_FOCUSED dtArmed=true arming=false
-folded=false focus=MUSIC_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=MUSIC_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEGRAM_LIST_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEGRAM_LIST_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEGRAM_LIST_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED dtArmed=true arming=false
-folded=false focus=TELEGRAM_LIST_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED dtArmed=true arming=false
-folded=false focus=TELEGRAM_LIST_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEGRAM_TOPICS_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEGRAM_TOPICS_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEGRAM_TOPICS_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED dtArmed=true arming=false
-folded=false focus=TELEGRAM_TOPICS_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED dtArmed=true arming=false
-folded=false focus=TELEGRAM_TOPICS_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEGRAM_CHAT_FOCUSED key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEGRAM_CHAT_FOCUSED key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEGRAM_CHAT_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED dtArmed=true arming=false
-folded=false focus=TELEGRAM_CHAT_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED dtArmed=true arming=false
-folded=false focus=TELEGRAM_CHAT_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED dtArmed=false arming=false
-folded=false focus=TELEGRAM_RECORDING key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_RECORDING dtArmed=false arming=false
-folded=false focus=TELEGRAM_RECORDING key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_RECORDING dtArmed=false arming=false
-folded=false focus=TELEGRAM_RECORDING key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_RECORDING dtArmed=true arming=false
-folded=false focus=TELEGRAM_RECORDING key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_RECORDING dtArmed=true arming=false
-folded=false focus=TELEGRAM_RECORDING key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_RECORDING dtArmed=false arming=false
-folded=false focus=TELEGRAM_PREVIEW key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_PREVIEW dtArmed=false arming=false
-folded=false focus=TELEGRAM_PREVIEW key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_PREVIEW dtArmed=false arming=false
-folded=false focus=TELEGRAM_PREVIEW key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_PREVIEW dtArmed=true arming=false
-folded=false focus=TELEGRAM_PREVIEW key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_PREVIEW dtArmed=true arming=false
-folded=false focus=TELEGRAM_PREVIEW key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_PREVIEW dtArmed=false arming=false
-folded=false focus=NOTIFICATION_REPLY key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV dtArmed=false arming=false
-folded=false focus=NOTIFICATION_REPLY key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV dtArmed=false arming=false
-folded=false focus=NOTIFICATION_REPLY key=NUMPAD_2 -> ret=true focusAfter=NOTIFICATION_REPLY dtArmed=true arming=false
-folded=false focus=NOTIFICATION_REPLY key=NUMPAD_3 -> ret=true focusAfter=NOTIFICATION_REPLY dtArmed=true arming=false
-folded=false focus=NOTIFICATION_REPLY key=DPAD_CENTER -> ret=null focusAfter=NOTIFICATION_REPLY dtArmed=false arming=false
-folded=false focus=CALL_INCOMING key=NUMPAD_0 -> ret=null focusAfter=CALL_INCOMING dtArmed=false arming=false
-folded=false focus=CALL_INCOMING key=NUMPAD_1 -> ret=null focusAfter=CALL_INCOMING dtArmed=false arming=false
-folded=false focus=CALL_INCOMING key=NUMPAD_2 -> ret=true focusAfter=CALL_INCOMING dtArmed=true arming=false
-folded=false focus=CALL_INCOMING key=NUMPAD_3 -> ret=true focusAfter=CALL_INCOMING dtArmed=true arming=false
-folded=false focus=CALL_INCOMING key=DPAD_CENTER -> ret=null focusAfter=CALL_INCOMING dtArmed=false arming=false
-folded=false focus=CALL_ACTIVE key=NUMPAD_0 -> ret=null focusAfter=CALL_ACTIVE dtArmed=false arming=false
-folded=false focus=CALL_ACTIVE key=NUMPAD_1 -> ret=null focusAfter=CALL_ACTIVE dtArmed=false arming=false
-folded=false focus=CALL_ACTIVE key=NUMPAD_2 -> ret=true focusAfter=CALL_ACTIVE dtArmed=true arming=false
-folded=false focus=CALL_ACTIVE key=NUMPAD_3 -> ret=true focusAfter=CALL_ACTIVE dtArmed=true arming=false
-folded=false focus=CALL_ACTIVE key=DPAD_CENTER -> ret=null focusAfter=CALL_ACTIVE dtArmed=false arming=false
-folded=true focus=TAB_NAV key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV dtArmed=false arming=false
-folded=true focus=TAB_NAV key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV dtArmed=false arming=false
-folded=true focus=TAB_NAV key=NUMPAD_2 -> ret=true focusAfter=TAB_NAV dtArmed=false arming=false
-folded=true focus=TAB_NAV key=NUMPAD_3 -> ret=true focusAfter=TAB_NAV dtArmed=false arming=false
-folded=true focus=TAB_NAV key=DPAD_CENTER -> ret=null focusAfter=TAB_NAV dtArmed=false arming=false
-folded=true focus=CHAT_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=CHAT_FOCUSED dtArmed=false arming=false
-folded=true focus=CHAT_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=CHAT_FOCUSED dtArmed=false arming=false
-folded=true focus=CHAT_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=CHAT_FOCUSED dtArmed=false arming=false
-folded=true focus=CHAT_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=CHAT_FOCUSED dtArmed=false arming=false
-folded=true focus=CHAT_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=CHAT_FOCUSED dtArmed=false arming=false
-folded=true focus=LIST_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=LIST_FOCUSED dtArmed=false arming=false
-folded=true focus=LIST_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=LIST_FOCUSED dtArmed=false arming=false
-folded=true focus=LIST_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=LIST_FOCUSED dtArmed=false arming=false
-folded=true focus=LIST_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=LIST_FOCUSED dtArmed=false arming=false
-folded=true focus=LIST_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=LIST_FOCUSED dtArmed=false arming=false
-folded=true focus=MAP_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=MAP_FOCUSED dtArmed=false arming=false
-folded=true focus=MAP_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=MAP_FOCUSED dtArmed=false arming=false
-folded=true focus=MAP_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=MAP_FOCUSED dtArmed=false arming=false
-folded=true focus=MAP_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=MAP_FOCUSED dtArmed=false arming=false
-folded=true focus=MAP_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=MAP_FOCUSED dtArmed=false arming=false
-folded=true focus=MAP_ZOOM_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=MAP_ZOOM_FOCUSED dtArmed=false arming=false
-folded=true focus=MAP_ZOOM_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=MAP_ZOOM_FOCUSED dtArmed=false arming=false
-folded=true focus=MAP_ZOOM_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=MAP_ZOOM_FOCUSED dtArmed=false arming=false
-folded=true focus=MAP_ZOOM_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=MAP_ZOOM_FOCUSED dtArmed=false arming=false
-folded=true focus=MAP_ZOOM_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=MAP_ZOOM_FOCUSED dtArmed=false arming=false
-folded=true focus=STOP_MODAL key=NUMPAD_0 -> ret=true focusAfter=STOP_MODAL dtArmed=false arming=false
-folded=true focus=STOP_MODAL key=NUMPAD_1 -> ret=true focusAfter=STOP_MODAL dtArmed=false arming=false
-folded=true focus=STOP_MODAL key=NUMPAD_2 -> ret=true focusAfter=STOP_MODAL dtArmed=false arming=false
-folded=true focus=STOP_MODAL key=NUMPAD_3 -> ret=true focusAfter=STOP_MODAL dtArmed=false arming=false
-folded=true focus=STOP_MODAL key=DPAD_CENTER -> ret=null focusAfter=STOP_MODAL dtArmed=false arming=false
-folded=true focus=STEPS_MODAL key=NUMPAD_0 -> ret=true focusAfter=STEPS_MODAL dtArmed=false arming=false
-folded=true focus=STEPS_MODAL key=NUMPAD_1 -> ret=true focusAfter=STEPS_MODAL dtArmed=false arming=false
-folded=true focus=STEPS_MODAL key=NUMPAD_2 -> ret=true focusAfter=STEPS_MODAL dtArmed=false arming=false
-folded=true focus=STEPS_MODAL key=NUMPAD_3 -> ret=true focusAfter=STEPS_MODAL dtArmed=false arming=false
-folded=true focus=STEPS_MODAL key=DPAD_CENTER -> ret=null focusAfter=STEPS_MODAL dtArmed=false arming=false
-folded=true focus=TRANSLATE_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=TRANSLATE_FOCUSED dtArmed=false arming=false
-folded=true focus=TRANSLATE_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=TRANSLATE_FOCUSED dtArmed=false arming=false
-folded=true focus=TRANSLATE_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TRANSLATE_FOCUSED dtArmed=false arming=false
-folded=true focus=TRANSLATE_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TRANSLATE_FOCUSED dtArmed=false arming=false
-folded=true focus=TRANSLATE_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TRANSLATE_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEPROMPTER_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=TELEPROMPTER_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEPROMPTER_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=TELEPROMPTER_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEPROMPTER_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TELEPROMPTER_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEPROMPTER_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TELEPROMPTER_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEPROMPTER_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TELEPROMPTER_FOCUSED dtArmed=false arming=false
-folded=true focus=REID_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=REID_FOCUSED dtArmed=false arming=false
-folded=true focus=REID_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=REID_FOCUSED dtArmed=false arming=false
-folded=true focus=REID_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=REID_FOCUSED dtArmed=false arming=false
-folded=true focus=REID_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=REID_FOCUSED dtArmed=false arming=false
-folded=true focus=REID_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=REID_FOCUSED dtArmed=false arming=false
-folded=true focus=REID_FACES_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=REID_FACES_FOCUSED dtArmed=false arming=false
-folded=true focus=REID_FACES_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=REID_FACES_FOCUSED dtArmed=false arming=false
-folded=true focus=REID_FACES_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=REID_FACES_FOCUSED dtArmed=false arming=false
-folded=true focus=REID_FACES_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=REID_FACES_FOCUSED dtArmed=false arming=false
-folded=true focus=REID_FACES_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=REID_FACES_FOCUSED dtArmed=false arming=false
-folded=true focus=REID_INTEL_MODAL key=NUMPAD_0 -> ret=true focusAfter=REID_INTEL_MODAL dtArmed=false arming=false
-folded=true focus=REID_INTEL_MODAL key=NUMPAD_1 -> ret=true focusAfter=REID_INTEL_MODAL dtArmed=false arming=false
-folded=true focus=REID_INTEL_MODAL key=NUMPAD_2 -> ret=true focusAfter=REID_INTEL_MODAL dtArmed=false arming=false
-folded=true focus=REID_INTEL_MODAL key=NUMPAD_3 -> ret=true focusAfter=REID_INTEL_MODAL dtArmed=false arming=false
-folded=true focus=REID_INTEL_MODAL key=DPAD_CENTER -> ret=null focusAfter=REID_INTEL_MODAL dtArmed=false arming=false
-folded=true focus=TODO_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=TODO_FOCUSED dtArmed=false arming=false
-folded=true focus=TODO_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=TODO_FOCUSED dtArmed=false arming=false
-folded=true focus=TODO_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TODO_FOCUSED dtArmed=false arming=false
-folded=true focus=TODO_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TODO_FOCUSED dtArmed=false arming=false
-folded=true focus=TODO_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TODO_FOCUSED dtArmed=false arming=false
-folded=true focus=NIGHTVISION_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=NIGHTVISION_FOCUSED dtArmed=false arming=false
-folded=true focus=NIGHTVISION_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=NIGHTVISION_FOCUSED dtArmed=false arming=false
-folded=true focus=NIGHTVISION_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=NIGHTVISION_FOCUSED dtArmed=false arming=false
-folded=true focus=NIGHTVISION_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=NIGHTVISION_FOCUSED dtArmed=false arming=false
-folded=true focus=NIGHTVISION_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=NIGHTVISION_FOCUSED dtArmed=false arming=false
-folded=true focus=MOUSE_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=MOUSE_FOCUSED dtArmed=false arming=false
-folded=true focus=MOUSE_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=MOUSE_FOCUSED dtArmed=false arming=false
-folded=true focus=MOUSE_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=MOUSE_FOCUSED dtArmed=false arming=false
-folded=true focus=MOUSE_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=MOUSE_FOCUSED dtArmed=false arming=false
-folded=true focus=MOUSE_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=MOUSE_FOCUSED dtArmed=false arming=false
-folded=true focus=MUSIC_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=MUSIC_FOCUSED dtArmed=false arming=false
-folded=true focus=MUSIC_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=MUSIC_FOCUSED dtArmed=false arming=false
-folded=true focus=MUSIC_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=MUSIC_FOCUSED dtArmed=false arming=false
-folded=true focus=MUSIC_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=MUSIC_FOCUSED dtArmed=false arming=false
-folded=true focus=MUSIC_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=MUSIC_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_LIST_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_LIST_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_LIST_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_LIST_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_LIST_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_TOPICS_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_TOPICS_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_TOPICS_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_TOPICS_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_TOPICS_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_CHAT_FOCUSED key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_CHAT_FOCUSED key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_CHAT_FOCUSED key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_CHAT_FOCUSED key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_CHAT_FOCUSED key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED dtArmed=false arming=false
-folded=true focus=TELEGRAM_RECORDING key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_RECORDING dtArmed=false arming=false
-folded=true focus=TELEGRAM_RECORDING key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_RECORDING dtArmed=false arming=false
-folded=true focus=TELEGRAM_RECORDING key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_RECORDING dtArmed=false arming=false
-folded=true focus=TELEGRAM_RECORDING key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_RECORDING dtArmed=false arming=false
-folded=true focus=TELEGRAM_RECORDING key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_RECORDING dtArmed=false arming=false
-folded=true focus=TELEGRAM_PREVIEW key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_PREVIEW dtArmed=false arming=false
-folded=true focus=TELEGRAM_PREVIEW key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_PREVIEW dtArmed=false arming=false
-folded=true focus=TELEGRAM_PREVIEW key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_PREVIEW dtArmed=false arming=false
-folded=true focus=TELEGRAM_PREVIEW key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_PREVIEW dtArmed=false arming=false
-folded=true focus=TELEGRAM_PREVIEW key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_PREVIEW dtArmed=false arming=false
-folded=true focus=NOTIFICATION_REPLY key=NUMPAD_0 -> ret=true focusAfter=NOTIFICATION_REPLY dtArmed=false arming=false
-folded=true focus=NOTIFICATION_REPLY key=NUMPAD_1 -> ret=true focusAfter=NOTIFICATION_REPLY dtArmed=false arming=false
-folded=true focus=NOTIFICATION_REPLY key=NUMPAD_2 -> ret=true focusAfter=NOTIFICATION_REPLY dtArmed=false arming=false
-folded=true focus=NOTIFICATION_REPLY key=NUMPAD_3 -> ret=true focusAfter=NOTIFICATION_REPLY dtArmed=false arming=false
-folded=true focus=NOTIFICATION_REPLY key=DPAD_CENTER -> ret=null focusAfter=NOTIFICATION_REPLY dtArmed=false arming=false
-folded=true focus=CALL_INCOMING key=NUMPAD_0 -> ret=true focusAfter=CALL_INCOMING dtArmed=false arming=false
-folded=true focus=CALL_INCOMING key=NUMPAD_1 -> ret=true focusAfter=CALL_INCOMING dtArmed=false arming=false
-folded=true focus=CALL_INCOMING key=NUMPAD_2 -> ret=true focusAfter=CALL_INCOMING dtArmed=false arming=false
-folded=true focus=CALL_INCOMING key=NUMPAD_3 -> ret=true focusAfter=CALL_INCOMING dtArmed=false arming=false
-folded=true focus=CALL_INCOMING key=DPAD_CENTER -> ret=null focusAfter=CALL_INCOMING dtArmed=false arming=false
-folded=true focus=CALL_ACTIVE key=NUMPAD_0 -> ret=true focusAfter=CALL_ACTIVE dtArmed=false arming=false
-folded=true focus=CALL_ACTIVE key=NUMPAD_1 -> ret=true focusAfter=CALL_ACTIVE dtArmed=false arming=false
-folded=true focus=CALL_ACTIVE key=NUMPAD_2 -> ret=true focusAfter=CALL_ACTIVE dtArmed=false arming=false
-folded=true focus=CALL_ACTIVE key=NUMPAD_3 -> ret=true focusAfter=CALL_ACTIVE dtArmed=false arming=false
-folded=true focus=CALL_ACTIVE key=DPAD_CENTER -> ret=null focusAfter=CALL_ACTIVE dtArmed=false arming=false
+folded=false focus=TAB_NAV reply=idle key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=TAB_NAV reply=idle key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=TAB_NAV reply=idle key=NUMPAD_2 -> ret=true focusAfter=TAB_NAV chain=rearmed arming=false
+folded=false focus=TAB_NAV reply=idle key=NUMPAD_3 -> ret=true focusAfter=TAB_NAV chain=kept arming=false
+folded=false focus=TAB_NAV reply=idle key=DPAD_CENTER -> ret=null focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=TAB_NAV reply=repliable key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=TAB_NAV reply=repliable key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=TAB_NAV reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TAB_NAV chain=rearmed arming=false
+folded=false focus=TAB_NAV reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TAB_NAV chain=kept arming=true
+folded=false focus=TAB_NAV reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=TAB_NAV reply=arming key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=true
+folded=false focus=TAB_NAV reply=arming key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=true
+folded=false focus=TAB_NAV reply=arming key=NUMPAD_2 -> ret=true focusAfter=TAB_NAV chain=kept arming=false
+folded=false focus=TAB_NAV reply=arming key=NUMPAD_3 -> ret=true focusAfter=TAB_NAV chain=kept arming=true
+folded=false focus=TAB_NAV reply=arming key=DPAD_CENTER -> ret=null focusAfter=TAB_NAV chain=cleared arming=true
+folded=false focus=TAB_NAV reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=TAB_NAV reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=TAB_NAV reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TAB_NAV chain=rearmed arming=false
+folded=false focus=TAB_NAV reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TAB_NAV chain=kept arming=false
+folded=false focus=TAB_NAV reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=CHAT_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=CHAT_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=CHAT_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=CHAT_FOCUSED chain=rearmed arming=false
+folded=false focus=CHAT_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=CHAT_FOCUSED chain=kept arming=false
+folded=false focus=CHAT_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=CHAT_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=CHAT_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=CHAT_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=CHAT_FOCUSED chain=rearmed arming=false
+folded=false focus=CHAT_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=CHAT_FOCUSED chain=kept arming=true
+folded=false focus=CHAT_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=CHAT_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=true
+folded=false focus=CHAT_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=true
+folded=false focus=CHAT_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=CHAT_FOCUSED chain=kept arming=false
+folded=false focus=CHAT_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=CHAT_FOCUSED chain=kept arming=true
+folded=false focus=CHAT_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=true
+folded=false focus=CHAT_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=CHAT_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=CHAT_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=CHAT_FOCUSED chain=rearmed arming=false
+folded=false focus=CHAT_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=CHAT_FOCUSED chain=kept arming=false
+folded=false focus=CHAT_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=LIST_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=false focus=LIST_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=false focus=LIST_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=LIST_FOCUSED chain=rearmed arming=false
+folded=false focus=LIST_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=LIST_FOCUSED chain=kept arming=false
+folded=false focus=LIST_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=false focus=LIST_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=false focus=LIST_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=false focus=LIST_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=LIST_FOCUSED chain=rearmed arming=false
+folded=false focus=LIST_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=LIST_FOCUSED chain=kept arming=true
+folded=false focus=LIST_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=false focus=LIST_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=true
+folded=false focus=LIST_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=true
+folded=false focus=LIST_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=LIST_FOCUSED chain=kept arming=false
+folded=false focus=LIST_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=LIST_FOCUSED chain=kept arming=true
+folded=false focus=LIST_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=true
+folded=false focus=LIST_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=false focus=LIST_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=false focus=LIST_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=LIST_FOCUSED chain=rearmed arming=false
+folded=false focus=LIST_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=LIST_FOCUSED chain=kept arming=false
+folded=false focus=LIST_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=MAP_FOCUSED chain=rearmed arming=false
+folded=false focus=MAP_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=MAP_FOCUSED chain=kept arming=false
+folded=false focus=MAP_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=MAP_FOCUSED chain=rearmed arming=false
+folded=false focus=MAP_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=MAP_FOCUSED chain=kept arming=true
+folded=false focus=MAP_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=true
+folded=false focus=MAP_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=true
+folded=false focus=MAP_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=MAP_FOCUSED chain=kept arming=false
+folded=false focus=MAP_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=MAP_FOCUSED chain=kept arming=true
+folded=false focus=MAP_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=true
+folded=false focus=MAP_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=MAP_FOCUSED chain=rearmed arming=false
+folded=false focus=MAP_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=MAP_FOCUSED chain=kept arming=false
+folded=false focus=MAP_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=rearmed arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=kept arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=rearmed arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=kept arming=true
+folded=false focus=MAP_ZOOM_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=true
+folded=false focus=MAP_ZOOM_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=true
+folded=false focus=MAP_ZOOM_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=kept arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=kept arming=true
+folded=false focus=MAP_ZOOM_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=true
+folded=false focus=MAP_ZOOM_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=rearmed arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=kept arming=false
+folded=false focus=MAP_ZOOM_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=false focus=STOP_MODAL reply=idle key=NUMPAD_0 -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=false focus=STOP_MODAL reply=idle key=NUMPAD_1 -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=false focus=STOP_MODAL reply=idle key=NUMPAD_2 -> ret=true focusAfter=STOP_MODAL chain=rearmed arming=false
+folded=false focus=STOP_MODAL reply=idle key=NUMPAD_3 -> ret=true focusAfter=STOP_MODAL chain=kept arming=false
+folded=false focus=STOP_MODAL reply=idle key=DPAD_CENTER -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=false focus=STOP_MODAL reply=repliable key=NUMPAD_0 -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=false focus=STOP_MODAL reply=repliable key=NUMPAD_1 -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=false focus=STOP_MODAL reply=repliable key=NUMPAD_2 -> ret=true focusAfter=STOP_MODAL chain=rearmed arming=false
+folded=false focus=STOP_MODAL reply=repliable key=NUMPAD_3 -> ret=true focusAfter=STOP_MODAL chain=kept arming=false
+folded=false focus=STOP_MODAL reply=repliable key=DPAD_CENTER -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=false focus=STOP_MODAL reply=arming key=NUMPAD_0 -> ret=null focusAfter=STOP_MODAL chain=cleared arming=true
+folded=false focus=STOP_MODAL reply=arming key=NUMPAD_1 -> ret=null focusAfter=STOP_MODAL chain=cleared arming=true
+folded=false focus=STOP_MODAL reply=arming key=NUMPAD_2 -> ret=true focusAfter=STOP_MODAL chain=kept arming=false
+folded=false focus=STOP_MODAL reply=arming key=NUMPAD_3 -> ret=true focusAfter=STOP_MODAL chain=kept arming=true
+folded=false focus=STOP_MODAL reply=arming key=DPAD_CENTER -> ret=null focusAfter=STOP_MODAL chain=cleared arming=true
+folded=false focus=STOP_MODAL reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=false focus=STOP_MODAL reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=false focus=STOP_MODAL reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=STOP_MODAL chain=rearmed arming=false
+folded=false focus=STOP_MODAL reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=STOP_MODAL chain=kept arming=false
+folded=false focus=STOP_MODAL reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=false focus=STEPS_MODAL reply=idle key=NUMPAD_0 -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=false focus=STEPS_MODAL reply=idle key=NUMPAD_1 -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=false focus=STEPS_MODAL reply=idle key=NUMPAD_2 -> ret=true focusAfter=STEPS_MODAL chain=rearmed arming=false
+folded=false focus=STEPS_MODAL reply=idle key=NUMPAD_3 -> ret=true focusAfter=STEPS_MODAL chain=kept arming=false
+folded=false focus=STEPS_MODAL reply=idle key=DPAD_CENTER -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=false focus=STEPS_MODAL reply=repliable key=NUMPAD_0 -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=false focus=STEPS_MODAL reply=repliable key=NUMPAD_1 -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=false focus=STEPS_MODAL reply=repliable key=NUMPAD_2 -> ret=true focusAfter=STEPS_MODAL chain=rearmed arming=false
+folded=false focus=STEPS_MODAL reply=repliable key=NUMPAD_3 -> ret=true focusAfter=STEPS_MODAL chain=kept arming=true
+folded=false focus=STEPS_MODAL reply=repliable key=DPAD_CENTER -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=false focus=STEPS_MODAL reply=arming key=NUMPAD_0 -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=true
+folded=false focus=STEPS_MODAL reply=arming key=NUMPAD_1 -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=true
+folded=false focus=STEPS_MODAL reply=arming key=NUMPAD_2 -> ret=true focusAfter=STEPS_MODAL chain=kept arming=false
+folded=false focus=STEPS_MODAL reply=arming key=NUMPAD_3 -> ret=true focusAfter=STEPS_MODAL chain=kept arming=true
+folded=false focus=STEPS_MODAL reply=arming key=DPAD_CENTER -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=true
+folded=false focus=STEPS_MODAL reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=false focus=STEPS_MODAL reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=false focus=STEPS_MODAL reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=STEPS_MODAL chain=rearmed arming=false
+folded=false focus=STEPS_MODAL reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=STEPS_MODAL chain=kept arming=false
+folded=false focus=STEPS_MODAL reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=rearmed arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=kept arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=rearmed arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=kept arming=true
+folded=false focus=TRANSLATE_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=true
+folded=false focus=TRANSLATE_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=true
+folded=false focus=TRANSLATE_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=kept arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=kept arming=true
+folded=false focus=TRANSLATE_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=true
+folded=false focus=TRANSLATE_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=rearmed arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=kept arming=false
+folded=false focus=TRANSLATE_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=kept arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=kept arming=true
+folded=false focus=TELEPROMPTER_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=true
+folded=false focus=TELEPROMPTER_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=true
+folded=false focus=TELEPROMPTER_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=kept arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=kept arming=true
+folded=false focus=TELEPROMPTER_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=true
+folded=false focus=TELEPROMPTER_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=kept arming=false
+folded=false focus=TELEPROMPTER_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=REID_FOCUSED chain=rearmed arming=false
+folded=false focus=REID_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=REID_FOCUSED chain=kept arming=false
+folded=false focus=REID_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=REID_FOCUSED chain=rearmed arming=false
+folded=false focus=REID_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=REID_FOCUSED chain=kept arming=true
+folded=false focus=REID_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=true
+folded=false focus=REID_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=true
+folded=false focus=REID_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=REID_FOCUSED chain=kept arming=false
+folded=false focus=REID_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=REID_FOCUSED chain=kept arming=true
+folded=false focus=REID_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=true
+folded=false focus=REID_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=REID_FOCUSED chain=rearmed arming=false
+folded=false focus=REID_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=REID_FOCUSED chain=kept arming=false
+folded=false focus=REID_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FACES_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FACES_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FACES_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=REID_FACES_FOCUSED chain=rearmed arming=false
+folded=false focus=REID_FACES_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=REID_FACES_FOCUSED chain=kept arming=false
+folded=false focus=REID_FACES_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FACES_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FACES_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FACES_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=REID_FACES_FOCUSED chain=rearmed arming=false
+folded=false focus=REID_FACES_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=REID_FACES_FOCUSED chain=kept arming=true
+folded=false focus=REID_FACES_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FACES_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=true
+folded=false focus=REID_FACES_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=true
+folded=false focus=REID_FACES_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=REID_FACES_FOCUSED chain=kept arming=false
+folded=false focus=REID_FACES_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=REID_FACES_FOCUSED chain=kept arming=true
+folded=false focus=REID_FACES_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=true
+folded=false focus=REID_FACES_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FACES_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=false focus=REID_FACES_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=REID_FACES_FOCUSED chain=rearmed arming=false
+folded=false focus=REID_FACES_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=REID_FACES_FOCUSED chain=kept arming=false
+folded=false focus=REID_FACES_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=false focus=REID_INTEL_MODAL reply=idle key=NUMPAD_0 -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=false focus=REID_INTEL_MODAL reply=idle key=NUMPAD_1 -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=false focus=REID_INTEL_MODAL reply=idle key=NUMPAD_2 -> ret=true focusAfter=REID_INTEL_MODAL chain=rearmed arming=false
+folded=false focus=REID_INTEL_MODAL reply=idle key=NUMPAD_3 -> ret=true focusAfter=REID_INTEL_MODAL chain=kept arming=false
+folded=false focus=REID_INTEL_MODAL reply=idle key=DPAD_CENTER -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=false focus=REID_INTEL_MODAL reply=repliable key=NUMPAD_0 -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=false focus=REID_INTEL_MODAL reply=repliable key=NUMPAD_1 -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=false focus=REID_INTEL_MODAL reply=repliable key=NUMPAD_2 -> ret=true focusAfter=REID_INTEL_MODAL chain=rearmed arming=false
+folded=false focus=REID_INTEL_MODAL reply=repliable key=NUMPAD_3 -> ret=true focusAfter=REID_INTEL_MODAL chain=kept arming=true
+folded=false focus=REID_INTEL_MODAL reply=repliable key=DPAD_CENTER -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=false focus=REID_INTEL_MODAL reply=arming key=NUMPAD_0 -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=true
+folded=false focus=REID_INTEL_MODAL reply=arming key=NUMPAD_1 -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=true
+folded=false focus=REID_INTEL_MODAL reply=arming key=NUMPAD_2 -> ret=true focusAfter=REID_INTEL_MODAL chain=kept arming=false
+folded=false focus=REID_INTEL_MODAL reply=arming key=NUMPAD_3 -> ret=true focusAfter=REID_INTEL_MODAL chain=kept arming=true
+folded=false focus=REID_INTEL_MODAL reply=arming key=DPAD_CENTER -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=true
+folded=false focus=REID_INTEL_MODAL reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=false focus=REID_INTEL_MODAL reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=false focus=REID_INTEL_MODAL reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=REID_INTEL_MODAL chain=rearmed arming=false
+folded=false focus=REID_INTEL_MODAL reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=REID_INTEL_MODAL chain=kept arming=false
+folded=false focus=REID_INTEL_MODAL reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=false focus=TODO_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=false focus=TODO_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=false focus=TODO_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TODO_FOCUSED chain=rearmed arming=false
+folded=false focus=TODO_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TODO_FOCUSED chain=kept arming=false
+folded=false focus=TODO_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=false focus=TODO_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=false focus=TODO_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=false focus=TODO_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TODO_FOCUSED chain=rearmed arming=false
+folded=false focus=TODO_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TODO_FOCUSED chain=kept arming=true
+folded=false focus=TODO_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=false focus=TODO_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=true
+folded=false focus=TODO_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=true
+folded=false focus=TODO_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TODO_FOCUSED chain=kept arming=false
+folded=false focus=TODO_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TODO_FOCUSED chain=kept arming=true
+folded=false focus=TODO_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=true
+folded=false focus=TODO_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=false focus=TODO_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=false focus=TODO_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TODO_FOCUSED chain=rearmed arming=false
+folded=false focus=TODO_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TODO_FOCUSED chain=kept arming=false
+folded=false focus=TODO_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=rearmed arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=kept arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=rearmed arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=kept arming=true
+folded=false focus=NIGHTVISION_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=true
+folded=false focus=NIGHTVISION_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=true
+folded=false focus=NIGHTVISION_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=kept arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=kept arming=true
+folded=false focus=NIGHTVISION_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=true
+folded=false focus=NIGHTVISION_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=rearmed arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=kept arming=false
+folded=false focus=NIGHTVISION_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=false focus=MOUSE_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=false focus=MOUSE_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=false focus=MOUSE_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=MOUSE_FOCUSED chain=rearmed arming=false
+folded=false focus=MOUSE_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=MOUSE_FOCUSED chain=kept arming=false
+folded=false focus=MOUSE_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=false focus=MOUSE_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=false focus=MOUSE_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=false focus=MOUSE_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=MOUSE_FOCUSED chain=rearmed arming=false
+folded=false focus=MOUSE_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=MOUSE_FOCUSED chain=kept arming=true
+folded=false focus=MOUSE_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=false focus=MOUSE_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=true
+folded=false focus=MOUSE_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=true
+folded=false focus=MOUSE_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=MOUSE_FOCUSED chain=kept arming=false
+folded=false focus=MOUSE_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=MOUSE_FOCUSED chain=kept arming=true
+folded=false focus=MOUSE_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=true
+folded=false focus=MOUSE_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=false focus=MOUSE_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=false focus=MOUSE_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=MOUSE_FOCUSED chain=rearmed arming=false
+folded=false focus=MOUSE_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=MOUSE_FOCUSED chain=kept arming=false
+folded=false focus=MOUSE_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=false focus=MUSIC_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=false focus=MUSIC_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=false focus=MUSIC_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=MUSIC_FOCUSED chain=rearmed arming=false
+folded=false focus=MUSIC_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=MUSIC_FOCUSED chain=kept arming=false
+folded=false focus=MUSIC_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=false focus=MUSIC_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=false focus=MUSIC_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=false focus=MUSIC_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=MUSIC_FOCUSED chain=rearmed arming=false
+folded=false focus=MUSIC_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=MUSIC_FOCUSED chain=kept arming=true
+folded=false focus=MUSIC_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=false focus=MUSIC_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=true
+folded=false focus=MUSIC_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=true
+folded=false focus=MUSIC_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=MUSIC_FOCUSED chain=kept arming=false
+folded=false focus=MUSIC_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=MUSIC_FOCUSED chain=kept arming=true
+folded=false focus=MUSIC_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=true
+folded=false focus=MUSIC_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=false focus=MUSIC_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=false focus=MUSIC_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=MUSIC_FOCUSED chain=rearmed arming=false
+folded=false focus=MUSIC_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=MUSIC_FOCUSED chain=kept arming=false
+folded=false focus=MUSIC_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=kept arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=kept arming=true
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=true
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=true
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=kept arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=kept arming=true
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=true
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=kept arming=false
+folded=false focus=TELEGRAM_LIST_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=kept arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=kept arming=true
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=true
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=true
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=kept arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=kept arming=true
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=true
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=kept arming=false
+folded=false focus=TELEGRAM_TOPICS_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=idle key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=idle key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=kept arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=repliable key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=repliable key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=kept arming=true
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=arming key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=true
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=arming key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=true
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=kept arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=kept arming=true
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=true
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=rearmed arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=kept arming=false
+folded=false focus=TELEGRAM_CHAT_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=false focus=TELEGRAM_RECORDING reply=idle key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=false focus=TELEGRAM_RECORDING reply=idle key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=false focus=TELEGRAM_RECORDING reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_RECORDING chain=rearmed arming=false
+folded=false focus=TELEGRAM_RECORDING reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_RECORDING chain=kept arming=false
+folded=false focus=TELEGRAM_RECORDING reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=false focus=TELEGRAM_RECORDING reply=repliable key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=false focus=TELEGRAM_RECORDING reply=repliable key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=false focus=TELEGRAM_RECORDING reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_RECORDING chain=rearmed arming=false
+folded=false focus=TELEGRAM_RECORDING reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_RECORDING chain=kept arming=false
+folded=false focus=TELEGRAM_RECORDING reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=false focus=TELEGRAM_RECORDING reply=arming key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=true
+folded=false focus=TELEGRAM_RECORDING reply=arming key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=true
+folded=false focus=TELEGRAM_RECORDING reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_RECORDING chain=kept arming=false
+folded=false focus=TELEGRAM_RECORDING reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_RECORDING chain=kept arming=true
+folded=false focus=TELEGRAM_RECORDING reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=true
+folded=false focus=TELEGRAM_RECORDING reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=false focus=TELEGRAM_RECORDING reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=false focus=TELEGRAM_RECORDING reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_RECORDING chain=rearmed arming=false
+folded=false focus=TELEGRAM_RECORDING reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_RECORDING chain=kept arming=false
+folded=false focus=TELEGRAM_RECORDING reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=idle key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=idle key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=rearmed arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=kept arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=repliable key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=repliable key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=rearmed arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=kept arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=arming key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=true
+folded=false focus=TELEGRAM_PREVIEW reply=arming key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=true
+folded=false focus=TELEGRAM_PREVIEW reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=kept arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=kept arming=true
+folded=false focus=TELEGRAM_PREVIEW reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=true
+folded=false focus=TELEGRAM_PREVIEW reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=rearmed arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=kept arming=false
+folded=false focus=TELEGRAM_PREVIEW reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=false focus=NOTIFICATION_REPLY reply=idle key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=NOTIFICATION_REPLY reply=idle key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=NOTIFICATION_REPLY reply=idle key=NUMPAD_2 -> ret=true focusAfter=NOTIFICATION_REPLY chain=kept arming=false
+folded=false focus=NOTIFICATION_REPLY reply=idle key=NUMPAD_3 -> ret=true focusAfter=NOTIFICATION_REPLY chain=kept arming=false
+folded=false focus=NOTIFICATION_REPLY reply=idle key=DPAD_CENTER -> ret=null focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=false focus=NOTIFICATION_REPLY reply=repliable key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=NOTIFICATION_REPLY reply=repliable key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=NOTIFICATION_REPLY reply=repliable key=NUMPAD_2 -> ret=true focusAfter=NOTIFICATION_REPLY chain=kept arming=false
+folded=false focus=NOTIFICATION_REPLY reply=repliable key=NUMPAD_3 -> ret=true focusAfter=NOTIFICATION_REPLY chain=kept arming=false
+folded=false focus=NOTIFICATION_REPLY reply=repliable key=DPAD_CENTER -> ret=null focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=false focus=NOTIFICATION_REPLY reply=arming key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=NOTIFICATION_REPLY reply=arming key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=NOTIFICATION_REPLY reply=arming key=NUMPAD_2 -> ret=true focusAfter=NOTIFICATION_REPLY chain=kept arming=false
+folded=false focus=NOTIFICATION_REPLY reply=arming key=NUMPAD_3 -> ret=true focusAfter=NOTIFICATION_REPLY chain=kept arming=true
+folded=false focus=NOTIFICATION_REPLY reply=arming key=DPAD_CENTER -> ret=null focusAfter=NOTIFICATION_REPLY chain=cleared arming=true
+folded=false focus=NOTIFICATION_REPLY reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=NOTIFICATION_REPLY reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=false focus=NOTIFICATION_REPLY reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=NOTIFICATION_REPLY chain=kept arming=false
+folded=false focus=NOTIFICATION_REPLY reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=NOTIFICATION_REPLY chain=kept arming=false
+folded=false focus=NOTIFICATION_REPLY reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=false focus=CALL_INCOMING reply=idle key=NUMPAD_0 -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=false focus=CALL_INCOMING reply=idle key=NUMPAD_1 -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=false focus=CALL_INCOMING reply=idle key=NUMPAD_2 -> ret=true focusAfter=CALL_INCOMING chain=rearmed arming=false
+folded=false focus=CALL_INCOMING reply=idle key=NUMPAD_3 -> ret=true focusAfter=CALL_INCOMING chain=kept arming=false
+folded=false focus=CALL_INCOMING reply=idle key=DPAD_CENTER -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=false focus=CALL_INCOMING reply=repliable key=NUMPAD_0 -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=false focus=CALL_INCOMING reply=repliable key=NUMPAD_1 -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=false focus=CALL_INCOMING reply=repliable key=NUMPAD_2 -> ret=true focusAfter=CALL_INCOMING chain=rearmed arming=false
+folded=false focus=CALL_INCOMING reply=repliable key=NUMPAD_3 -> ret=true focusAfter=CALL_INCOMING chain=kept arming=false
+folded=false focus=CALL_INCOMING reply=repliable key=DPAD_CENTER -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=false focus=CALL_INCOMING reply=arming key=NUMPAD_0 -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=true
+folded=false focus=CALL_INCOMING reply=arming key=NUMPAD_1 -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=true
+folded=false focus=CALL_INCOMING reply=arming key=NUMPAD_2 -> ret=true focusAfter=CALL_INCOMING chain=kept arming=false
+folded=false focus=CALL_INCOMING reply=arming key=NUMPAD_3 -> ret=true focusAfter=CALL_INCOMING chain=kept arming=true
+folded=false focus=CALL_INCOMING reply=arming key=DPAD_CENTER -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=true
+folded=false focus=CALL_INCOMING reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=false focus=CALL_INCOMING reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=false focus=CALL_INCOMING reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=CALL_INCOMING chain=rearmed arming=false
+folded=false focus=CALL_INCOMING reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=CALL_INCOMING chain=kept arming=false
+folded=false focus=CALL_INCOMING reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=false focus=CALL_ACTIVE reply=idle key=NUMPAD_0 -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=false focus=CALL_ACTIVE reply=idle key=NUMPAD_1 -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=false focus=CALL_ACTIVE reply=idle key=NUMPAD_2 -> ret=true focusAfter=CALL_ACTIVE chain=rearmed arming=false
+folded=false focus=CALL_ACTIVE reply=idle key=NUMPAD_3 -> ret=true focusAfter=CALL_ACTIVE chain=kept arming=false
+folded=false focus=CALL_ACTIVE reply=idle key=DPAD_CENTER -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=false focus=CALL_ACTIVE reply=repliable key=NUMPAD_0 -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=false focus=CALL_ACTIVE reply=repliable key=NUMPAD_1 -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=false focus=CALL_ACTIVE reply=repliable key=NUMPAD_2 -> ret=true focusAfter=CALL_ACTIVE chain=rearmed arming=false
+folded=false focus=CALL_ACTIVE reply=repliable key=NUMPAD_3 -> ret=true focusAfter=CALL_ACTIVE chain=kept arming=false
+folded=false focus=CALL_ACTIVE reply=repliable key=DPAD_CENTER -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=false focus=CALL_ACTIVE reply=arming key=NUMPAD_0 -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=true
+folded=false focus=CALL_ACTIVE reply=arming key=NUMPAD_1 -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=true
+folded=false focus=CALL_ACTIVE reply=arming key=NUMPAD_2 -> ret=true focusAfter=CALL_ACTIVE chain=kept arming=false
+folded=false focus=CALL_ACTIVE reply=arming key=NUMPAD_3 -> ret=true focusAfter=CALL_ACTIVE chain=kept arming=true
+folded=false focus=CALL_ACTIVE reply=arming key=DPAD_CENTER -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=true
+folded=false focus=CALL_ACTIVE reply=sendPending key=NUMPAD_0 -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=false focus=CALL_ACTIVE reply=sendPending key=NUMPAD_1 -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=false focus=CALL_ACTIVE reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=CALL_ACTIVE chain=rearmed arming=false
+folded=false focus=CALL_ACTIVE reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=CALL_ACTIVE chain=kept arming=false
+folded=false focus=CALL_ACTIVE reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=TAB_NAV reply=idle key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=idle key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=idle key=NUMPAD_2 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=idle key=NUMPAD_3 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=idle key=DPAD_CENTER -> ret=null focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=repliable key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=repliable key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=arming key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=true
+folded=true focus=TAB_NAV reply=arming key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=true
+folded=true focus=TAB_NAV reply=arming key=NUMPAD_2 -> ret=true focusAfter=TAB_NAV chain=cleared arming=true
+folded=true focus=TAB_NAV reply=arming key=NUMPAD_3 -> ret=true focusAfter=TAB_NAV chain=cleared arming=true
+folded=true focus=TAB_NAV reply=arming key=DPAD_CENTER -> ret=null focusAfter=TAB_NAV chain=cleared arming=true
+folded=true focus=TAB_NAV reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=TAB_NAV reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TAB_NAV chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=true
+folded=true focus=CHAT_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=true
+folded=true focus=CHAT_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=true
+folded=true focus=CHAT_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=true
+folded=true focus=CHAT_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=true
+folded=true focus=CHAT_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=CHAT_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=true
+folded=true focus=LIST_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=true
+folded=true focus=LIST_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=true
+folded=true focus=LIST_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=true
+folded=true focus=LIST_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=true
+folded=true focus=LIST_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=LIST_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=LIST_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=true
+folded=true focus=MAP_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=true
+folded=true focus=MAP_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=true
+folded=true focus=MAP_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=true
+folded=true focus=MAP_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=true
+folded=true focus=MAP_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=MAP_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=true
+folded=true focus=MAP_ZOOM_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=true
+folded=true focus=MAP_ZOOM_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=true
+folded=true focus=MAP_ZOOM_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=true
+folded=true focus=MAP_ZOOM_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=true
+folded=true focus=MAP_ZOOM_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=MAP_ZOOM_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=MAP_ZOOM_FOCUSED chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=idle key=NUMPAD_0 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=idle key=NUMPAD_1 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=idle key=NUMPAD_2 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=idle key=NUMPAD_3 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=idle key=DPAD_CENTER -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=repliable key=NUMPAD_0 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=repliable key=NUMPAD_1 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=repliable key=NUMPAD_2 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=repliable key=NUMPAD_3 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=repliable key=DPAD_CENTER -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=arming key=NUMPAD_0 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=true
+folded=true focus=STOP_MODAL reply=arming key=NUMPAD_1 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=true
+folded=true focus=STOP_MODAL reply=arming key=NUMPAD_2 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=true
+folded=true focus=STOP_MODAL reply=arming key=NUMPAD_3 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=true
+folded=true focus=STOP_MODAL reply=arming key=DPAD_CENTER -> ret=null focusAfter=STOP_MODAL chain=cleared arming=true
+folded=true focus=STOP_MODAL reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STOP_MODAL reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=STOP_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=idle key=NUMPAD_0 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=idle key=NUMPAD_1 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=idle key=NUMPAD_2 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=idle key=NUMPAD_3 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=idle key=DPAD_CENTER -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=repliable key=NUMPAD_0 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=repliable key=NUMPAD_1 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=repliable key=NUMPAD_2 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=repliable key=NUMPAD_3 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=repliable key=DPAD_CENTER -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=arming key=NUMPAD_0 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=true
+folded=true focus=STEPS_MODAL reply=arming key=NUMPAD_1 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=true
+folded=true focus=STEPS_MODAL reply=arming key=NUMPAD_2 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=true
+folded=true focus=STEPS_MODAL reply=arming key=NUMPAD_3 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=true
+folded=true focus=STEPS_MODAL reply=arming key=DPAD_CENTER -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=true
+folded=true focus=STEPS_MODAL reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=STEPS_MODAL reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=STEPS_MODAL chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=true
+folded=true focus=TRANSLATE_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=true
+folded=true focus=TRANSLATE_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=true
+folded=true focus=TRANSLATE_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=true
+folded=true focus=TRANSLATE_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=true
+folded=true focus=TRANSLATE_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TRANSLATE_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TRANSLATE_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=true
+folded=true focus=TELEPROMPTER_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=true
+folded=true focus=TELEPROMPTER_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=true
+folded=true focus=TELEPROMPTER_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=true
+folded=true focus=TELEPROMPTER_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=true
+folded=true focus=TELEPROMPTER_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=TELEPROMPTER_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEPROMPTER_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=true
+folded=true focus=REID_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=true
+folded=true focus=REID_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=true
+folded=true focus=REID_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=true
+folded=true focus=REID_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=true
+folded=true focus=REID_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=REID_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=true
+folded=true focus=REID_FACES_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=true
+folded=true focus=REID_FACES_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=true
+folded=true focus=REID_FACES_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=true
+folded=true focus=REID_FACES_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=true
+folded=true focus=REID_FACES_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_FACES_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=REID_FACES_FOCUSED chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=idle key=NUMPAD_0 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=idle key=NUMPAD_1 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=idle key=NUMPAD_2 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=idle key=NUMPAD_3 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=idle key=DPAD_CENTER -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=repliable key=NUMPAD_0 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=repliable key=NUMPAD_1 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=repliable key=NUMPAD_2 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=repliable key=NUMPAD_3 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=repliable key=DPAD_CENTER -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=arming key=NUMPAD_0 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=true
+folded=true focus=REID_INTEL_MODAL reply=arming key=NUMPAD_1 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=true
+folded=true focus=REID_INTEL_MODAL reply=arming key=NUMPAD_2 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=true
+folded=true focus=REID_INTEL_MODAL reply=arming key=NUMPAD_3 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=true
+folded=true focus=REID_INTEL_MODAL reply=arming key=DPAD_CENTER -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=true
+folded=true focus=REID_INTEL_MODAL reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=REID_INTEL_MODAL reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=REID_INTEL_MODAL chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=true
+folded=true focus=TODO_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=true
+folded=true focus=TODO_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=true
+folded=true focus=TODO_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=true
+folded=true focus=TODO_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=true
+folded=true focus=TODO_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=TODO_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TODO_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=true
+folded=true focus=NIGHTVISION_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=true
+folded=true focus=NIGHTVISION_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=true
+folded=true focus=NIGHTVISION_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=true
+folded=true focus=NIGHTVISION_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=true
+folded=true focus=NIGHTVISION_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=NIGHTVISION_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=NIGHTVISION_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=true
+folded=true focus=MOUSE_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=true
+folded=true focus=MOUSE_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=true
+folded=true focus=MOUSE_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=true
+folded=true focus=MOUSE_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=true
+folded=true focus=MOUSE_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MOUSE_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=MOUSE_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=true
+folded=true focus=MUSIC_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=true
+folded=true focus=MUSIC_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=true
+folded=true focus=MUSIC_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=true
+folded=true focus=MUSIC_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=true
+folded=true focus=MUSIC_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=MUSIC_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=MUSIC_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_LIST_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_LIST_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_TOPICS_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_TOPICS_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=idle key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=idle key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=repliable key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=repliable key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=arming key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=arming key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=true
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_CHAT_FOCUSED reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_CHAT_FOCUSED chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=idle key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=idle key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=repliable key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=repliable key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=arming key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=true
+folded=true focus=TELEGRAM_RECORDING reply=arming key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=true
+folded=true focus=TELEGRAM_RECORDING reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=true
+folded=true focus=TELEGRAM_RECORDING reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=true
+folded=true focus=TELEGRAM_RECORDING reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=true
+folded=true focus=TELEGRAM_RECORDING reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_RECORDING reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_RECORDING chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=idle key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=idle key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=idle key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=idle key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=idle key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=repliable key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=repliable key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=repliable key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=repliable key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=repliable key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=arming key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=true
+folded=true focus=TELEGRAM_PREVIEW reply=arming key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=true
+folded=true focus=TELEGRAM_PREVIEW reply=arming key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=true
+folded=true focus=TELEGRAM_PREVIEW reply=arming key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=true
+folded=true focus=TELEGRAM_PREVIEW reply=arming key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=true
+folded=true focus=TELEGRAM_PREVIEW reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=TELEGRAM_PREVIEW reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=TELEGRAM_PREVIEW chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=idle key=NUMPAD_0 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=idle key=NUMPAD_1 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=idle key=NUMPAD_2 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=idle key=NUMPAD_3 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=idle key=DPAD_CENTER -> ret=null focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=repliable key=NUMPAD_0 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=repliable key=NUMPAD_1 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=repliable key=NUMPAD_2 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=repliable key=NUMPAD_3 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=repliable key=DPAD_CENTER -> ret=null focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=arming key=NUMPAD_0 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=true
+folded=true focus=NOTIFICATION_REPLY reply=arming key=NUMPAD_1 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=true
+folded=true focus=NOTIFICATION_REPLY reply=arming key=NUMPAD_2 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=true
+folded=true focus=NOTIFICATION_REPLY reply=arming key=NUMPAD_3 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=true
+folded=true focus=NOTIFICATION_REPLY reply=arming key=DPAD_CENTER -> ret=null focusAfter=NOTIFICATION_REPLY chain=cleared arming=true
+folded=true focus=NOTIFICATION_REPLY reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=NOTIFICATION_REPLY reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=NOTIFICATION_REPLY chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=idle key=NUMPAD_0 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=idle key=NUMPAD_1 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=idle key=NUMPAD_2 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=idle key=NUMPAD_3 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=idle key=DPAD_CENTER -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=repliable key=NUMPAD_0 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=repliable key=NUMPAD_1 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=repliable key=NUMPAD_2 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=repliable key=NUMPAD_3 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=repliable key=DPAD_CENTER -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=arming key=NUMPAD_0 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=true
+folded=true focus=CALL_INCOMING reply=arming key=NUMPAD_1 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=true
+folded=true focus=CALL_INCOMING reply=arming key=NUMPAD_2 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=true
+folded=true focus=CALL_INCOMING reply=arming key=NUMPAD_3 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=true
+folded=true focus=CALL_INCOMING reply=arming key=DPAD_CENTER -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=true
+folded=true focus=CALL_INCOMING reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_INCOMING reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=CALL_INCOMING chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=idle key=NUMPAD_0 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=idle key=NUMPAD_1 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=idle key=NUMPAD_2 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=idle key=NUMPAD_3 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=idle key=DPAD_CENTER -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=repliable key=NUMPAD_0 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=repliable key=NUMPAD_1 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=repliable key=NUMPAD_2 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=repliable key=NUMPAD_3 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=repliable key=DPAD_CENTER -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=arming key=NUMPAD_0 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=true
+folded=true focus=CALL_ACTIVE reply=arming key=NUMPAD_1 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=true
+folded=true focus=CALL_ACTIVE reply=arming key=NUMPAD_2 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=true
+folded=true focus=CALL_ACTIVE reply=arming key=NUMPAD_3 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=true
+folded=true focus=CALL_ACTIVE reply=arming key=DPAD_CENTER -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=true
+folded=true focus=CALL_ACTIVE reply=sendPending key=NUMPAD_0 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=sendPending key=NUMPAD_1 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=sendPending key=NUMPAD_2 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=sendPending key=NUMPAD_3 -> ret=true focusAfter=CALL_ACTIVE chain=cleared arming=false
+folded=true focus=CALL_ACTIVE reply=sendPending key=DPAD_CENTER -> ret=null focusAfter=CALL_ACTIVE chain=cleared arming=false

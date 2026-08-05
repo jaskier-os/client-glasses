@@ -50,6 +50,34 @@ class TouchpadCharacterizationTest {
         KeyEvent.KEYCODE_DPAD_CENTER to "DPAD_CENTER",
     )
 
+    /**
+     * Reply-machine preconditions, so the branches guarded by them are actually entered.
+     *
+     * With everything false/null -- the obvious baseline -- the NUMPAD_3 arm branch, the
+     * in-flight-reply guard and the send-window cancel are all unreachable, and the golden pins
+     * only the paths around them. Deleting any of those three branches would then leave the trace
+     * byte-identical. Each row below turns one of them on.
+     */
+    private data class ReplyState(
+        val label: String,
+        val repliable: Boolean = false,
+        val pendingNotif: String? = null,
+        val arming: Boolean = false,
+        val activeReply: String? = null,
+        val sendPending: Boolean = false,
+    )
+
+    private val replyStates = listOf(
+        ReplyState("idle"),
+        // Arms a voice reply that records the mic and sends to a real contact -- the branch with
+        // the most dangerous consequence in the whole handler.
+        ReplyState("repliable", repliable = true, pendingNotif = "notif-1"),
+        // A hold arriving while a reply is already arming must not re-arm or reach AI chat.
+        ReplyState("arming", repliable = true, pendingNotif = "notif-1", arming = true),
+        // The post-transcript window where a double tap cancels the pending send.
+        ReplyState("sendPending", activeReply = "notif-1", sendPending = true),
+    )
+
     private val focusStates = MainActivity.FocusState.values()
 
     private fun field(name: String) =
@@ -82,42 +110,64 @@ class TouchpadCharacterizationTest {
         run {
             for (folded in listOf(false, true)) {
                 for (focus in focusStates) {
-                    for ((code, codeName) in keyCodes) {
-                        scenario.onActivity { activity ->
-                            // Reset to a known baseline before EVERY case, so each line describes
-                            // one decision rather than the accumulation of the ones before it.
-                            fFocus.set(activity, focus)
-                            fFolded.set(activity, folded)
-                            // Pre-ARM the double-tap chain, do not zero it.
-                            //
-                            // Starting from 0 makes "did this key CLEAR the chain?" unobservable:
-                            // the field reads false before and after, so a handler that stopped
-                            // clearing it produces an identical trace. That is not hypothetical --
-                            // it was verified by mutating the handler to gate on NUMPAD_* only,
-                            // which is the exact bad extraction this harness exists to catch, and
-                            // the zeroed version passed it. Arming first makes the clear visible.
-                            fLastNumpad2.set(activity, android.os.SystemClock.uptimeMillis())
-                            fReplyArming.set(activity, false)
-                            fRepliable.set(activity, false)
-                            fPendingNotif.set(activity, null)
-                            fActiveReply.set(activity, null)
-                            fSendPending.set(activity, false)
+                    for (reply in replyStates) {
+                        for ((code, codeName) in keyCodes) {
+                            scenario.onActivity { activity ->
+                                // Reset to a known baseline before EVERY case, so each line
+                                // describes one decision rather than the accumulation of the
+                                // ones before it.
+                                fFocus.set(activity, focus)
+                                fFolded.set(activity, folded)
+                                // Pre-ARM the double-tap chain, do not zero it.
+                                //
+                                // Starting from 0 makes "did this key CLEAR the chain?"
+                                // unobservable: the field reads false before and after, so a
+                                // handler that stopped clearing it produces an identical trace.
+                                // That is not hypothetical -- it was verified by mutating the
+                                // handler to gate on NUMPAD_* only, which is the exact bad
+                                // extraction this harness exists to catch, and the zeroed version
+                                // passed. Arming first makes the clear visible.
+                                // Arm with a stamp far enough in the past that it can never collide
+                                // with the `uptimeMillis()` the handler writes. Using "now" made
+                                // `kept` vs `rearmed` depend on whether the millisecond ticked
+                                // between setup and the write -- a coin flip that produced a flaky
+                                // golden, which is worse than a weak one.
+                                //
+                                // It must also sit OUTSIDE the double-tap window, so a NUMPAD_2 is
+                                // never read as the second tap of a pair; that path calls
+                                // turnScreenOff() and would blank the display mid-run.
+                                val armedAt = android.os.SystemClock.uptimeMillis() - 10_000L
+                                fLastNumpad2.set(activity, armedAt)
+                                fReplyArming.set(activity, reply.arming)
+                                fRepliable.set(activity, reply.repliable)
+                                fPendingNotif.set(activity, reply.pendingNotif)
+                                fActiveReply.set(activity, reply.activeReply)
+                                fSendPending.set(activity, reply.sendPending)
 
-                            val result = handler.invoke(
-                                activity,
-                                code,
-                                KeyEvent(KeyEvent.ACTION_DOWN, code),
-                                com.repository.glasses.listener.input.remote.InputOrigin.TOUCHPAD,
-                            ) as Boolean?
+                                val result = handler.invoke(
+                                    activity,
+                                    code,
+                                    KeyEvent(KeyEvent.ACTION_DOWN, code),
+                                    com.repository.glasses.listener.input.remote.InputOrigin.TOUCHPAD,
+                                ) as Boolean?
 
-                            // `lastNumpad2Ms` is a clock value, so record only whether the chain is
-                            // armed. The timestamp itself is not reproducible across runs.
-                            val armed = (fLastNumpad2.get(activity) as Long) != 0L
-                            trace.append(
-                                "folded=$folded focus=$focus key=$codeName -> " +
-                                    "ret=$result focusAfter=${fFocus.get(activity)} " +
-                                    "dtArmed=$armed arming=${fReplyArming.get(activity)}\n"
-                            )
+                                // Three-valued, not a boolean. "Armed" alone cannot tell a chain
+                                // that was left alone from one that was cleared and re-armed with
+                                // a fresh stamp, so a handler that stopped re-arming would look
+                                // identical.
+                                val after = fLastNumpad2.get(activity) as Long
+                                val chain = when {
+                                    after == 0L -> "cleared"
+                                    after == armedAt -> "kept"
+                                    else -> "rearmed"
+                                }
+                                trace.append(
+                                    "folded=$folded focus=$focus reply=${reply.label} " +
+                                        "key=$codeName -> ret=$result " +
+                                        "focusAfter=${fFocus.get(activity)} chain=$chain " +
+                                        "arming=${fReplyArming.get(activity)}\n"
+                                )
+                            }
                         }
                     }
                 }
