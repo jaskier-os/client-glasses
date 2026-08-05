@@ -17,13 +17,10 @@ package com.repository.glasses.listener.input.remote
  * caller supplies the thread hop.
  *
  * @param maxEntries hard ceiling on queued entries.
- * @param mergeWindow how many trailing entries a new scroll may merge into. One entry, i.e. only
- *        the tail, keeps merging strictly order-preserving.
  * @param post schedules [drain] on the UI thread. Called at most once per drain cycle.
  */
 class MainThreadEventQueue(
     private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
-    private val mergeWindow: Int = 1,
     private val post: (Runnable) -> Unit,
 ) {
     private val lock = Any()
@@ -49,29 +46,44 @@ class MainThreadEventQueue(
         var needsPost = false
         synchronized(lock) {
             val last = queue.lastOrNull()
-            if (last != null && mergeWindow > 0 && canMerge(last, event)) {
+            if (last != null && canMerge(last, event)) {
                 queue.removeLast()
                 // Replace rather than mutate: the drain loop may already hold a reference to the
                 // entry it polled, and events are immutable for exactly this reason.
-                queue.addLast(last.copy(delta = last.delta + event.delta, seq = event.seq))
+                // The merged entry carries the LATEST seq and the latest timing, so a consumer that
+                // times events sees the interval to the most recent one, not to a superseded one.
+                queue.addLast(
+                    last.copy(
+                        delta = last.delta + event.delta,
+                        seq = event.seq,
+                        ageMs = event.ageMs,
+                        sinceLastMs = event.sinceLastMs,
+                    )
+                )
                 mergedCount++
             } else if (queue.size >= maxEntries) {
-                // Full. Never drop a scroll: fold it into the newest scroll if there is one, so the
-                // distance survives even when the UI thread is stalled.
-                val idx = queue.indexOfLast { it.action == RemoteAction.SCROLL_STEP }
-                if (event.action == RemoteAction.SCROLL_STEP && idx >= 0) {
-                    val target = queue[idx]
-                    queue[idx] = target.copy(delta = target.delta + event.delta)
-                    mergedCount++
-                } else {
-                    // A discrete action arriving into a full queue, or a scroll with nothing to
-                    // fold into. Discrete actions are at-most-once by contract, so dropping the
-                    // OLDEST discrete entry keeps the most recent user intent.
-                    val victim = queue.indexOfFirst { it.action != RemoteAction.SCROLL_STEP }
-                    if (victim >= 0) queue.removeAt(victim) else queue.removeFirst()
+                // Full. Free exactly one slot, without reordering and without losing distance.
+                //
+                // Folding into an arbitrary earlier scroll would be wrong even though it conserves
+                // pixels: motion that happened AFTER a queued tap would be applied BEFORE it, and
+                // the tap would then act on something other than what the user saw.
+                val victim = queue.indexOfFirst { it.action != RemoteAction.SCROLL_STEP }
+                if (victim >= 0) {
+                    // Discrete actions are at-most-once by contract, so shedding the oldest one is
+                    // safe and keeps the most recent user intent.
+                    queue.removeAt(victim)
                     droppedCount++
-                    queue.addLast(event)
+                } else {
+                    // All scrolls. Fold the oldest into its immediate successor: adjacent, so
+                    // ordering is untouched, and the net distance survives exactly. Folding a
+                    // reversal collapses a back-and-forth the user would barely have seen anyway;
+                    // the final scroll position is identical either way.
+                    val oldest = queue.removeFirst()
+                    val next = queue.removeFirst()
+                    queue.addFirst(next.copy(delta = next.delta + oldest.delta))
+                    mergedCount++
                 }
+                queue.addLast(event)
             } else {
                 queue.addLast(event)
             }
@@ -80,7 +92,16 @@ class MainThreadEventQueue(
                 needsPost = true
             }
         }
-        if (needsPost) post(Runnable { drain() })
+        if (needsPost) {
+            try {
+                post(Runnable { drain() })
+            } catch (e: Exception) {
+                // A dead Looper, or a rejected post. Release the flag or nothing is ever scheduled
+                // again and the queue stalls silently for the rest of the process's life.
+                synchronized(lock) { posted = false }
+                throw e
+            }
+        }
     }
 
     /**

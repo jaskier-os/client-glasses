@@ -7,13 +7,13 @@ import org.junit.Test
 class MainThreadEventQueueTest {
 
     private fun scroll(delta: Int, seq: Long = 1L) = RemoteInputEvent(
-        v = 1, action = RemoteAction.SCROLL_STEP, delta = delta,
-        sourceId = "watch", sid = 1L, seq = seq, ageMs = 0,
+        action = RemoteAction.SCROLL_STEP, delta = delta,
+        sourceId = "watch", sid = 1L, seq = seq, ageMs = 0, sinceLastMs = -1,
     )
 
-    private fun select(seq: Long = 1L) = RemoteInputEvent(
-        v = 1, action = RemoteAction.SELECT, delta = 0,
-        sourceId = "watch", sid = 1L, seq = seq, ageMs = 0,
+    private fun tap(seq: Long = 1L) = RemoteInputEvent(
+        action = RemoteAction.TAP, delta = 0,
+        sourceId = "watch", sid = 1L, seq = seq, ageMs = 0, sinceLastMs = -1,
     )
 
     private class Harness(maxEntries: Int = MainThreadEventQueue.DEFAULT_MAX_ENTRIES) {
@@ -33,11 +33,11 @@ class MainThreadEventQueueTest {
     fun `events are delivered in order`() {
         val h = Harness()
         h.queue.enqueue(scroll(1, 1))
-        h.queue.enqueue(select(2))
+        h.queue.enqueue(tap(2))
         h.queue.enqueue(scroll(-1, 3))
         h.flush()
         assertEquals(
-            listOf(RemoteAction.SCROLL_STEP, RemoteAction.SELECT, RemoteAction.SCROLL_STEP),
+            listOf(RemoteAction.SCROLL_STEP, RemoteAction.TAP, RemoteAction.SCROLL_STEP),
             h.delivered.map { it.action },
         )
     }
@@ -45,7 +45,7 @@ class MainThreadEventQueueTest {
     @Test
     fun `only one drain is posted per burst`() {
         val h = Harness()
-        repeat(10) { h.queue.enqueue(select(it.toLong())) }
+        repeat(10) { h.queue.enqueue(tap(it.toLong())) }
         assertEquals("a burst must post exactly one drain", 1, h.poster.pendingCount)
     }
 
@@ -74,7 +74,7 @@ class MainThreadEventQueueTest {
     fun `a discrete action breaks the merge run`() {
         val h = Harness()
         h.queue.enqueue(scroll(1, 1))
-        h.queue.enqueue(select(2))
+        h.queue.enqueue(tap(2))
         h.queue.enqueue(scroll(1, 3))
         h.flush()
         assertEquals(3, h.delivered.size)
@@ -140,7 +140,7 @@ class MainThreadEventQueueTest {
         val h = Harness(maxEntries = 8)
         var seq = 0L
         repeat(1000) {
-            if (it % 3 == 0) h.queue.enqueue(select(++seq))
+            if (it % 3 == 0) h.queue.enqueue(tap(++seq))
             else h.queue.enqueue(scroll(if (it % 2 == 0) 1 else -1, ++seq))
         }
         assertTrue("bounded, got ${h.queue.size}", h.queue.size <= 8)
@@ -158,13 +158,13 @@ class MainThreadEventQueueTest {
             if (!reentered) {
                 reentered = true
                 // Re-entrant enqueue from inside delivery: the classic lost-wakeup case.
-                h.queue.enqueue(select(99))
+                h.queue.enqueue(tap(99))
             }
         }
         h.queue.enqueue(scroll(1, 1))
         h.flush()
         assertEquals("the re-entrant event must not be stranded", 2, h.delivered.size)
-        assertEquals(RemoteAction.SELECT, h.delivered[1].action)
+        assertEquals(RemoteAction.TAP, h.delivered[1].action)
     }
 
     @Test
@@ -187,7 +187,7 @@ class MainThreadEventQueueTest {
         }
         h.queue.enqueue(scroll(1, 1))
         h.queue.enqueue(scroll(-1, 2))
-        h.queue.enqueue(select(3))
+        h.queue.enqueue(tap(3))
         h.flush()
         assertEquals(3, h.delivered.size)
     }
@@ -204,6 +204,72 @@ class MainThreadEventQueueTest {
         h.queue.enqueue(scroll(5, 3))
         h.flush()
         assertEquals(1, h.delivered.size)
+    }
+
+    @Test
+    fun `overflow never reorders motion past a queued tap`() {
+        // Folding a new scroll into an arbitrary earlier one conserves pixels but applies motion
+        // that happened AFTER a tap BEFORE it -- the tap would act on something the user never saw.
+        // Two taps: the queue sheds the OLDEST discrete entry on overflow, so the second survives
+        // and its ordering relative to the surrounding motion must be exactly preserved.
+        val h = Harness(maxEntries = 4)
+        h.queue.enqueue(scroll(10, 1))
+        h.queue.enqueue(tap(2))
+        h.queue.enqueue(scroll(-10, 3))
+        h.queue.enqueue(tap(4))
+        h.queue.enqueue(scroll(20, 5))   // overflow: sheds the FIRST tap
+        h.flush()
+        val tapIndex = h.delivered.indexOfFirst { it.action == RemoteAction.TAP }
+        assertTrue("a tap must still be present", tapIndex >= 0)
+        val before = h.delivered.take(tapIndex).sumOf { it.delta }
+        assertEquals("motion after the tap must not be applied before it", 0, before)
+        assertEquals("the newest event is still last", 20, h.delivered.last().delta)
+    }
+
+    @Test
+    fun `overflow of an all-scroll queue folds adjacent entries and keeps order`() {
+        val h = Harness(maxEntries = 3)
+        // Alternating so nothing tail-merges.
+        h.queue.enqueue(scroll(1, 1))
+        h.queue.enqueue(scroll(-2, 2))
+        h.queue.enqueue(scroll(4, 3))
+        h.queue.enqueue(scroll(-8, 4))   // overflow: folds entry 0 into entry 1
+        h.flush()
+        assertEquals("net distance is conserved", 1 - 2 + 4 - 8, h.totalDelta())
+        assertEquals("the newest event is still last", -8, h.delivered.last().delta)
+    }
+
+    @Test
+    fun `a merged event carries the latest timing so tap intervals stay correct`() {
+        val h = Harness()
+        h.queue.enqueue(scroll(1, 1).copy(sinceLastMs = 500, ageMs = 5))
+        h.queue.enqueue(scroll(1, 2).copy(sinceLastMs = 80, ageMs = 12))
+        h.flush()
+        val merged = h.delivered.single()
+        assertEquals(2, merged.delta)
+        assertEquals("interval must be to the newest event", 80, merged.sinceLastMs)
+        assertEquals(12, merged.ageMs)
+    }
+
+    @Test
+    fun `a failed post does not stall the queue permanently`() {
+        var fail = true
+        val delivered = mutableListOf<RemoteInputEvent>()
+        val runnables = ArrayDeque<Runnable>()
+        val q = MainThreadEventQueue(post = {
+            if (fail) throw IllegalStateException("dead looper") else runnables.addLast(it)
+        })
+        q.setDeliverer { delivered.add(it) }
+
+        try {
+            q.enqueue(scroll(1, 1))
+        } catch (_: IllegalStateException) {
+        }
+
+        fail = false
+        q.enqueue(scroll(1, 2))
+        while (runnables.isNotEmpty()) runnables.removeFirst().run()
+        assertTrue("the queue must recover once posting works again", delivered.isNotEmpty())
     }
 
     @Test

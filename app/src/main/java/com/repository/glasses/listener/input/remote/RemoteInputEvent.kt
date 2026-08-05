@@ -18,10 +18,27 @@ enum class RemoteAction {
     /** A scroll detent, or several coalesced into one. Direction lives in the sign of `delta`. */
     SCROLL_STEP,
 
-    /** Confirm / activate the focused item. */
-    SELECT,
+    /**
+     * A RAW tap. Deliberately not "select": single-versus-double is NOT decided here.
+     *
+     * The glasses already disambiguate taps in exactly one place -- `MainActivity.isDoubleTap()`,
+     * a 400 ms threshold the user has tuned by feel on the physical touchpad -- and single = select
+     * while double = back. A remote source therefore sends raw taps and inherits that behaviour for
+     * free, which is the entire point of this layer: the watch feels identical to the touchpad
+     * without reimplementing anything, and so does the next device.
+     *
+     * A source MUST NOT run its own double-tap detector. Two detectors with different thresholds
+     * fight: the source's would consume the pair and mask the glasses' logic, and the two input
+     * devices would diverge.
+     */
+    TAP,
 
-    /** Navigate up / dismiss. */
+    /**
+     * An explicit back action from a source that has a dedicated control for it.
+     *
+     * Distinct from a double [TAP], which also reaches back through the shared detector. This exists
+     * for devices with a real back button; the watch does not use it.
+     */
     BACK,
 }
 
@@ -33,8 +50,6 @@ enum class RemoteAction {
  * drain loop may already hold.
  */
 data class RemoteInputEvent(
-    /** Wire protocol version. Always [PROTOCOL_VERSION] for anything the router forwards. */
-    val v: Int,
     val action: RemoteAction,
     /**
      * Signed detent count for [RemoteAction.SCROLL_STEP]; `+` = forward/down, `-` = back/up.
@@ -53,9 +68,21 @@ data class RemoteInputEvent(
      * cross-device clock comparison, and never a value the transport could freeze while queueing.
      */
     val ageMs: Int,
+    /**
+     * Milliseconds between this event and the previous one from the same session, measured on the
+     * SOURCE's clock. `-1` when there is no predecessor (first event of a session).
+     *
+     * This is what makes tap disambiguation immune to transport jitter. Two taps a user made 350 ms
+     * apart can easily ARRIVE 420 ms apart -- coalescing, a queue stall, and a BLE connection
+     * interval all add delay, and none of it is uniform -- so timing them by arrival would silently
+     * turn a deliberate double tap into two singles. The source stamped both at the moment the
+     * finger landed, so the interval between those stamps is the user's real intent.
+     */
+    val sinceLastMs: Int,
 ) {
     companion object {
-        const val PROTOCOL_VERSION = 1
+        /** [sinceLastMs] when this is the first event of a session. */
+        const val NO_PREDECESSOR = -1
     }
 }
 

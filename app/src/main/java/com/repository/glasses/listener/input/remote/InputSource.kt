@@ -43,6 +43,18 @@ interface InputSource {
      * Default no-op: a source that has no back channel simply ignores it.
      */
     fun onStatus(status: RemoteInputStatus) {}
+
+    companion object {
+        const val SOURCE_ID_PATTERN = "[a-z0-9_]{1,16}"
+
+        /**
+         * Source ids are constrained so they cannot smuggle a field separator into an
+         * authentication digest, and so they are bounded in a log line.
+         */
+        private val SOURCE_ID_RE = Regex("^$SOURCE_ID_PATTERN$")
+
+        fun isValidSourceId(src: String): Boolean = SOURCE_ID_RE.matches(src)
+    }
 }
 
 /**

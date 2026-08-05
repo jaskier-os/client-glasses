@@ -117,16 +117,11 @@ class RemoteInputAuth(key: ByteArray) {
         /** Domain tag for input events. Prevents a captured event tag being replayed as a status. */
         const val DOMAIN_EVENT = "ri1:evt"
 
-        /** Source ids are constrained so they cannot smuggle a field separator into the digest. */
-        private val SOURCE_ID_RE = Regex("^[a-z0-9_]{1,16}$")
-
         /**
          * Shorter than this and the key is treated as absent. 16 bytes is the floor for a value
          * that is supposed to resist offline guessing.
          */
         const val MIN_KEY_BYTES = 16
-
-        fun isValidSourceId(src: String): Boolean = SOURCE_ID_RE.matches(src)
 
         /**
          * Render a uint32 wire field for the digest: plain decimal in `0..4294967295`, no sign, no

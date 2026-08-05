@@ -67,12 +67,12 @@ class RemoteInputRouterTest {
     }
 
     @Test
-    fun `select and back are delivered as discrete actions`() {
+    fun `tap and back are delivered as discrete actions`() {
         watch.open(sid = 1)
-        watch.select(sid = 1)
+        watch.tap(sid = 1)
         watch.back(sid = 1)
         flush()
-        assertEquals(listOf(RemoteAction.SELECT, RemoteAction.BACK), sink.actions)
+        assertEquals(listOf(RemoteAction.TAP, RemoteAction.BACK), sink.actions)
         assertEquals(listOf(0, 0), sink.deltas)
     }
 
@@ -123,14 +123,14 @@ class RemoteInputRouterTest {
     }
 
     @Test
-    fun `a replayed SELECT is dropped rather than confirming twice`() {
+    fun `a replayed TAP is dropped rather than acting twice`() {
         watch.open(sid = 1)
         val s = watch.nextSeq()
-        watch.select(sid = 1, seqOverride = s)
-        watch.select(sid = 1, seqOverride = s)
-        watch.select(sid = 1, seqOverride = s)
+        watch.tap(sid = 1, seqOverride = s)
+        watch.tap(sid = 1, seqOverride = s)
+        watch.tap(sid = 1, seqOverride = s)
         flush()
-        assertEquals("SELECT must be at-most-once", 1, sink.events.size)
+        assertEquals("TAP must be at-most-once", 1, sink.events.size)
     }
 
     @Test
@@ -215,18 +215,19 @@ class RemoteInputRouterTest {
     }
 
     @Test
-    fun `a session id is never reusable, so a captured OPEN cannot resurrect one`() {
+    fun `a session id older than one already accepted is refused as a replay`() {
         watch.open(sid = 42)
         watch.scroll(sid = 42, steps = 1)
         flush()
         sink.clear()
         watch.close(sid = 42)
 
-        // Replay of the captured OPEN plus its events.
-        watch.open(sid = 42)
-        watch.scroll(sid = 42, steps = 1)
+        // A source's session counter only ever increases, so a lower id is a captured OPEN.
+        watch.open(sid = 41)
+        watch.scroll(sid = 41, steps = 1)
         flush()
         assertTrue("a replayed session must not be admitted", sink.events.isEmpty())
+        assertFalse(router.anyOpenSession())
     }
 
     @Test
@@ -243,18 +244,30 @@ class RemoteInputRouterTest {
     }
 
     @Test
-    fun `the session map is bounded per source`() {
+    fun `only the newest session is live, so a peer cannot grow per-session state`() {
+        // Spaced out so the lifecycle rate limit is not what refuses them.
         for (sid in 1L..20L) {
             watch.open(sid = sid)
-            tick(1)
+            tick(1000)
         }
-        // Bounded regardless of how many sessions a peer mints.
         assertTrue(router.anyOpenSession())
-        for (sid in 1L..(20L - RemoteInputRouter.MAX_SESSIONS_PER_SOURCE)) {
-            watch.scroll(sid = sid, steps = 1)
-        }
+        // Every superseded session is gone; only the newest accepts input.
+        for (sid in 1L..19L) watch.scroll(sid = sid, steps = 1)
         flush()
-        assertTrue("evicted sessions must not accept input", sink.events.isEmpty())
+        assertTrue("superseded sessions must not accept input", sink.events.isEmpty())
+
+        watch.scroll(sid = 20L, steps = 1)
+        flush()
+        assertEquals(1, sink.events.size)
+    }
+
+    @Test
+    fun `session id zero is reserved and refused`() {
+        watch.open(sid = 0L)
+        watch.scroll(sid = 0L, steps = 1)
+        flush()
+        assertTrue(sink.events.isEmpty())
+        assertFalse(router.anyOpenSession())
     }
 
     // --- staleness ---
@@ -399,14 +412,16 @@ class RemoteInputRouterTest {
     }
 
     @Test
-    fun `frames from an unregistered source are rejected`() {
-        val stranger = newSource("intruder")
-        // Not registered: wire its frames straight into the router.
-        stranger.attach { router.onFrame(it) }
-        stranger.open(sid = 1)
-        stranger.scroll(sid = 1, steps = 1)
+    fun `frames naming an unregistered source are rejected`() {
+        // A compromised or buggy transport claiming to speak for a device that was never
+        // registered. Registration IS the allowlist, so this must not be admitted.
+        watch.emit(RemoteInputFrame.Lifecycle(1, "intruder", 1L, 1L, now, RemoteLifecycle.OPEN))
+        watch.emit(
+            RemoteInputFrame.Action(1, "intruder", 1L, 2L, now, RemoteAction.SCROLL_STEP, 1)
+        )
         flush()
         assertTrue(sink.events.isEmpty())
+        assertFalse(router.anyOpenSession())
     }
 
     @Test
@@ -432,7 +447,7 @@ class RemoteInputRouterTest {
         gadget.open(sid = 1)
         watch.scroll(sid = 1, steps = 2)
         gadget.scroll(sid = 1, steps = -5)
-        gadget.select(sid = 1)
+        gadget.tap(sid = 1)
         flush()
 
         assertEquals(3, sink.events.size)
@@ -481,10 +496,14 @@ class RemoteInputRouterTest {
 
         router.unregisterSource(gadget)
         assertEquals(setOf("watch"), router.registeredSourceIds())
-        assertEquals(1, gadget.detachCount)
-        gadget.attach { router.onFrame(it) }
-        gadget.open(sid = 1)
-        gadget.scroll(sid = 1, steps = 1)
+        assertEquals("unregistering must detach the source", 1, gadget.detachCount)
+        // Its frames are refused even if its transport is still somehow alive.
+        watch.emit(
+            RemoteInputFrame.Lifecycle(1, "ble_gadget", 5L, 1L, now, RemoteLifecycle.OPEN)
+        )
+        watch.emit(
+            RemoteInputFrame.Action(1, "ble_gadget", 5L, 2L, now, RemoteAction.SCROLL_STEP, 1)
+        )
         flush()
         assertTrue("an unregistered source is refused", sink.events.isEmpty())
     }
@@ -602,5 +621,389 @@ class RemoteInputRouterTest {
     fun `TTL default is the documented floor`() {
         assertEquals(400, RemoteInputRouter.DEFAULT_TTL_MS)
         assertNotEquals(0, RemoteInputRouter.DEFAULT_TTL_MS)
+    }
+
+    // --- tap timing. The glasses own single-vs-double; the router only supplies the interval. ---
+
+    @Test
+    fun `tap intervals are measured on the source clock, immune to transport jitter`() {
+        watch.open(sid = 1, wms = 0)
+        // Two taps the user made 350 ms apart, but which ARRIVE 420 ms apart after a queue stall.
+        tick(10)
+        watch.tap(sid = 1, wms = 100)
+        tick(420)
+        watch.tap(sid = 1, wms = 450)
+        flush()
+        assertEquals(2, sink.events.size)
+        assertEquals(
+            "first tap has no predecessor",
+            RemoteInputEvent.NO_PREDECESSOR, sink.events[0].sinceLastMs,
+        )
+        assertEquals(
+            "the user's real 350 ms, not the 420 ms of arrival",
+            350, sink.events[1].sinceLastMs,
+        )
+    }
+
+    @Test
+    fun `tap intervals are reported across the range that decides single versus double`() {
+        watch.open(sid = 1, wms = 0)
+        var wms = 0L
+        val gaps = listOf(100L, 200L, 399L, 400L, 401L, 500L)
+        for (g in gaps) {
+            wms += g
+            tick(g)
+            watch.tap(sid = 1, wms = wms)
+        }
+        flush()
+        assertEquals(gaps.size, sink.events.size)
+        assertEquals(RemoteInputEvent.NO_PREDECESSOR, sink.events[0].sinceLastMs)
+        // Every subsequent interval is exactly what the source measured.
+        assertEquals(gaps.drop(1).map { it.toInt() }, sink.events.drop(1).map { it.sinceLastMs })
+    }
+
+    @Test
+    fun `three rapid taps report both intervals`() {
+        watch.open(sid = 1, wms = 0)
+        watch.tap(sid = 1, wms = 100)
+        watch.tap(sid = 1, wms = 200)
+        watch.tap(sid = 1, wms = 300)
+        flush()
+        assertEquals(3, sink.events.size)
+        assertEquals(
+            listOf(RemoteInputEvent.NO_PREDECESSOR, 100, 100),
+            sink.events.map { it.sinceLastMs },
+        )
+    }
+
+    @Test
+    fun `a dropped stale event still advances the tap clock`() {
+        // Otherwise the next tap would be timed against a long-superseded one and look like a
+        // double tap the user never made.
+        watch.open(sid = 1, wms = 0)
+        tick(1000)
+        watch.tap(sid = 1, wms = 0)      // stale, dropped
+        tick(10)
+        watch.tap(sid = 1, wms = 1000)
+        flush()
+        assertEquals(1, sink.events.size)
+        assertEquals(1000, sink.events[0].sinceLastMs)
+    }
+
+    @Test
+    fun `a scroll between two taps does not corrupt the interval measurement`() {
+        watch.open(sid = 1, wms = 0)
+        watch.tap(sid = 1, wms = 100)
+        watch.scroll(sid = 1, steps = 1, wms = 150)
+        watch.tap(sid = 1, wms = 300)
+        flush()
+        assertEquals(3, sink.events.size)
+        assertEquals(
+            listOf(RemoteInputEvent.NO_PREDECESSOR, 50, 150),
+            sink.events.map { it.sinceLastMs },
+        )
+    }
+
+    @Test
+    fun `two events stamped in the same millisecond report a zero interval, never negative`() {
+        watch.open(sid = 1, wms = 0)
+        watch.tap(sid = 1, wms = 100)
+        watch.tap(sid = 1, wms = 100)
+        flush()
+        assertEquals(0, sink.events[1].sinceLastMs)
+    }
+
+    // --- regressions found by audit ---
+
+    @Test
+    fun `a session that expired can be reopened with the same id`() {
+        // A wrist-down of 20 s expires the session while the source still considers it live. If
+        // reopening were refused the remote would be dead until the user noticed.
+        watch.open(sid = 1)
+        watch.scroll(sid = 1, steps = 1)
+        flush()
+        sink.clear()
+
+        tick(RemoteInputRouter.DEFAULT_SESSION_EXPIRY_MS + 1)
+        assertFalse(router.anyOpenSession())
+
+        watch.open(sid = 1)
+        assertTrue("a legitimate reopen must be admitted", router.anyOpenSession())
+        watch.scroll(sid = 1, steps = 1)
+        flush()
+        assertEquals(1, sink.events.size)
+    }
+
+    @Test
+    fun `reopening a session resumes the sequence rather than resetting it`() {
+        // This is what makes a captured OPEN plus its burst unreplayable WITHOUT also blocking a
+        // legitimate reconnect: the replay cannot rewind the sequence.
+        watch.open(sid = 1)
+        watch.scroll(sid = 1, steps = 1, seqOverride = 900)
+        flush()
+        sink.clear()
+        watch.close(sid = 1)
+
+        // Replay the captured OPEN and the captured event.
+        watch.emit(RemoteInputFrame.Lifecycle(1, "watch", 1L, 10L, now, RemoteLifecycle.OPEN))
+        watch.scroll(sid = 1, steps = 1, seqOverride = 900)
+        flush()
+        assertTrue("the replayed burst must be refused", sink.events.isEmpty())
+
+        // ...while a genuine continuation, carrying a higher sequence, proceeds.
+        watch.scroll(sid = 1, steps = 1, seqOverride = 901)
+        flush()
+        assertEquals(1, sink.events.size)
+    }
+
+    @Test
+    fun `sessions cleared on a transport drop remain unreplayable`() {
+        watch.open(sid = 1)
+        watch.scroll(sid = 1, steps = 1, seqOverride = 500)
+        flush()
+        sink.clear()
+
+        router.clearAllSessions("rfcomm disconnect")
+
+        // A burst captured before the drop, replayed after it.
+        watch.emit(RemoteInputFrame.Lifecycle(1, "watch", 1L, 10L, now, RemoteLifecycle.OPEN))
+        watch.scroll(sid = 1, steps = 1, seqOverride = 500)
+        flush()
+        assertTrue(sink.events.isEmpty())
+    }
+
+    @Test
+    fun `a keepalive survives an action flood so the session does not expire`() {
+        // The flood is the victim's own traffic; starving its PINGs would let an attacker expire
+        // the user's session simply by making noise.
+        watch.open(sid = 1)
+        repeat(30) {
+            repeat(200) { watch.scroll(sid = 1, steps = 1) }
+            tick(1000)
+            watch.ping(sid = 1)
+        }
+        assertTrue("the session must survive", router.anyOpenSession())
+        sink.clear()
+        watch.scroll(sid = 1, steps = 3)
+        flush()
+        assertEquals(1, sink.events.size)
+    }
+
+    @Test
+    fun `delivery order matches admission order under concurrent producers`() {
+        // The sequence check orders ADMISSION; without enqueueing inside the same critical section
+        // a later event could still be delivered first, and a tap would act on the wrong item.
+        val fastPoster = ManualPoster()
+        val fast = RemoteInputRouter(
+            maxEventsPerSecond = Int.MAX_VALUE,
+            clock = { now },
+            post = fastPoster.post,
+        )
+        val source = FakeInputSource("stress", clock = { now })
+        fast.registerSource(source)
+        val fastSink = RecordingSink()
+        fast.setSink(fastSink)
+        source.emit(RemoteInputFrame.Lifecycle(1, "stress", 1L, 1L, now, RemoteLifecycle.OPEN))
+
+        val seqCounter = java.util.concurrent.atomic.AtomicLong(100)
+        val threads = (0 until 4).map {
+            Thread {
+                repeat(250) {
+                    val s = seqCounter.incrementAndGet()
+                    source.emit(
+                        RemoteInputFrame.Action(
+                            1, "stress", 1L, s, now, RemoteAction.SCROLL_STEP,
+                            if (s % 2 == 0L) 1 else -1,
+                        )
+                    )
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+        fastPoster.runAll()
+
+        val seqs = fastSink.events.map { it.seq }
+        assertEquals("delivered order must be strictly increasing", seqs.sorted(), seqs)
+        assertTrue("the run must actually have delivered events", seqs.isNotEmpty())
+    }
+
+    // --- durable replay defence (survives a restart) ---
+
+    /** Rebuilds a router over the SAME store, i.e. an app restart or reboot. */
+    private fun restart(store: SessionStore, sink: RemoteInputSink): FakeInputSource {
+        val r = RemoteInputRouter(store = store, clock = { now }, post = poster.post)
+        val src = FakeInputSource("watch", clock = { now })
+        r.registerSource(src)
+        r.setSink(sink)
+        routerAfterRestart = r
+        return src
+    }
+
+    private var routerAfterRestart: RemoteInputRouter? = null
+
+    @Test
+    fun `a captured session cannot be replayed after a restart`() {
+        // The whole point of persisting: RAM-only state means an attacker just waits for a reboot.
+        val store = InMemorySessionStore()
+        val s1 = RecordingSink()
+        val src1 = restart(store, s1)
+        src1.open(sid = 100)
+        src1.tap(sid = 100, seqOverride = 10)
+        src1.scroll(sid = 100, steps = 3, seqOverride = 11)
+        flush()
+        assertEquals(2, s1.events.size)
+
+        // Restart. Everything in memory is gone; only the store survives.
+        val s2 = RecordingSink()
+        val src2 = restart(store, s2)
+        // Replay the captured burst verbatim.
+        src2.emit(RemoteInputFrame.Lifecycle(1, "watch", 100L, 9L, now, RemoteLifecycle.OPEN))
+        src2.emit(RemoteInputFrame.Action(1, "watch", 100L, 10L, now, RemoteAction.TAP, 0))
+        src2.emit(
+            RemoteInputFrame.Action(1, "watch", 100L, 11L, now, RemoteAction.SCROLL_STEP, 3)
+        )
+        flush()
+        assertTrue("a replayed tap must never reach the UI after a restart", s2.events.isEmpty())
+    }
+
+    @Test
+    fun `an older session id is refused after a restart`() {
+        val store = InMemorySessionStore()
+        val s1 = RecordingSink()
+        restart(store, s1).open(sid = 500)
+
+        val s2 = RecordingSink()
+        val src2 = restart(store, s2)
+        src2.open(sid = 499)
+        src2.scroll(sid = 499, steps = 1)
+        flush()
+        assertTrue(s2.events.isEmpty())
+        assertFalse(routerAfterRestart!!.anyOpenSession())
+    }
+
+    @Test
+    fun `a genuine new session after a restart works normally`() {
+        // Fail-closed must not mean fail-always: the source's next real session must go through.
+        val store = InMemorySessionStore()
+        restart(store, RecordingSink()).open(sid = 100)
+
+        val s2 = RecordingSink()
+        val src2 = restart(store, s2)
+        src2.open(sid = 101)
+        src2.scroll(sid = 101, steps = 2)
+        src2.tap(sid = 101)
+        flush()
+        assertEquals(2, s2.events.size)
+    }
+
+    @Test
+    fun `the durable sequence floor runs ahead of what was applied`() {
+        // A crash may therefore cost a few frames inside one session, but can never admit a
+        // replayed one. That asymmetry is the design.
+        val store = InMemorySessionStore()
+        val src = restart(store, RecordingSink())
+        src.open(sid = 100)
+        src.scroll(sid = 100, steps = 1, seqOverride = 50)
+        flush()
+        assertTrue(
+            "floor must be reserved ahead of the applied sequence",
+            store.seqFloor("watch") > 50L,
+        )
+    }
+
+    @Test
+    fun `persistence does not write on every event`() {
+        // A synchronous write per scroll detent would be felt on this hot path.
+        val store = InMemorySessionStore()
+        val src = restart(store, RecordingSink())
+        src.open(sid = 100)
+        var seq = 1L
+        repeat(200) {
+            tick(120)
+            src.scroll(sid = 100, steps = 1, seqOverride = ++seq)
+        }
+        flush()
+        assertTrue(
+            "expected few reservations for 200 events, got ${store.reserveCount}",
+            store.reserveCount <= 5,
+        )
+    }
+
+    @Test
+    fun `a live session is never gated on the write-ahead reservation`() {
+        // The reservation runs ahead by SEQ_RESERVATION; consulting it during a live session would
+        // refuse the source's next few hundred frames and stall it completely.
+        val store = InMemorySessionStore()
+        val src = restart(store, RecordingSink())
+        val s = RecordingSink()
+        routerAfterRestart!!.setSink(s)
+        src.open(sid = 100)
+        var seq = 1L
+        // Paced like a real bezel (~10 frames/s), draining each time as a live UI would, so neither
+        // the rate limit nor the queue's entry cap is what is under test.
+        repeat(50) {
+            tick(100)
+            src.scroll(sid = 100, steps = if (it % 2 == 0) 1 else -1, seqOverride = ++seq)
+            flush()
+        }
+        assertEquals("every frame of a live session must be accepted", 50, s.events.size)
+    }
+
+    @Test
+    fun `forgetting a source identity restores acceptance after a source factory reset`() {
+        val store = InMemorySessionStore()
+        val src = restart(store, RecordingSink())
+        src.open(sid = 900)
+        val router2 = routerAfterRestart!!
+
+        // The source was factory reset and its counter regressed. Fail-closed, correctly.
+        val s = RecordingSink()
+        router2.setSink(s)
+        src.open(sid = 1)
+        src.scroll(sid = 1, steps = 1)
+        flush()
+        assertTrue("a regressed counter must be refused by default", s.events.isEmpty())
+
+        // Local physical recovery only. This is deliberately not reachable over the transport.
+        router2.forgetSourceIdentity("watch")
+        src.open(sid = 1)
+        src.scroll(sid = 1, steps = 1)
+        flush()
+        assertEquals(1, s.events.size)
+    }
+
+    @Test
+    fun `a replayed CLOSE cannot kill a live session`() {
+        watch.open(sid = 1)
+        watch.scroll(sid = 1, steps = 1, seqOverride = 100)
+        flush()
+        sink.clear()
+
+        // A captured CLOSE, replayed. Without a sequence check this is a remote session kill.
+        watch.emit(RemoteInputFrame.Lifecycle(1, "watch", 1L, 50L, now, RemoteLifecycle.CLOSE))
+        assertTrue("a stale CLOSE must not end the session", router.anyOpenSession())
+        watch.scroll(sid = 1, steps = 1, seqOverride = 101)
+        flush()
+        assertEquals(1, sink.events.size)
+
+        // A genuine CLOSE, carrying a forward sequence, still works.
+        watch.emit(RemoteInputFrame.Lifecycle(1, "watch", 1L, 102L, now, RemoteLifecycle.CLOSE))
+        assertFalse(router.anyOpenSession())
+    }
+
+    @Test
+    fun `concurrent sink swap never loses the newly installed sink`() {
+        val a = RecordingSink()
+        val b = RecordingSink()
+        repeat(300) {
+            router.setSink(a)
+            val t = Thread { router.clearSink(a) }
+            t.start()
+            router.setSink(b)
+            t.join()
+            assertTrue("setSink(b) must not be undone by a late clearSink(a)", router.hasSink)
+            router.clearSink(b)
+        }
     }
 }

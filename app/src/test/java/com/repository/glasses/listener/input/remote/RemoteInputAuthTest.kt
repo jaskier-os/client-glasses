@@ -172,15 +172,15 @@ class RemoteInputAuthTest {
 
     @Test
     fun `source id validation rejects separators and overlong ids`() {
-        assertTrue(RemoteInputAuth.isValidSourceId("watch"))
-        assertTrue(RemoteInputAuth.isValidSourceId("ble_gadget_01"))
-        assertFalse(RemoteInputAuth.isValidSourceId(""))
-        assertFalse(RemoteInputAuth.isValidSourceId("wa|tch"))
-        assertFalse(RemoteInputAuth.isValidSourceId("wa:tch"))
-        assertFalse(RemoteInputAuth.isValidSourceId("Watch"))
-        assertFalse(RemoteInputAuth.isValidSourceId("watch watch"))
-        assertFalse(RemoteInputAuth.isValidSourceId("a".repeat(17)))
-        assertTrue(RemoteInputAuth.isValidSourceId("a".repeat(16)))
+        assertTrue(InputSource.isValidSourceId("watch"))
+        assertTrue(InputSource.isValidSourceId("ble_gadget_01"))
+        assertFalse(InputSource.isValidSourceId(""))
+        assertFalse(InputSource.isValidSourceId("wa|tch"))
+        assertFalse(InputSource.isValidSourceId("wa:tch"))
+        assertFalse(InputSource.isValidSourceId("Watch"))
+        assertFalse(InputSource.isValidSourceId("watch watch"))
+        assertFalse(InputSource.isValidSourceId("a".repeat(17)))
+        assertTrue(InputSource.isValidSourceId("a".repeat(16)))
     }
 
     @Test
