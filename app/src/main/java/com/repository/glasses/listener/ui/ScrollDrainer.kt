@@ -1,6 +1,7 @@
 package com.repository.glasses.listener.ui
 
 import android.view.View
+import com.repository.glasses.listener.R
 
 /**
  * Pixel-buffer scroll helper for burst input.
@@ -12,45 +13,58 @@ import android.view.View
  * every pixel is rendered and the scroll feels continuous across bursts.
  *
  * Usage: call [enqueueX] / [enqueueY] instead of `view.smoothScrollBy(dx, dy)`.
+ *
+ * Main-thread only. The buffer hangs off the View itself as a tag rather than living in a map:
+ * a map keyed on `view.hashCode()` let two live views with colliding hashes share one buffer and
+ * kept entries alive after the owning activity was destroyed. A tag has neither problem, and it
+ * dies with the View.
  */
 object ScrollDrainer {
-    private data class Pending(var dx: Int, var dy: Int)
 
-    private val buffers = mutableMapOf<Int, Pending>()
+    private fun bufferOf(view: View): ScrollBuffer =
+        (view.getTag(R.id.scroll_drainer_pending) as? ScrollBuffer)
+            ?: ScrollBuffer().also { view.setTag(R.id.scroll_drainer_pending, it) }
 
-    private fun drain(view: View) {
-        val p = buffers[view.hashCode()] ?: return
-        if (p.dx == 0 && p.dy == 0) { buffers.remove(view.hashCode()); return }
-        val dx = sliceDelta(p.dx); val dy = sliceDelta(p.dy)
-        when (view) {
-            is androidx.recyclerview.widget.RecyclerView -> view.scrollBy(dx, dy)
-            is android.widget.ScrollView                  -> view.scrollBy(dx, dy)
-            is android.widget.HorizontalScrollView        -> view.scrollBy(dx, dy)
-            else                                          -> view.scrollBy(dx, dy)
+    private fun drain(view: View, generation: Int) {
+        val p = view.getTag(R.id.scroll_drainer_pending) as? ScrollBuffer ?: return
+        // A cancel() between the post and this callback bumped the generation. This chain is dead;
+        // a new one may already be running, so do not touch `posted`.
+        if (p.generation != generation) return
+        if (p.isEmpty) {
+            p.posted = false
+            return
         }
-        p.dx -= dx; p.dy -= dy
-        if (p.dx != 0 || p.dy != 0) view.postOnAnimation { drain(view) } else buffers.remove(view.hashCode())
-    }
-
-    /** Drain ~25% of the remaining delta each frame, clamped to [3, 60] px. */
-    private fun sliceDelta(remaining: Int): Int {
-        if (remaining == 0) return 0
-        val sign = if (remaining > 0) 1 else -1
-        val mag  = kotlin.math.abs(remaining)
-        val slice = ((mag * 25) / 100).coerceIn(3, 60).coerceAtMost(mag)
-        return sign * slice
+        val (dx, dy) = p.takeSlice()
+        view.scrollBy(dx, dy)
+        if (!p.isEmpty) {
+            // Keep `posted` true: this chain continues, and enqueue() must not start a second one.
+            view.postOnAnimation { drain(view, generation) }
+        } else {
+            p.posted = false
+        }
     }
 
     fun enqueue(view: View, dx: Int, dy: Int) {
-        val key = view.hashCode()
-        val p = buffers.getOrPut(key) { Pending(0, 0) }
-        p.dx += dx; p.dy += dy
-        view.postOnAnimation { drain(view) }
+        val p = bufferOf(view)
+        p.add(dx, dy)
+        if (!p.posted) {
+            p.posted = true
+            val generation = p.generation
+            view.postOnAnimation { drain(view, generation) }
+        }
     }
 
     fun enqueueY(view: View, dy: Int) = enqueue(view, 0, dy)
     fun enqueueX(view: View, dx: Int) = enqueue(view, dx, 0)
 
-    /** Drop any pending motion for [view] (e.g. on finger release). */
-    fun cancel(view: View) { buffers.remove(view.hashCode()) }
+    /**
+     * Drop any pending motion for [view] (e.g. on finger release).
+     *
+     * Clears `posted` as well: an in-flight drain chain has already captured [view], and leaving the
+     * flag set after emptying the buffer would make the view permanently un-drainable (the chain
+     * exits on the empty buffer, and every later enqueue sees `posted == true` and never re-posts).
+     */
+    fun cancel(view: View) {
+        (view.getTag(R.id.scroll_drainer_pending) as? ScrollBuffer)?.clear()
+    }
 }

@@ -5,4 +5,5 @@
     <item name="spring_scale_y" type="id" />
     <item name="tab_hover_tint_anim" type="id" />
     <item name="tab_hover_target_color" type="id" />
+    <item name="scroll_drainer_pending" type="id" />
 </resources>
