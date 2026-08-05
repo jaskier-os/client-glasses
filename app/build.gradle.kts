@@ -128,6 +128,19 @@ android {
     kotlinOptions {
         jvmTarget = "11"
     }
+
+    sourceSets {
+        // Share the remote-input test doubles (FakeInputSource, RecordingSink, ManualPoster) with
+        // the instrumented tests. Copying them instead would let the two copies drift, and the
+        // whole point of driving the router from a fake source is that the on-device test and the
+        // JVM test exercise the SAME source contract.
+        getByName("test") {
+            java.srcDir("src/testShared/java")
+        }
+        getByName("androidTest") {
+            java.srcDir("src/testShared/java")
+        }
+    }
 }
 
 dependencies {
