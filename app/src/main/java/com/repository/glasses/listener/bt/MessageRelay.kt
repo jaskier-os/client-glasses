@@ -34,6 +34,14 @@ class MessageRelay(
     private val context: Context,
     private val uuid: String = MESSAGE_UUID,
     private val serviceName: String = SERVICE_NAME,
+    /**
+     * Per-socket inbound frame ceiling. The default is sized for the bulk channels (TTS blobs,
+     * sideload chunks). Sockets that only ever carry small control frames MUST pass a small value:
+     * `handleIncomingBytes` copies the whole accumulation buffer on every inbound chunk, so a peer
+     * that dribbles a near-ceiling frame in small pieces costs O(n^2) memcpy on a Binder thread,
+     * before any application-level rate limit can see it.
+     */
+    private val maxFrameBytes: Int = MAX_FRAME_BYTES,
 ) {
 
     companion object {
@@ -44,6 +52,15 @@ class MessageRelay(
         /** Dedicated RFCOMM SPP channel for the binary map base-frame stream. */
         const val MAP_UUID = "c3d4e5f6-a7b8-9012-cdef-234567890abc"
         const val MAP_SERVICE_NAME = "GlassesMap"
+        /**
+         * Dedicated RFCOMM SPP channel for remote input events (BtProtocol.CH_REMOTE_INPUT).
+         * Deliberately NOT the shared message socket: input must never queue behind a TTS blob
+         * or a sideload, and must never evict other features' frames from the shared queue.
+         */
+        const val INPUT_UUID = "d4e5f6a7-b8c9-0123-def0-345678901234"
+        const val INPUT_SERVICE_NAME = "GlassesRemoteInput"
+        /** Frame ceiling for the input socket. Its largest legitimate frame is ~200 bytes. */
+        const val INPUT_MAX_FRAME_BYTES = 4 * 1024
         private const val MAX_FRAME_BYTES = 8 * 1024 * 1024  // 8MB sanity cap
     }
 
@@ -336,8 +353,8 @@ class MessageRelay(
 
     private fun handleIncomingBytes(data: ByteArray) {
         synchronized(recvLock) {
-            if (recvBuffer.size() + data.size > MAX_FRAME_BYTES) {
-                remoteLog?.invoke("MessageRelay: recv buffer overflow (size=${recvBuffer.size()} + ${data.size} > $MAX_FRAME_BYTES); resetting")
+            if (recvBuffer.size() + data.size > maxFrameBytes) {
+                remoteLog?.invoke("MessageRelay: recv buffer overflow (size=${recvBuffer.size()} + ${data.size} > $maxFrameBytes); resetting")
                 recvBuffer.reset()
             }
             recvBuffer.write(data)
@@ -345,7 +362,7 @@ class MessageRelay(
             var offset = 0
             while (buf.size - offset >= 4) {
                 val len = ByteBuffer.wrap(buf, offset, 4).int
-                if (len < 0 || len > MAX_FRAME_BYTES) {
+                if (len < 0 || len > maxFrameBytes) {
                     remoteLog?.invoke("MessageRelay: invalid frame length=$len, resetting buffer")
                     recvBuffer.reset()
                     return

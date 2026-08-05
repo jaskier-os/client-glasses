@@ -37,6 +37,18 @@ android {
         // NOT gated by this.
         buildConfigField("Boolean", "ENABLE_REID_OSINT", cfg("ENABLE_REID_OSINT", "false"))
 
+        // Shared secret authenticating remote input events (watch bezel scroll/select/back).
+        // The SOURCE DEVICE computes the HMAC tag; the glasses verify it. Must be byte-identical
+        // to the value configured on the source or every event is rejected.
+        // Empty by default and RemoteInputAuth fails CLOSED, so an unconfigured build refuses all
+        // remote input rather than accepting unauthenticated events.
+        // Set in local.properties (gitignored) or as an env var of the same name. NEVER commit it.
+        buildConfigField(
+            "String",
+            "REMOTE_INPUT_HMAC_KEY",
+            "\"${cfg("REMOTE_INPUT_HMAC_KEY", "")}\"",
+        )
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         testProguardFiles("proguard-androidtest.pro")
 

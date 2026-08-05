@@ -206,4 +206,30 @@ object BtProtocol {
 
     // Contact list cache for HFP caller-ID. See phone-side BtProtocol for wire format.
     const val CH_CONTACTS = "listener_contacts"
+
+    // Remote input events from a registered InputSource (Wear watch bezel/tap today, a future
+    // BLE gadget later). Carried on the DEDICATED input RFCOMM socket (MessageRelay.INPUT_UUID),
+    // never the shared message socket -- bulk frames there head-of-line-block input for seconds
+    // (a 100 KB TTS blob for ~2.5 s, a sideload for minutes) and would evict other features'
+    // frames from the shared bounded outbound queue.
+    // Args: [v, src, sid, seq, type, steps, wms, tag]  -- all decimal ASCII except src, type, tag.
+    //   v:     protocol version, always "1". Receivers drop anything else.
+    //   src:   source id, matched against the registered InputSource ids. [a-z0-9_]{1,16}.
+    //   sid:   session id minted by the source, uint32 decimal.
+    //   seq:   monotonic per (src, sid), uint32 decimal, incremented for EVERY event.
+    //   type:  "SCROLL"|"SELECT"|"BACK"|"OPEN"|"CLOSE"|"PING"
+    //   steps: signed detent count; "+" = forward/down, "-" = back/up; "0" for non-SCROLL
+    //   wms:   source elapsedRealtime low 32 bits at detent time. Age is derived against the
+    //          OPEN frame's baseline, so it is a single-clock delta with no cross-device skew.
+    //   tag:   16 hex chars, HMAC-SHA256 truncated to 8 bytes. See RemoteInputAuth for the exact
+    //          canonical string -- it is NOT a bare "|"-join.
+    // Receivers MUST check args.size >= 8, use toIntOrNull()/toLongOrNull(), and wrap the whole
+    // parse in try/catch -- onMessage runs on a Binder thread and an uncaught throw kills the
+    // service. Extra trailing args MUST be ignored (forward compatibility inside v1); fewer than
+    // 8 MUST be rejected.
+    const val CH_REMOTE_INPUT = "listener_remote_input"
+
+    // Glasses -> source status backchannel on the same dedicated input socket.
+    // Args: [sessionOpen, sinkAttached, droppedTotal] -- decimal ASCII, "1"/"0" for the flags.
+    const val CH_REMOTE_INPUT_STATUS = "listener_remote_input_status"
 }

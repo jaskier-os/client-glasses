@@ -17,3 +17,18 @@ sdk.dir=/path/to/Android/Sdk
 # (here or as an env var) to enable. Can also be supplied as an environment
 # variable of the same name (env takes precedence over local.properties).
 ENABLE_REID_OSINT=false
+
+# --- Remote input shared secret (OPTIONAL) ---
+# Authenticates remote input events (scroll/select/back driven from a paired
+# device such as the Wear watch). The source device computes an HMAC-SHA256 tag
+# over each event; the glasses verify it. The value here must be byte-identical
+# to the one configured on the source device, or every event is rejected.
+#
+# Leave unset to keep remote input disabled: verification fails closed, so an
+# unconfigured build refuses all remote input rather than accepting
+# unauthenticated events.
+#
+# Use a long random value, e.g. `openssl rand -hex 32`. Do not reuse a secret
+# from anywhere else and do not commit the value -- local.properties is
+# gitignored, this example file is not.
+REMOTE_INPUT_HMAC_KEY=
