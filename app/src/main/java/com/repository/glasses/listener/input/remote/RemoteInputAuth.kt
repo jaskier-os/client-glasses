@@ -27,12 +27,11 @@ import javax.crypto.spec.SecretKeySpec
  * follow-up work, not shipped here.
  *
  * ## Replay
- * Replay resistance currently comes from the router's monotonic-sequence rule alone, which does NOT
- * cover an attacker who captures a whole session (OPEN plus its events) and replays it verbatim
- * later: the OPEN resets the sequence baseline and re-baselines the age clock. Closing that hole
- * needs a glasses-issued per-connection nonce folded into the signed string, which is a wire
- * contract change and is therefore not made unilaterally here. [canonicalMessage] already carries
- * the nonce field so adding it is a one-line change on both sides; today it is the empty string.
+ * Replay resistance does NOT come from this class. A captured frame carries a valid tag forever.
+ * It comes from the router's persisted monotonic session id plus its persisted sequence floor
+ * (see `SessionStore`), which together make a captured burst unreplayable even across a reboot.
+ * A challenge-response nonce was considered and rejected: it adds a round trip to the input path
+ * and does not help the only residual case, a receiver that legitimately loses its state.
  */
 class RemoteInputAuth(key: ByteArray) {
 
@@ -114,9 +113,6 @@ class RemoteInputAuth(key: ByteArray) {
         const val TAG_BYTES = 8
         const val TAG_HEX_CHARS = TAG_BYTES * 2
 
-        /** Domain tag for input events. Prevents a captured event tag being replayed as a status. */
-        const val DOMAIN_EVENT = "ri1:evt"
-
         /**
          * Shorter than this and the key is treated as absent. 16 bytes is the floor for a value
          * that is supposed to resist offline guessing.
@@ -143,45 +139,35 @@ class RemoteInputAuth(key: ByteArray) {
         fun steps(value: Int): String = value.toString()
 
         /**
-         * The canonical signed string. Both sides MUST build it with this exact function.
+         * The canonical signed string: `v|src|sid|seq|typeCode|steps|wms`.
          *
-         * Length-prefixed rather than a bare `"a|b|c"` join: with a plain separator the only
-         * variable-length field (`src`) could move bytes across a field boundary and produce the
-         * same digest for two different frames. Every field here is preceded by its byte length, so
-         * the encoding is injective.
+         * Frozen by the wire contract and produced by the source device, so it is NOT negotiable
+         * here -- the glasses must reproduce it byte for byte or nothing verifies. Checked against
+         * the cross-repo golden vectors so drift on either side fails a test rather than the
+         * hardware.
          *
-         * Field rendering is pinned, because every one of these is a silent cross-device desync
-         * waiting to happen:
+         * Field rendering is pinned, because each of these is a silent cross-device desync waiting
+         * to happen and all of them fail identically (every frame rejected, no diagnostic):
          * - [sid], [seq], [wms] are rendered by [u32]: unsigned decimal, no sign, no leading zeros.
-         * - [steps] is rendered by [steps]: signed decimal, no leading `+`.
-         * - [type] is the wire NAME (`SCROLL`, `SELECT`, `BACK`, `OPEN`, `CLOSE`, `PING`), never the
-         *   numeric opcode the watch->phone encoding uses on the wire. A sender that signs `"1"`
-         *   where the receiver signs `"SCROLL"` gets every frame rejected with no clue why.
+         *   A sender holding `wms` in a signed 32-bit int would otherwise render `-1234` where the
+         *   receiver renders `4294966062`, and `wms` crosses the sign bit routinely.
+         * - [steps] is rendered by [steps]: signed decimal, no leading `+`, no leading zeros.
+         * - [typeCode] is the NUMERIC opcode (`1=SCROLL 2=TAP 3=BACK 4=OPEN 5=CLOSE 6=PING`), the
+         *   same value the binary encoding carries, never the readable name.
          *
-         * [nonce] is reserved for the glasses-issued per-connection challenge that will close the
-         * session-replay hole. It is the empty string in v1 and MUST be empty on both sides until
-         * the wire contract is revised together with Workstream B. When it becomes non-empty the
-         * domain tag must move to `ri2:evt` so a v1 tag can never be replayed into v2.
+         * `src` is the only variable-length field, so a bare separator join is not injective in
+         * general: bytes could be moved across a field boundary. That is contained instead by
+         * validating `src` against [InputSource.SOURCE_ID_PATTERN] BEFORE hashing, which excludes
+         * the separator entirely. Validate first; never hash an unvalidated source id.
          */
         fun canonicalMessage(
             v: Int,
             src: String,
             sid: Long,
             seq: Long,
-            type: String,
+            typeCode: Int,
             steps: Int,
             wms: Long,
-            nonce: String = "",
-        ): String {
-            val sb = StringBuilder(96)
-            sb.append(DOMAIN_EVENT)
-            for (field in listOf(
-                v.toString(), src, u32(sid), u32(seq), type, steps(steps), u32(wms), nonce,
-            )) {
-                // UTF-8 byte length, not char count, so the prefix is unambiguous for any input.
-                sb.append('|').append(field.toByteArray(Charsets.UTF_8).size).append(':').append(field)
-            }
-            return sb.toString()
-        }
+        ): String = "$v|$src|${u32(sid)}|${u32(seq)}|$typeCode|${steps(steps)}|${u32(wms)}"
     }
 }

@@ -47,12 +47,26 @@ class RemoteInputAuthTest {
     }
 
     @Test
-    fun `canonical message uses the type NAME not a numeric opcode`() {
-        // A sender that signs the wire opcode "1" must NOT accidentally match "SCROLL".
-        val byName = RemoteInputAuth.canonicalMessage(1, "watch", 1L, 1L, "SCROLL", 1, 1L)
-        val byOpcode = RemoteInputAuth.canonicalMessage(1, "watch", 1L, 1L, "1", 1, 1L)
-        assertNotEquals(byName, byOpcode)
-        assertTrue(byName.contains("SCROLL"))
+    fun `canonical message is the frozen pipe-joined form with the numeric type code`() {
+        // Frozen by the wire contract and produced by the source device, so this is the one thing
+        // in the file that is not ours to choose. Cross-checked against the sender's own vectors in
+        // GoldenVectorConformanceTest.
+        assertEquals(
+            "1|watch|1|0|4|0|0",
+            RemoteInputAuth.canonicalMessage(1, "watch", 1L, 0L, 4, 0, 0L),
+        )
+        assertEquals(
+            "1|watch|1|2|1|-1|1060",
+            RemoteInputAuth.canonicalMessage(1, "watch", 1L, 2L, 1, -1, 1060L),
+        )
+    }
+
+    @Test
+    fun `each type code produces a distinct digest`() {
+        val tags = (1..6).map {
+            auth.sign(RemoteInputAuth.canonicalMessage(1, "watch", 1L, 1L, it, 0, 1L))
+        }
+        assertEquals("type code must be covered by the tag", tags.size, tags.toSet().size)
     }
 
     @Test
@@ -67,7 +81,7 @@ class RemoteInputAuthTest {
         src: String = "watch",
         sid: Long = 12345L,
         seq: Long = 7L,
-        type: String = "SCROLL",
+        type: Int = 1,
         steps: Int = 3,
         wms: Long = 999L,
     ) = RemoteInputAuth.canonicalMessage(v, src, sid, seq, type, steps, wms)
@@ -99,7 +113,7 @@ class RemoteInputAuthTest {
             msg(src = "gadget"),
             msg(sid = 12346L),
             msg(seq = 8L),
-            msg(type = "SELECT"),
+            msg(type = 2),
             msg(steps = -3),
             msg(wms = 1000L),
         )
@@ -119,8 +133,8 @@ class RemoteInputAuthTest {
     @Test
     fun `sid seq and wms are covered as unsigned values`() {
         // Two frames whose sid differs only above the sign bit must not share a tag.
-        val a = RemoteInputAuth.canonicalMessage(1, "watch", 0x7FFFFFFFL, 1L, "SCROLL", 1, 1L)
-        val b = RemoteInputAuth.canonicalMessage(1, "watch", 0x80000000L, 1L, "SCROLL", 1, 1L)
+        val a = RemoteInputAuth.canonicalMessage(1, "watch", 0x7FFFFFFFL, 1L, 1, 1, 1L)
+        val b = RemoteInputAuth.canonicalMessage(1, "watch", 0x80000000L, 1L, 1, 1, 1L)
         assertNotEquals(a, b)
         assertFalse(auth.verify(b, auth.sign(a)))
     }
@@ -148,26 +162,19 @@ class RemoteInputAuthTest {
     }
 
     @Test
-    fun `canonical message is injective across a field boundary`() {
-        // The whole point of length-prefixing: with a bare "a|b" join these two frames could be
-        // made to produce the same digest by moving bytes across the src boundary.
-        val a = RemoteInputAuth.canonicalMessage(1, "ab", 1L, 1L, "SCROLL", 1, 1L)
-        val b = RemoteInputAuth.canonicalMessage(1, "a", 11L, 1L, "SCROLL", 1, 1L)
+    fun `a validated source id cannot move bytes across a field boundary`() {
+        // The pipe-joined form is not injective in general, because src is variable length: "ab"
+        // with sid 1 and "a" with sid 11 would collide if src could contain the separator. That is
+        // contained by validating src BEFORE hashing, so the collision is unreachable rather than
+        // merely unlikely -- these two ids are both legal, and they must still differ.
+        val a = RemoteInputAuth.canonicalMessage(1, "ab", 1L, 1L, 1, 1, 1L)
+        val b = RemoteInputAuth.canonicalMessage(1, "a", 11L, 1L, 1, 1, 1L)
         assertNotEquals(a, b)
         assertNotEquals(auth.sign(a), auth.sign(b))
-    }
 
-    @Test
-    fun `canonical message carries a domain separator`() {
-        assertTrue(msg().startsWith(RemoteInputAuth.DOMAIN_EVENT))
-    }
-
-    @Test
-    fun `nonce slot changes the digest so it can be enabled without ambiguity`() {
-        val without = RemoteInputAuth.canonicalMessage(1, "watch", 1L, 1L, "SCROLL", 1, 1L)
-        val with = RemoteInputAuth.canonicalMessage(1, "watch", 1L, 1L, "SCROLL", 1, 1L, "abcd")
-        assertNotEquals(without, with)
-        assertFalse(auth.verify(with, auth.sign(without)))
+        // And the ids that WOULD enable a collision are refused before they reach the digest.
+        assertFalse(InputSource.isValidSourceId("a|1"))
+        assertFalse(InputSource.isValidSourceId("ab|"))
     }
 
     @Test
