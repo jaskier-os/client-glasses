@@ -122,6 +122,14 @@ object RemoteActionGate {
      * deliberate decision here, but the decision is now "is this state known" rather
      * than "is every action in it individually blessed".
      */
+    /**
+     * Exposed so a test can assert the escapability invariant over EVERY state rather
+     * than over a list someone remembered to update. A state added to the UI and to
+     * [KNOWN_STATES] but not considered for its exit is then a test failure, not a
+     * trap the user discovers on their head.
+     */
+    val knownStatesForTest: Set<String> get() = KNOWN_STATES
+
     private val KNOWN_STATES = setOf(
         "TAB_NAV",
         "CHAT_FOCUSED",
@@ -250,14 +258,19 @@ object RemoteActionGate {
     /**
      * States where BACK reaches a hazard.
      *
-     * `TAB_NAV` is the load-bearing one: BACK at the top level turns the screen OFF,
-     * which pauses the UI process, drops the sink, and strands the session with no
-     * way back from the remote device. `MOUSE_FOCUSED` BACK toggles HID tracking --
-     * and the `mouseTracking` snapshot check above does not cover it, because that
-     * only reports tracking that is ALREADY on.
+     * `TAB_NAV` is the load-bearing one and the only one: BACK at the top level turns
+     * the screen OFF, which pauses the UI process, drops the sink, and strands the
+     * session with no way back from the remote device.
+     *
+     * `MOUSE_FOCUSED` is deliberately NOT here. Its BACK only toggles HID tracking on
+     * the branch where tracking is ALREADY on -- and that branch is unreachable from a
+     * remote source, because `mouseTracking` is refused as REFUSED_BUSY above. With
+     * tracking off, BACK is an ordinary "return to TAB_NAV". Listing it here made the
+     * state a trap the moment BACK became producible: TAP is refused (it toggles
+     * tracking) and BACK was refused too, so a user who entered the mouse tab from the
+     * watch could not leave it from the watch.
      */
     private val BACK_REACHES_HAZARD = setOf(
         "TAB_NAV",
-        "MOUSE_FOCUSED",
     )
 }

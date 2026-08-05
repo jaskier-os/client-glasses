@@ -7142,13 +7142,29 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             RemoteAction.TAP -> {
                 // Disambiguate on the source's clock, before dispatch, so the handler's own
                 // isDoubleTap() sees the user's real intent rather than the arrival interval.
-                pendingRemoteDoubleTap = remoteTapIsDouble(e.sinceLastMs)
-                val dispatched =
-                    dispatchRemoteAction(e.action, KeyEvent.KEYCODE_DPAD_CENTER)
-                // Refused, or consumed by a branch that never calls isDoubleTap(): drop the verdict
-                // rather than let it apply to some later press.
-                pendingRemoteDoubleTap = null
-                dispatched
+                if (remoteTapIsDouble(e.sinceLastMs)) {
+                    // The SECOND tap of a remote double tap is the user asking to LEAVE, so it is
+                    // gated and dispatched as BACK rather than as another TAP.
+                    //
+                    // This is what makes the exit exist at all. The watch sends only raw taps
+                    // (EventType.SELECT) and nothing anywhere produces EventType.BACK, so before
+                    // this a double tap was gated as TAP -- and in every TAP_REACHES_HAZARD state
+                    // the user could ENTER from the watch and then neither select nor leave, with
+                    // the physical touchpad the only way out.
+                    //
+                    // Deciding it here rather than on the watch is deliberate: the glasses own
+                    // double-tap disambiguation for the touchpad too, so both sources keep the
+                    // same feel and cannot drift apart.
+                    dispatchRemoteAction(RemoteAction.BACK, KeyEvent.KEYCODE_BACK)
+                } else {
+                    pendingRemoteDoubleTap = false
+                    val dispatched =
+                        dispatchRemoteAction(e.action, KeyEvent.KEYCODE_DPAD_CENTER)
+                    // Refused, or consumed by a branch that never calls isDoubleTap(): drop the
+                    // verdict rather than let it apply to some later press.
+                    pendingRemoteDoubleTap = null
+                    dispatched
+                }
             }
             RemoteAction.BACK -> dispatchRemoteAction(e.action, KeyEvent.KEYCODE_BACK)
         }

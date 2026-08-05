@@ -275,9 +275,18 @@ class RemoteActionGateTest {
     }
 
     @Test
-    fun `mouse focused refuses tap and back which toggle HID tracking`() {
+    fun `mouse focused refuses the tap that toggles HID tracking but keeps its exit`() {
+        // TAP toggles tracking, so it stays refused.
         assertEquals(false, allowed(snap("MOUSE_FOCUSED"), RemoteAction.TAP))
-        assertEquals(false, allowed(snap("MOUSE_FOCUSED"), RemoteAction.BACK))
+        // BACK only toggles tracking on the branch where tracking is ALREADY on, and
+        // that branch is unreachable from a remote source because mouseTracking is
+        // refused as REFUSED_BUSY. With tracking off, BACK just returns to TAB_NAV --
+        // it is the only way out of this state, since TAP is refused.
+        assertEquals(true, allowed(snap("MOUSE_FOCUSED"), RemoteAction.BACK))
+        assertEquals(
+            RemoteActionGate.Denial.REFUSED_BUSY,
+            RemoteActionGate.evaluate(snap("MOUSE_FOCUSED", mouseTracking = true), RemoteAction.BACK),
+        )
     }
 
     // --- Deny-by-default ---
@@ -393,9 +402,13 @@ class RemoteActionGateTest {
         // Turning the screen off: BACK at the top level does that, which would drop the
         // sink and strand the session with no way back from the remote device.
         assertEquals(false, allowed(snap("TAB_NAV"), RemoteAction.BACK))
-        // Taking ownership of the input device.
+        // Taking ownership of the input device. Only TAP toggles tracking unconditionally;
+        // the BACK toggle sits behind tracking already being on, which is REFUSED_BUSY.
         assertEquals(false, allowed(snap("MOUSE_FOCUSED"), RemoteAction.TAP))
-        assertEquals(false, allowed(snap("MOUSE_FOCUSED"), RemoteAction.BACK))
+        assertEquals(
+            false,
+            allowed(snap("MOUSE_FOCUSED", mouseTracking = true), RemoteAction.BACK),
+        )
         // An active call, a notification reply, a recording.
         for (state in listOf("CALL_INCOMING", "CALL_ACTIVE", "NOTIFICATION_REPLY")) {
             for (a in RemoteAction.entries) assertEquals(false, allowed(snap(state), a))
@@ -431,5 +444,48 @@ class RemoteActionGateTest {
         for (state in listOf("LIST_FOCUSED", "CHAT_FOCUSED", "TODO_FOCUSED", "MAP_FOCUSED")) {
             assertEquals("back in " + state, true, allowed(snap(state), RemoteAction.BACK))
         }
+    }
+
+    /**
+     * The invariant that would have caught B1 before hardware did.
+     *
+     * A remote user who can ENTER a state must be able to LEAVE it. The watch produces
+     * only taps, so the exit is a double tap dispatched as BACK; if a state refuses
+     * both TAP and BACK the user is stranded until they physically touch the glasses.
+     * Asserted over every known state rather than a hand-kept list, so adding a UI
+     * state cannot silently reintroduce the trap.
+     *
+     * The wholesale-refusal states are exempt: they refuse every action, and they are
+     * entered by a call or by the phone rather than by a remote action, so no remote
+     * user can be trapped in one.
+     */
+    @Test
+    fun `every state a remote user can enter can also be left`() {
+        val notEnterableByRemote = setOf(
+            "CALL_INCOMING", "CALL_ACTIVE", "NOTIFICATION_REPLY",
+            "TELEGRAM_RECORDING", "TELEGRAM_PREVIEW",
+            // Refuses BACK on purpose (BACK turns the screen off); covered below.
+            "TAB_NAV",
+        )
+        for (state in RemoteActionGate.knownStatesForTest - notEnterableByRemote) {
+            assertEquals(
+                "no exit from " + state + ": BACK is refused, so a remote user who " +
+                    "entered it cannot leave without the physical touchpad",
+                true,
+                allowed(snap(state), RemoteAction.BACK),
+            )
+        }
+    }
+
+    /**
+     * TAB_NAV is the one state that legitimately refuses BACK, because BACK there turns
+     * the screen off and strands the session. It must therefore stay navigable by TAP
+     * and scroll, or the top level would be a dead end in the other direction.
+     */
+    @Test
+    fun `TAB_NAV refuses BACK but stays navigable`() {
+        assertEquals(false, allowed(snap("TAB_NAV"), RemoteAction.BACK))
+        assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.SCROLL_STEP))
     }
 }
