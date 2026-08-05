@@ -24,6 +24,7 @@ class RemoteActionGateTest {
         translationActive: Boolean = false,
         mouseTracking: Boolean = false,
         callPhase: String = "IDLE",
+        nightVisionSliderLocked: Boolean = false,
     ) = RemoteActionGate.UiInputSnapshot(
         focusState = focus,
         serviceState = service,
@@ -36,6 +37,7 @@ class RemoteActionGateTest {
         translationActive = translationActive,
         mouseTracking = mouseTracking,
         callPhase = callPhase,
+        nightVisionSliderLocked = nightVisionSliderLocked,
     )
 
     private fun allowed(s: RemoteActionGate.UiInputSnapshot, a: RemoteAction) =
@@ -158,9 +160,18 @@ class RemoteActionGateTest {
     // --- Specific dangerous reachability, per the security audit ---
 
     @Test
-    fun `tap cannot reach the assistant microphone in LIST_FOCUSED`() {
-        // LIST_FOCUSED tap -> openAssistant(), which starts the AI pipeline and the mic.
-        assertEquals(false, allowed(snap("LIST_FOCUSED"), RemoteAction.TAP))
+    fun `LIST_FOCUSED is navigable, with the mic row refused at the point of action`() {
+        // LIST_FOCUSED is the primary navigation state: the user lives here. Refusing
+        // TAP across the whole state to protect ONE of its three rows is what made the
+        // feature unusable in practice.
+        //
+        // Only the Assistant row reaches openAssistant() -> the mic. That row cannot be
+        // judged here, because which row is selected can change during the 400 ms the
+        // tap handler defers for double-tap detection -- so the refusal lives at the
+        // point of action in MainActivity, keyed on the captured input origin.
+        assertEquals(true, allowed(snap("LIST_FOCUSED"), RemoteAction.SCROLL_STEP))
+        assertEquals(true, allowed(snap("LIST_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("LIST_FOCUSED"), RemoteAction.BACK))
     }
 
     @Test
@@ -181,9 +192,14 @@ class RemoteActionGateTest {
     }
 
     @Test
-    fun `tap cannot start reid camera capture or an osint lookup`() {
-        assertEquals(false, allowed(snap("REID_FOCUSED"), RemoteAction.TAP))
-        assertEquals(false, allowed(snap("REID_FACES_FOCUSED"), RemoteAction.TAP))
+    fun `reid is navigable, but a scroll may not issue an osint upload`() {
+        // Face capture and the intel request are user-visible actions on the user's own
+        // screen, and neither is on the never-list. What stays refused is the
+        // REID_FACES_FOCUSED scroll, because there the SCROLL ITSELF issues an OSINT
+        // lookup that uploads an identifier -- that is not navigation.
+        assertEquals(true, allowed(snap("REID_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("REID_FACES_FOCUSED"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("REID_FACES_FOCUSED"), RemoteAction.SCROLL_STEP))
     }
 
     @Test
@@ -193,18 +209,34 @@ class RemoteActionGateTest {
     }
 
     @Test
-    fun `scroll cannot write persisted night vision settings`() {
-        assertEquals(false, allowed(snap("NIGHTVISION_FOCUSED"), RemoteAction.SCROLL_STEP))
+    fun `night vision scroll is refused only while its slider is engaged`() {
+        // Scroll WRITES persisted camera settings only when the slider is locked;
+        // unlocked it merely moves between sliders, which is ordinary navigation.
+        assertEquals(
+            false,
+            allowed(snap("NIGHTVISION_FOCUSED", nightVisionSliderLocked = true), RemoteAction.SCROLL_STEP),
+        )
+        assertEquals(
+            true,
+            allowed(snap("NIGHTVISION_FOCUSED", nightVisionSliderLocked = false), RemoteAction.SCROLL_STEP),
+        )
     }
 
     @Test
-    fun `tap cannot confirm terminating navigation`() {
-        assertEquals(false, allowed(snap("STOP_MODAL"), RemoteAction.TAP))
+    fun `the stop-journey modal is operable, because the remote user is the user`() {
+        // Terminating navigation is destructive but it is not on the never-list, and a
+        // remote control whose user cannot answer a modal that is on their own screen
+        // is broken. BACK still dismisses it.
+        assertEquals(true, allowed(snap("STOP_MODAL"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("STOP_MODAL"), RemoteAction.BACK))
     }
 
     @Test
-    fun `tap cannot toggle a persisted map pin`() {
-        assertEquals(false, allowed(snap("MAP_FOCUSED"), RemoteAction.TAP))
+    fun `the map is navigable`() {
+        // Toggling a pin is a user-visible, user-reversible edit on the user's own
+        // screen. Not on the never-list.
+        assertEquals(true, allowed(snap("MAP_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("MAP_FOCUSED"), RemoteAction.SCROLL_STEP))
     }
 
     @Test
@@ -216,9 +248,11 @@ class RemoteActionGateTest {
     }
 
     @Test
-    fun `tap cannot drive media playback`() {
-        assertEquals(false, allowed(snap("MUSIC_FOCUSED"), RemoteAction.TAP))
-        assertEquals(false, allowed(snap("MUSIC_FOCUSED"), RemoteAction.SCROLL_STEP))
+    fun `media playback is controllable`() {
+        // Play/pause and track skip are neither destructive nor on the never-list, and
+        // controlling music from the wrist is an obvious use of a remote.
+        assertEquals(true, allowed(snap("MUSIC_FOCUSED"), RemoteAction.TAP))
+        assertEquals(true, allowed(snap("MUSIC_FOCUSED"), RemoteAction.SCROLL_STEP))
     }
 
     @Test
@@ -273,26 +307,29 @@ class RemoteActionGateTest {
     // --- Index hijack: scrolling that re-aims the user's own next tap ---
 
     @Test
-    fun `scroll cannot re-aim the map onto the stop-journey entry`() {
-        // MAP_FOCUSED scroll moves mapFocusedIndex; one entry opens the stop-journey modal, whose
-        // own scroll then lands on "confirm". Two remote scrolls plus one innocent user tap would
-        // terminate navigation.
-        assertEquals(false, allowed(snap("MAP_FOCUSED"), RemoteAction.SCROLL_STEP))
-        assertEquals(false, allowed(snap("STOP_MODAL"), RemoteAction.SCROLL_STEP))
+    fun `scroll moves a selection wherever it is only a selection`() {
+        // Formerly refused as "index hijack". See the teleprompter test for why that
+        // reasoning does not apply to a remote control.
+        assertEquals(true, allowed(snap("MAP_FOCUSED"), RemoteAction.SCROLL_STEP))
+        assertEquals(true, allowed(snap("STOP_MODAL"), RemoteAction.SCROLL_STEP))
     }
 
     @Test
-    fun `scroll cannot re-aim the teleprompter onto stop`() {
-        assertEquals(false, allowed(snap("TELEPROMPTER_FOCUSED"), RemoteAction.SCROLL_STEP))
-        assertEquals(false, allowed(snap("TELEPROMPTER_FOCUSED"), RemoteAction.TAP))
+    fun `the teleprompter is controllable`() {
+        // The "index hijack" argument -- that a remote scroll re-aims the user's next
+        // tap -- does not survive the fact that this IS a remote control: the remote
+        // user IS the user, and re-aiming your own selection is what scrolling is for.
+        assertEquals(true, allowed(snap("TELEPROMPTER_FOCUSED"), RemoteAction.SCROLL_STEP))
+        assertEquals(true, allowed(snap("TELEPROMPTER_FOCUSED"), RemoteAction.TAP))
     }
 
     @Test
-    fun `scroll cannot re-select which contact a later voice reply reaches`() {
-        // TELEGRAM_LIST_FOCUSED scroll changes the selected chat, so the user's own subsequent
-        // voice reply would go to a contact the remote source chose.
-        assertEquals(false, allowed(snap("TELEGRAM_LIST_FOCUSED"), RemoteAction.SCROLL_STEP))
-        assertEquals(false, allowed(snap("TELEGRAM_LIST_FOCUSED"), RemoteAction.TAP))
+    fun `the telegram list is navigable, but a chat may not start a recording`() {
+        // Choosing a contact is navigation. What must never happen is STARTING the
+        // voice recording, which lives one state deeper.
+        assertEquals(true, allowed(snap("TELEGRAM_LIST_FOCUSED"), RemoteAction.SCROLL_STEP))
+        assertEquals(true, allowed(snap("TELEGRAM_LIST_FOCUSED"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("TELEGRAM_CHAT_FOCUSED"), RemoteAction.TAP))
     }
 
     // --- Calls, checked on the phase rather than the focus state ---
@@ -336,5 +373,63 @@ class RemoteActionGateTest {
         val first = RemoteActionGate.evaluate(s, RemoteAction.SCROLL_STEP)
         val second = RemoteActionGate.evaluate(s.copy(), RemoteAction.SCROLL_STEP)
         assertEquals(first, second)
+    }
+
+    /**
+     * The never-list, asserted as one block.
+     *
+     * These are the outcomes the product owner named as the actual hazards, as opposed
+     * to the screens that merely contain something editable. If the gate is ever
+     * loosened again, this is the test that must not be touched.
+     */
+    @Test
+    fun `the never-list stays unreachable after the allowlist rework`() {
+        // Starting or confirming a voice recording.
+        assertEquals(false, allowed(snap("TELEGRAM_CHAT_FOCUSED"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("TELEGRAM_RECORDING"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("TELEGRAM_PREVIEW"), RemoteAction.TAP))
+        // Toggling the translation microphone.
+        assertEquals(false, allowed(snap("TRANSLATE_FOCUSED"), RemoteAction.TAP))
+        // Turning the screen off: BACK at the top level does that, which would drop the
+        // sink and strand the session with no way back from the remote device.
+        assertEquals(false, allowed(snap("TAB_NAV"), RemoteAction.BACK))
+        // Taking ownership of the input device.
+        assertEquals(false, allowed(snap("MOUSE_FOCUSED"), RemoteAction.TAP))
+        assertEquals(false, allowed(snap("MOUSE_FOCUSED"), RemoteAction.BACK))
+        // An active call, a notification reply, a recording.
+        for (state in listOf("CALL_INCOMING", "CALL_ACTIVE", "NOTIFICATION_REPLY")) {
+            for (a in RemoteAction.entries) assertEquals(false, allowed(snap(state), a))
+        }
+        for (a in RemoteAction.entries) {
+            assertEquals(false, allowed(snap("TAB_NAV", callPhase = "ACTIVE"), a))
+            assertEquals(false, allowed(snap("TAB_NAV", replyArming = true), a))
+            assertEquals(false, allowed(snap("TAB_NAV", translationActive = true), a))
+        }
+    }
+
+    /**
+     * The rework expressed the rules as denylists, which read as "permit unless named".
+     * A newly added UI state must still arrive REFUSED rather than silently permitted --
+     * that property is the whole reason the original design was an allowlist, and it is
+     * preserved by the known-states backstop rather than by naming every action.
+     */
+    @Test
+    fun `a state nobody has reviewed is still refused`() {
+        for (a in RemoteAction.entries) {
+            assertEquals(false, allowed(snap("SOME_FUTURE_TAB_FOCUSED"), a))
+        }
+    }
+
+    /** The states the user actually navigates in must be fully operable. */
+    @Test
+    fun `the primary navigation states are usable`() {
+        for (state in listOf("TAB_NAV", "LIST_FOCUSED", "CHAT_FOCUSED", "TODO_FOCUSED")) {
+            assertEquals("scroll in " + state, true, allowed(snap(state), RemoteAction.SCROLL_STEP))
+            assertEquals("tap in " + state, true, allowed(snap(state), RemoteAction.TAP))
+        }
+        // ...and every state except the top level must be leaveable.
+        for (state in listOf("LIST_FOCUSED", "CHAT_FOCUSED", "TODO_FOCUSED", "MAP_FOCUSED")) {
+            assertEquals("back in " + state, true, allowed(snap(state), RemoteAction.BACK))
+        }
     }
 }

@@ -7106,6 +7106,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * callbacks that also run on this thread.
      */
     private fun remoteInputSnapshot() = RemoteActionGate.UiInputSnapshot(
+        nightVisionSliderLocked = nvSliderLocked,
         focusState = focusState.name,
         serviceState = serviceState,
         foldedState = foldedState,
@@ -7787,11 +7788,26 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                             lastCenterPressTime = 0L
                         } else {
                             pendingTapRunnable?.let { mainHandler.removeCallbacks(it) }
+                            // Capture the origin NOW. This runnable fires 400 ms later,
+                            // long after dispatchRemoteKey's finally has restored
+                            // currentInputOrigin, so reading it inside the runnable would
+                            // always say TOUCHPAD and the guard below would never fire.
+                            val tapOrigin = currentInputOrigin
                             val runnable = Runnable {
                                 if (chatListAdapter.isNewChatSelected()) {
                                     openNewChat()
                                 } else if (chatListAdapter.isAssistantSelected()) {
-                                    openAssistant()
+                                    // The one dangerous row in this state: it toggles the
+                                    // assistant, which starts the microphone. Checked HERE
+                                    // rather than in the gate, because the selection can
+                                    // move during the 400 ms this waits -- a scroll later
+                                    // in the same burst would otherwise re-aim a tap that
+                                    // was judged safe onto this row.
+                                    if (tapOrigin == InputOrigin.REMOTE) {
+                                        uiLog("[RemoteInput] refused TAP on the Assistant row (starts the mic)")
+                                    } else {
+                                        openAssistant()
+                                    }
                                 } else {
                                     openSelectedChat()
                                 }
