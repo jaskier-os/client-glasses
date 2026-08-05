@@ -456,36 +456,17 @@ class RemoteInputRouter(
     }
 
     /**
-     * Drop live session state, e.g. when the transport dropped and frames may have been lost.
+     * Drop ONE source's live session, e.g. when that source's transport dropped and frames may have
+     * been lost.
      *
-     * The durable sid and sequence floor are deliberately NOT cleared: a burst captured before the
-     * drop must still be unreplayable after it, and the source reopening with the same sid resumes
-     * from the retained floor rather than from zero.
-     */
-    fun clearAllSessions(reason: String) {
-        synchronized(sessionLock) {
-            var had = false
-            for (state in sources.values) {
-                val session = state.session ?: continue
-                had = true
-                persistSeqLocked(state, session.lastSeq)
-                state.session = null
-            }
-            if (had) log("remote input: sessions cleared ($reason)")
-        }
-        queue.clear()
-        publishStatusAll()
-    }
-
-    /**
-     * Drop ONE source's live session, e.g. when that source's transport dropped.
+     * Scoped to a single source deliberately. A transport loss belongs to the device that suffered
+     * it; clearing every session would mean one device's Bluetooth drop silently ended every other
+     * device's -- invisible while there is only one source, and a real defect the moment there are
+     * two.
      *
-     * A transport loss belongs to the device that suffered it. Using [clearAllSessions] for this
-     * would mean one device's Bluetooth drop silently ended every other device's live session --
-     * invisible while there is only one source, and a real defect the moment a second one exists.
-     *
-     * As in [clearAllSessions], the durable sid and sequence floor survive, so a burst captured
-     * before the drop stays unreplayable after it.
+     * The durable sid and sequence floor are NOT cleared: a burst captured before the drop must stay
+     * unreplayable after it, and a source reopening with the same sid resumes from the retained
+     * floor rather than from zero.
      */
     fun clearSession(sourceId: String, reason: String) {
         synchronized(sessionLock) {

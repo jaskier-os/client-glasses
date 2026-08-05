@@ -531,7 +531,7 @@ class RemoteInputRouterTest {
         sink.clear()
 
         // The socket dropped: frames may have been lost, so the sequence baseline is untrustworthy.
-        router.clearAllSessions("rfcomm disconnect")
+        router.clearSession("watch", "rfcomm disconnect")
         assertFalse(router.anyOpenSession())
 
         // The source reconnects and resumes at a LOWER seq. Without the clear this would have been
@@ -763,7 +763,7 @@ class RemoteInputRouterTest {
         flush()
         sink.clear()
 
-        router.clearAllSessions("rfcomm disconnect")
+        router.clearSession("watch", "rfcomm disconnect")
 
         // A burst captured before the drop, replayed after it.
         watch.emit(RemoteInputFrame.Lifecycle(1, "watch", 1L, 10L, now, RemoteLifecycle.OPEN))
