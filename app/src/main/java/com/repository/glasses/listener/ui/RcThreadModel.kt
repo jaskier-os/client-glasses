@@ -135,11 +135,14 @@ class RcThreadModel {
     fun blockingPrompt(): RcThreadRow? = _rows.lastOrNull()?.takeIf { it.role == ROLE_PROMPT }
 
     private fun parseRow(obj: JSONObject): RcThreadRow? {
-        if (!obj.has("q")) return null
+        // A missing "q" and a negative "q" are the same defect -- an unorderable row -- and one
+        // check covers both, because optLong's default IS the sentinel.
         val seq = obj.optLong("q", -1L)
         if (seq < 0) return null
+        // A role the renderer has no view for is dropped rather than rendered as something it is
+        // not. Both apps ship from this branch, so an unknown role is a defect, not a newer peer.
         val role = obj.optString("r", "")
-        if (role.isEmpty()) return null
+        if (role !in ROLES) return null
         val options = obj.optJSONArray("o")?.let { raw ->
             (0 until raw.length()).mapNotNull { raw.optString(it, "").ifEmpty { null } }
         } ?: emptyList()
@@ -166,7 +169,14 @@ class RcThreadModel {
     }
 
     companion object {
+        const val ROLE_USER = "user"
+        const val ROLE_ASSISTANT = "assistant"
+        const val ROLE_TOOLS = "tools"
         const val ROLE_PROMPT = "prompt"
+
+        /** The four roles the phone projects. Anything else is a defect and is dropped. */
+        val ROLES = setOf(ROLE_USER, ROLE_ASSISTANT, ROLE_TOOLS, ROLE_PROMPT)
+
         const val MAX_ROWS = 60
     }
 }

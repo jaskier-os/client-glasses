@@ -106,12 +106,10 @@ class RcSendWindow {
      * @return true when this tap completed a cancel.
      */
     fun tapCancel(now: Long): Boolean {
-        if (text == null) {
-            // Do not remember a tap made before the window opened; it would let one stray touch
-            // plus one deliberate one read as a pair.
-            lastTapMs = 0L
-            return false
-        }
+        // A tap made while no window is open is not remembered at all -- otherwise one stray touch
+        // of the temple plus one deliberate one would read as a pair. Nothing to reset here: arm,
+        // commit and cancel all leave the chain cleared, so it is already 0 in this branch.
+        if (text == null) return false
         val previous = lastTapMs
         if (previous != 0L && (now - previous) in DOUBLE_TAP_MIN_MS..DOUBLE_TAP_MAX_MS) {
             return cancel()

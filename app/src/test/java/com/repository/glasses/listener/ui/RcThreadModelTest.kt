@@ -206,10 +206,48 @@ class RcThreadModelTest {
         val m = openModel()
         m.accept(
             "s-1",
-            """{"rows":[{"r":"user","x":"no seq"},{"q":2},{"q":3,"r":"user","x":"good"},7],""" +
-                """"more":false,"lastSeq":3}"""
+            """{"rows":[{"r":"user","x":"no seq"},{"q":2},{"q":-3,"r":"user","x":"negative seq"},""" +
+                """{"q":4,"r":"whatever","x":"unknown role"},{"q":5,"r":"user","x":"good"},7],""" +
+                """"more":false,"lastSeq":5}"""
         )
         assertEquals(listOf("good"), m.rows.map { it.text })
+    }
+
+    @Test
+    fun onlyTheFourProjectedRolesRender() {
+        val m = openModel()
+        m.accept(
+            "s-1",
+            frame(
+                row(1, "user", "u") + "," + row(2, "assistant", "a") + "," +
+                    row(3, "tools", "t") + "," + row(4, "prompt", "p") + "," +
+                    row(5, "system", "not a projected role")
+            )
+        )
+        assertEquals(listOf("user", "assistant", "tools", "prompt"), m.rows.map { it.role })
+    }
+
+    @Test
+    fun twoRowsSharingASeqInOneFrameRenderOnce() {
+        val m = openModel()
+        m.accept("s-1", frame(row(5, "user", "first") + "," + row(5, "assistant", "collision")))
+        assertEquals(listOf("first"), m.rows.map { it.text })
+    }
+
+    @Test
+    fun theRowCapIsTheHudBudgetNotAnArbitraryNumber() {
+        // Asserted literally: a symbolic-only assertion would pass at any cap, and the cap is what
+        // keeps a long-lived session from growing without bound on a 1.7 GB device.
+        assertEquals(60, RcThreadModel.MAX_ROWS)
+    }
+
+    @Test
+    fun aFrameWithAnEmptySessionIdIsDroppedRatherThanMatchingTheOpenThread() {
+        val m = openModel("s-1")
+        // BACK sends CH_RC_MESSAGES_REQ with an empty sessionId; a reply carrying one back must
+        // never be adopted by whatever thread happens to be open.
+        assertFalse(m.accept("", frame(row(1, "assistant", "unrouted"))))
+        assertTrue(m.rows.isEmpty())
     }
 
     @Test

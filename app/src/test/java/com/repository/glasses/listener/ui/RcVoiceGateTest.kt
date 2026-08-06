@@ -75,12 +75,35 @@ class RcVoiceGateTest {
     }
 
     @Test
-    fun aDeadLinkOutranksAnEndedSessionAndBothOutrankTurning() {
-        // Order matters only for which reason is shown; all three refuse. Offline is reported
-        // first because it is the one the user can act on.
+    fun theReasonShownIsTheOneTheUserCanActOnFirst() {
+        // All of these refuse; the assertions pin WHICH reason surfaces, because a HUD that says
+        // "working" while the orchestrator is down sends the user to fix the wrong thing.
         assertEquals(RcVoiceGate.Verdict.Offline,
-            gate(wsConnected = false, ended = true, turning = true, blockingPrompt = true))
-        assertEquals(RcVoiceGate.Verdict.Ended, gate(ended = true, turning = true))
+            gate(wsConnected = false, ended = true, turning = true, blockingPrompt = true,
+                capturing = true))
+        assertEquals(RcVoiceGate.Verdict.Ended,
+            gate(ended = true, blockingPrompt = true, turning = true, capturing = true))
+        assertEquals(RcVoiceGate.Verdict.PromptOpen,
+            gate(blockingPrompt = true, turning = true, capturing = true))
+        assertEquals(RcVoiceGate.Verdict.Turning,
+            gate(turning = true, capturing = true, sendPending = true, sendInFlight = true))
+    }
+
+    @Test
+    fun everyRefusalReasonHasTheWordingTheSpecMandates() {
+        // The strings are the whole visible half of "the block is visible, never silent".
+        assertEquals("agent offline", RcVoiceGate.Verdict.Offline.hudText)
+        assertEquals("session ended", RcVoiceGate.Verdict.Ended.hudText)
+        assertEquals("working", RcVoiceGate.Verdict.Turning.hudText)
+        assertEquals("answer the prompt", RcVoiceGate.Verdict.PromptOpen.hudText)
+        assertEquals("busy", RcVoiceGate.Verdict.Busy.hudText)
+        assertEquals("", RcVoiceGate.Verdict.Allowed.hudText)
+    }
+
+    @Test
+    fun theUndoWindowIsThreeSeconds() {
+        // Asserted literally: this duration is the entire reason the window was kept.
+        assertEquals(3000L, RcSendWindow.WINDOW_MS)
     }
 
     @Test
@@ -174,6 +197,52 @@ class RcVoiceGateTest {
         w.arm("deploy it")
         w.tapCancel(now = 1_000L)
         assertFalse("contact bounce is not a double tap", w.tapCancel(now = 1_020L))
+        assertTrue(w.pending)
+    }
+
+    @Test
+    fun aFirstTapNearTheEpochIsStillOnlyAFirstTap() {
+        // A zero lastTapMs means "no tap yet". If that sentinel were confused with a real
+        // timestamp, the very first tap after a boot-adjacent uptime would cancel outright.
+        val w = RcSendWindow()
+        w.arm("deploy it")
+        assertFalse(w.tapCancel(now = 200L))
+        assertTrue(w.pending)
+        assertTrue(w.tapCancel(now = 400L))
+    }
+
+    @Test
+    fun aTapBeforeTheWindowNeverPairsWithOneAfterIt() {
+        val w = RcSendWindow()
+        w.tapCancel(now = 1_000L)      // stray touch, no window open
+        w.arm("deploy it")
+        assertFalse("a stray touch must not become half of a cancel", w.tapCancel(now = 1_100L))
+        assertTrue(w.pending)
+    }
+
+    @Test
+    fun reArmingWhilePendingAlsoResetsTheCancelChain() {
+        // The one path where only arm() can clear the chain: a second transcript replaces the
+        // first without any commit or cancel in between. A tap from the old window pairing with
+        // one from the new would discard a dictation the user never tried to cancel.
+        val w = RcSendWindow()
+        w.arm("first")
+        w.tapCancel(now = 1_000L)
+        w.arm("second")
+        assertFalse(w.tapCancel(now = 1_100L))
+        assertTrue(w.pending)
+        assertEquals("second", w.text)
+    }
+
+    @Test
+    fun aTapAfterACommitDoesNotPairIntoTheNextWindow() {
+        val w = RcSendWindow()
+        w.arm("one")
+        w.tapCancel(now = 1_000L)
+        w.commit()
+        w.arm("two")
+        assertFalse("the tap that preceded the commit belongs to the old window",
+            w.tapCancel(now = 1_100L))
         assertTrue(w.pending)
     }
 
