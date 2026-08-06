@@ -228,7 +228,7 @@ object GlassesConfig {
 
     fun getAssistantModel(ctx: Context): String =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_ASSISTANT_MODEL, null).orBlankDefault("sonnet")
+            .getString(KEY_ASSISTANT_MODEL, null).orBlankDefault("haiku")
 
     fun setAssistantModel(ctx: Context, value: String) =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_ASSISTANT_MODEL, value).apply()
