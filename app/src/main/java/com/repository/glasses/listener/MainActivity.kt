@@ -7120,6 +7120,20 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private val REMOTE_WAKE_HOLD_MS = 5_000L
 
     /**
+     * How long after a wake further events stop being treated as wake events.
+     *
+     * Covers the panel's light-up latency, which is what makes `panelIsOff()` keep reporting
+     * true after the wake has already been triggered. Comfortably longer than the observed
+     * latency (two events 45 ms apart were both swallowed) and far shorter than any plausible
+     * gap between a user deciding to wake the panel and deciding to put it back to sleep, so it
+     * cannot mask a genuine second wake.
+     */
+    private val REMOTE_WAKE_DEBOUNCE_MS = 1_000L
+
+    /** elapsedRealtime of the last wake this path triggered; 0 before the first. */
+    private var lastRemoteWakeMs = 0L
+
+    /**
      * True when the panel is genuinely dark.
      *
      * DISPLAY STATE, not `PowerManager.isInteractive`: `isInteractive` reports true in DOZE and
@@ -7150,10 +7164,14 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      *
      * A FOLDED device is NOT woken. Folded means the glasses are in a pocket or a case; lighting the
      * waveguide there drains the battery to show nothing, and [RemoteActionGate] refuses every
-     * action in that state anyway, so waking would light a panel that then does nothing.
+     * action in that state anyway, so waking would light a panel that then does nothing. That case
+     * IS reported, because "unfold your glasses" is something the user can act on.
      *
-     * Either way the source is TOLD, over the existing refusal backchannel, so its haptic reports
-     * "nothing happened" rather than confirming an action the user never got.
+     * The wake itself reports NOTHING. It is not a refusal: the system is working exactly as
+     * designed and the user's very next event will land. Reporting it borrowed `NOT_ALLOWED` --
+     * the nearest existing wire reason -- and so lit "Not allowed here" on the watch after EVERY
+     * screen wake, which is the overwhelmingly common path. The watch was being told the glasses
+     * had declined something at the one moment nothing had gone wrong at all.
      *
      * @return true when the event was consumed here and must not be dispatched.
      */
@@ -7165,6 +7183,40 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             reportRemoteRefusal(RemoteActionGate.Denial.REFUSED_FOLDED)
             return true
         }
+
+        // Exactly ONE event per wake is spent on the wake itself, and only the first.
+        //
+        // The panel takes tens of milliseconds to light, so `panelIsOff()` keeps returning true
+        // for the whole of that window. Without this latch every event arriving during it was
+        // ALSO treated as "the waking event" and swallowed -- a fast bezel spin against a dark
+        // screen silently lost several detents rather than one. Observed on hardware as two
+        // consecutive "consumed to WAKE" lines 45 ms apart.
+        //
+        // Latched on the wake being IN FLIGHT rather than on the display state, because the
+        // display state is precisely the thing that lags.
+        val now = SystemClock.elapsedRealtime()
+        val wakeInFlight = now - lastRemoteWakeMs < REMOTE_WAKE_DEBOUNCE_MS
+        if (wakeInFlight) {
+            // The wake is already under way, so this event is not spent lighting the panel.
+            // What happens to it depends on whether acting on it BLIND is safe, because the
+            // panel is still dark for a few more milliseconds.
+            //
+            // SCROLL_STEP is dispatched. It only moves a selection, the user's intent across a
+            // burst is plainly "scroll", and the result is visible the moment the panel lights.
+            // This is the case the user noticed: losing one detent to wake is a fair price,
+            // losing five is not.
+            //
+            // SELECT and BACK are still CONSUMED. They commit to something -- entering, leaving,
+            // and on this UI several outcomes sit one keypress from a microphone -- and the user
+            // cannot yet see what they would be committing to. That is precisely the hazard this
+            // whole function exists to prevent, and a burst is not a reason to reintroduce it.
+            // A remote user also cannot tell the panel was off, so "your first press turns it on"
+            // must keep meaning that for the presses that actually do something.
+            if (e.action == RemoteAction.SCROLL_STEP) return false
+            uiLog("[RemoteInput] ${e.action} consumed: panel still waking, not acting blind")
+            return true
+        }
+        lastRemoteWakeMs = now
 
         try {
             val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
@@ -7180,10 +7232,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             uiLog("[RemoteInput] wake failed: ${ex.message}")
         }
 
-        // The action did not happen. Reported as NOT_ALLOWED because that is the closest existing
-        // reason and it is honest about the outcome; the alternatives claim a fold or a busy UI that
-        // are not the case, and inventing a wire reason for this would be a protocol change.
-        reportRemoteRefusal(RemoteActionGate.Denial.REFUSED_NOT_ALLOWED)
         return true
     }
 
@@ -7259,10 +7307,17 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * Translate the gate's verdict into the coarse reason a remote device can render, and
      * push it to `:backend` for the status backchannel.
      *
-     * The mapping collapses six denials into three reasons on purpose: what a watch face
-     * can usefully say is "unfold your glasses", "finish what you are doing on them", or
-     * "you cannot do that from here". Finer detail is noise on a 1-inch screen, and the
-     * full verdict is already in the glasses log for anyone debugging.
+     * The mapping collapses the denials into two reasons on purpose: what a watch face can
+     * usefully say is "unfold your glasses" or "finish what you are doing on them". Finer
+     * detail is noise on a 1-inch screen, and the full verdict is already in the glasses
+     * log for anyone debugging.
+     *
+     * `REFUSED_NOT_ALLOWED` reports NOTHING. It is the verdict for "this action is not on
+     * the allowlist for this screen", which is by far the most common denial -- every BACK
+     * at the top level produces one -- and the only one the user cannot act on: unlike a
+     * folded or busy pair of glasses there is nothing to go and fix, so the watch would be
+     * raising an alarm about a working system. The event is simply consumed. The gate is
+     * unchanged; this is about not TELLING the user, not about permitting more.
      */
     private fun reportRemoteRefusal(verdict: RemoteActionGate.Denial) {
         val reason = when (verdict) {
@@ -7270,7 +7325,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             RemoteActionGate.Denial.REFUSED_STATE,
             RemoteActionGate.Denial.REFUSED_ARMED,
             RemoteActionGate.Denial.REFUSED_BUSY -> RemoteRefusalReason.LOCKED
-            RemoteActionGate.Denial.REFUSED_NOT_ALLOWED -> RemoteRefusalReason.NOT_ALLOWED
+            RemoteActionGate.Denial.REFUSED_NOT_ALLOWED,
             RemoteActionGate.Denial.ALLOWED -> return
         }
         remoteInputBridge.reportRefusal(reason)

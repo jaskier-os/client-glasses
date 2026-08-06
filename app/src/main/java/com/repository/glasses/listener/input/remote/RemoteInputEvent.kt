@@ -167,14 +167,16 @@ data class RemoteInputStatus(
 /**
  * Why the glasses UI is declining input, in terms a remote device can render.
  *
- * Deliberately coarse: the watch needs to distinguish "wake your glasses" from "you
- * cannot do that here", because those are the two cases with different user actions.
- * Finer reasons would be noise on a 1-inch screen.
+ * Deliberately coarse: what a watch face can usefully say is "unfold your glasses" or
+ * "finish what is on screen". Finer reasons would be noise on a 1-inch screen.
+ *
+ * Only reasons the user can ACT on are listed. A denial that merely means "this action
+ * is not on the allowlist for this screen" is reported to nothing -- the gate still
+ * refuses it, but the event is consumed silently. That denial is the common case (every
+ * BACK at the top level produces one) and there is nothing for the user to go and fix,
+ * so surfacing it was alarm without information.
  */
 enum class RemoteRefusalReason {
-    /** The action is not permitted in the current UI state. Go back, or do it here. */
-    NOT_ALLOWED,
-
     /** The glasses are folded. Unfold them. */
     FOLDED,
 
