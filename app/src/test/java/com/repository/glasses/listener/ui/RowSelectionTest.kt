@@ -62,11 +62,22 @@ class RowSelectionTest {
     }
 
     @Test
-    fun aVanishedCaretLandsNearWhereTheUserWasLooking() {
+    fun aVanishedCaretLandsNearWhereTheUserWasLookingAndSaysItWasRehomed() {
         val s = sel(rows(conv = listOf(conv("c1"), conv("c2"), conv("c3"))))
         s.select("conv:c2")
-        s.onRowsReplaced(rows(conv = listOf(conv("c1"), conv("c3"))))
+        val change = s.onRowsReplaced(rows(conv = listOf(conv("c1"), conv("c3"))))
         assertEquals("conv:c3", s.key)
+        // REHOMED is the caller's signal to rebind the old row and clear its border. Reporting
+        // MOVED instead would leave a caret painted on a row that no longer holds the caret.
+        assertEquals(RowSelection.Change.REHOMED, change)
+    }
+
+    @Test
+    fun anUnchangedListReportsNoChangeAtAll() {
+        val r = rows(conv = listOf(conv("c1")))
+        val s = sel(r)
+        s.select("conv:c1")
+        assertEquals(RowSelection.Change.NONE, s.onRowsReplaced(r))
     }
 
     @Test

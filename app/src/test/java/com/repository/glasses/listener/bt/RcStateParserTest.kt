@@ -54,6 +54,16 @@ class RcStateParserTest {
     }
 
     @Test
+    fun aNonBooleanWsIsNotCoercedIntoTrue() {
+        // optBoolean would read "true" and 1 as true. A link we cannot confirm is up is DOWN --
+        // reading it as up un-dims every row and arms the mic against a dead orchestrator.
+        assertFalse(RcStateParser.parse("""{"ws":"true","s":[]}""")!!.wsConnected)
+        assertFalse(RcStateParser.parse("""{"ws":1,"s":[]}""")!!.wsConnected)
+        assertFalse(RcStateParser.parse("""{"ws":null,"s":[]}""")!!.wsConnected)
+        assertTrue("a real boolean true is still true", RcStateParser.parse("""{"ws":true}""")!!.wsConnected)
+    }
+
+    @Test
     fun anEmptySessionListIsAValidSnapshotMeaningNoSessions() {
         val s = RcStateParser.parse("""{"ws":true,"s":[]}""")!!
         assertTrue(s.wsConnected)

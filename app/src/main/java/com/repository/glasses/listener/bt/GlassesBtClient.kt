@@ -344,15 +344,27 @@ class GlassesBtClient(private val relay: MessageRelay) {
                 BtProtocol.CH_RC_MESSAGES_RESP -> {
                     val sessionId = args.getOrElse(0) { "" }
                     val json = args.getOrElse(1) { "" }
-                    remoteLog?.invoke("RC messages response: session=$sessionId ${json.length} chars")
-                    listener?.onRcMessagesResponse(sessionId, json)
+                    // A frame with no session id cannot be routed. Passing "" on would make it
+                    // match an unset open-session id and render one session's rows under another
+                    // session's name, which is exactly the wrong-chat failure this feature must
+                    // not have. Drop it loudly instead.
+                    if (sessionId.isEmpty()) {
+                        remoteLog?.invoke("RC messages response dropped: no session id")
+                    } else {
+                        remoteLog?.invoke("RC messages response: session=$sessionId ${json.length} chars")
+                        listener?.onRcMessagesResponse(sessionId, json)
+                    }
                 }
                 BtProtocol.CH_RC_SEND_RESP -> {
                     val sessionId = args.getOrElse(0) { "" }
                     val clientMsgId = args.getOrElse(1) { "" }
                     val status = args.getOrElse(2) { "" }
-                    remoteLog?.invoke("RC send result: session=$sessionId id=$clientMsgId $status")
-                    listener?.onRcSendResult(sessionId, clientMsgId, status)
+                    if (sessionId.isEmpty()) {
+                        remoteLog?.invoke("RC send result dropped: no session id")
+                    } else {
+                        remoteLog?.invoke("RC send result: session=$sessionId id=$clientMsgId $status")
+                        listener?.onRcSendResult(sessionId, clientMsgId, status)
+                    }
                 }
                 BtProtocol.CH_TG_SEND_RESP -> {
                     val json = args.getOrElse(0) { "{}" }

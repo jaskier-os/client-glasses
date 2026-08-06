@@ -66,6 +66,21 @@ class ChatRowModelTest {
     }
 
     @Test
+    fun anEndedSessionNeverSortsToTheTopEvenIfTheSnapshotStillCallsItTurning() {
+        // A stale snapshot can carry ended + turning together. Pinning that corpse first would
+        // push a genuinely live session past the section cap.
+        val ids = build(listOf(rc("a"), rc("b", turning = true, ended = true), rc("c", turning = true)))
+            .filterIsInstance<ChatRow.RcSession>().map { it.id }
+        assertEquals(listOf("c", "a", "b"), ids)
+    }
+
+    @Test
+    fun resolvingASelectionAgainstAnEmptyListReportsNoRowRatherThanIndexZero() {
+        assertEquals(-1, ChatRowBuilder.resolveSelection(emptyList(), "conv:c1", 3))
+        assertEquals(-1, ChatRowBuilder.resolveSelection(emptyList(), null, -1))
+    }
+
+    @Test
     fun keysAreStableAndDistinctAcrossRowKinds() {
         val rows = build(listOf(rc("7")), listOf(conv("7")))
         val rcRow = rows.filterIsInstance<ChatRow.RcSession>().single()

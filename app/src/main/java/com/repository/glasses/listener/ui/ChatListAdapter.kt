@@ -758,13 +758,20 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     /** The selected RC session, or null. Null for an ended session -- it is not enterable. */
     fun getSelectedRcSession(): ChatRow.RcSession? = selection.selectedRcSession()
 
-    /** Drops all data rows. The two headers survive -- they are not data and never were. */
+    /**
+     * Drops the conversation rows. The two headers survive -- they are not data and never were --
+     * and so does the RC section.
+     *
+     * RC state is deliberately KEPT: the glasses cannot ask for it back (there is no list-request
+     * channel by design; the phone pushes on every RC event and on Bluetooth link-up). Wiping it on
+     * an unrelated chat-session reset would blank the pinned block until the next agent event,
+     * which could be minutes.
+     */
     fun clear() {
         if (runWhenIdle { clear() }) return
         conversations = emptyList()
-        rcState = RcState.EMPTY
         gate.release()
         cancelHoldExpiry()
-        applyRows(ChatRowBuilder.build(RcState.EMPTY, emptyList()), dropSelection = true)
+        applyRows(ChatRowBuilder.build(rcState, emptyList()), dropSelection = true)
     }
 }
