@@ -118,6 +118,89 @@ class RcVoiceGateTest {
         assertTrue(RcVoiceGate.Verdict.Allowed.allowed)
     }
 
+    // -- capture identity --
+
+    @Test
+    fun aTranscriptForACancelledCaptureIsSwallowedNotAdoptedByTheNextOne() {
+        // The phone finalises an utterance asynchronously and the transcript carries no identity of
+        // its own, so the ONLY way to tell them apart is to count the abandoned ones. Without this,
+        // words the user explicitly cancelled would arm the next capture's send window.
+        val c = RcCapture()
+        c.start()
+        c.cancel()
+        c.start()
+        assertTrue("a capture IS running", c.active)
+        assertFalse("but this transcript belongs to the abandoned one", c.acceptTranscript())
+        assertTrue("the next one is this capture's", c.acceptTranscript())
+    }
+
+    @Test
+    fun everyAbandonedCaptureSwallowsExactlyOneTranscript() {
+        val c = RcCapture()
+        c.start(); c.cancel()
+        c.start(); c.cancel()
+        c.start()
+        assertFalse(c.acceptTranscript())
+        assertFalse(c.acceptTranscript())
+        assertTrue(c.acceptTranscript())
+    }
+
+    @Test
+    fun aTranscriptArrivingWithNoCaptureRunningIsRefused() {
+        val c = RcCapture()
+        assertFalse(c.acceptTranscript())
+        c.start()
+        assertTrue(c.acceptTranscript())
+        assertFalse("the capture ended with that final; a duplicate must not be adopted",
+            c.acceptTranscript())
+        assertFalse(c.active)
+    }
+
+    @Test
+    fun acceptingATranscriptEndsTheCapture() {
+        val c = RcCapture()
+        c.start()
+        assertTrue(c.active)
+        c.acceptTranscript()
+        assertFalse(c.active)
+    }
+
+    @Test
+    fun cancelOnAnIdleCaptureIsANoOpAndOwesNoSwallow() {
+        val c = RcCapture()
+        assertFalse(c.cancel())
+        c.start()
+        assertTrue(c.cancel())
+        assertFalse("a second cancel of the same capture must not owe a second swallow",
+            c.cancel())
+        c.start()
+        assertFalse("exactly one transcript is owed", c.acceptTranscript())
+        assertTrue(c.acceptTranscript())
+    }
+
+    @Test
+    fun aTimedOutCaptureAlsoSwallowsItsLateTranscript() {
+        // The watchdog gives up on a silent capture; if the phone then delivers late, that text is
+        // still from the abandoned utterance.
+        val c = RcCapture()
+        c.start()
+        assertTrue(c.cancel())
+        assertFalse(c.acceptTranscript())
+    }
+
+    @Test
+    fun theSwallowDebtIsBoundedSoAThrashedCaptureCannotDeafenTheThreadForever() {
+        val c = RcCapture()
+        repeat(RcCapture.MAX_PENDING_DISCARDS + 5) { c.start(); c.cancel() }
+        c.start()
+        var swallowed = 0
+        while (!c.acceptTranscript()) {
+            swallowed++
+            if (swallowed > 100) break
+        }
+        assertEquals(RcCapture.MAX_PENDING_DISCARDS, swallowed)
+    }
+
     // -- the 3 s send window --
 
     @Test

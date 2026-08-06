@@ -8616,6 +8616,14 @@ class ListenerService : LifecycleService(),
             val sessionId = intent.getStringExtra(EXTRA_RC_SESSION_ID) ?: return
             if (notifReplyId != null) {
                 btLog("RC voice start ignored: notif reply in progress (notifId=$notifReplyId)")
+                // Tell the UI, or its capture would sit there with the microphone never running
+                // and no transcript ever coming back. A blank final is exactly the "captured
+                // nothing" signal it already handles.
+                sendBroadcast(Intent(ACTION_USER_TEXT).apply {
+                    setPackage(packageName)
+                    putExtra(EXTRA_USER_TEXT_REQUEST_ID, "tg_voice")
+                    putExtra(EXTRA_USER_TEXT, "")
+                })
                 return
             }
             btLog("RC voice start: session=$sessionId")

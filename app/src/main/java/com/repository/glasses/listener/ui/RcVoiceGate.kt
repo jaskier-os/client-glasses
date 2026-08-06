@@ -51,6 +51,71 @@ object RcVoiceGate {
 }
 
 /**
+ * Identity for one dictation.
+ *
+ * The phone finalises an utterance asynchronously, so a transcript can land after the user has
+ * abandoned the capture it belongs to. Without an identity that late transcript would arm the NEXT
+ * capture's send window and ship words the user explicitly cancelled straight into a coding agent.
+ * Each capture therefore carries a token, and only the running capture's own token is accepted.
+ */
+class RcCapture {
+
+    var active: Boolean = false
+        private set
+
+    /**
+     * How many transcripts belong to captures the user abandoned. The phone's finals carry no id
+     * of their own and arrive in order, so counting the abandoned ones is what tells them apart.
+     */
+    private var owedDiscards: Int = 0
+
+    /** Begins a capture. A still-running one is abandoned, and owes a discard like any other. */
+    fun start() {
+        if (active) cancel()
+        active = true
+    }
+
+    /**
+     * The user abandoned this capture, or the watchdog gave up on it. The phone may still deliver
+     * its transcript, so one is owed a discard.
+     *
+     * @return true when a capture was actually running.
+     */
+    fun cancel(): Boolean {
+        if (!active) return false
+        active = false
+        if (owedDiscards < MAX_PENDING_DISCARDS) owedDiscards++
+        return true
+    }
+
+    /**
+     * A final transcript arrived.
+     *
+     * @return true when it belongs to the capture that is running -- and therefore may be sent.
+     *         False means it belonged to an abandoned capture, or to no capture at all, and must
+     *         be dropped on the floor.
+     */
+    fun acceptTranscript(): Boolean {
+        if (owedDiscards > 0) {
+            owedDiscards--
+            return false
+        }
+        if (!active) return false
+        active = false
+        return true
+    }
+
+    companion object {
+        /**
+         * Repeated hold-and-abandon must not build a debt that deafens the thread indefinitely:
+         * the phone drops most abandoned utterances outright (no speech detected), so a large debt
+         * is far more likely to be wrong than right.
+         */
+        const val MAX_PENDING_DISCARDS = 3
+    }
+}
+
+/**
  * The 3 s undo between "the transcript arrived" and "the agent receives it".
  *
  * Deliberately a plain field on the activity rather than a FocusState: it changes nothing about

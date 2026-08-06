@@ -63,6 +63,7 @@ import com.repository.glasses.listener.ui.ChatRow
 import com.repository.glasses.listener.ui.ChatMessage
 import com.repository.glasses.listener.ui.ChatSummaryItem
 import com.repository.glasses.listener.ui.Lum
+import com.repository.glasses.listener.ui.RcCapture
 import com.repository.glasses.listener.ui.RcSendWindow
 import com.repository.glasses.listener.ui.RcThreadAdapter
 import com.repository.glasses.listener.ui.RcThreadModel
@@ -389,8 +390,20 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private var rcSendRunnable: Runnable? = null
     private var rcSendTickRunnable: Runnable? = null
 
-    /** True while the glasses mic is streaming for THIS thread. */
-    private var rcCapturing = false
+    /**
+     * Identity of the running dictation. A transcript that belongs to an abandoned capture is
+     * refused rather than adopted by whatever capture is running when it lands.
+     */
+    private val rcCapture = RcCapture()
+
+    /**
+     * How long a capture may run with nothing coming back before it is abandoned. Generous, since
+     * the user sets the pace: this is a last resort against a latched microphone, not a VAD.
+     */
+    private val RC_CAPTURE_TIMEOUT_MS = 30_000L
+
+    /** Fires when a capture produces no transcript at all, so the mic gate cannot latch Busy. */
+    private var rcCaptureWatchdog: Runnable? = null
 
     /** True from writing a CH_RC_SEND_REQ until the phone answers; blocks a double-press resend. */
     private var rcSendInFlight = false
@@ -1321,7 +1334,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                     return@runOnUiThread
                 }
                 // RC dictation: the partial renders in the thread's voice bar.
-                if (focusState == FocusState.RC_THREAD_FOCUSED && rcCapturing) {
+                if (focusState == FocusState.RC_THREAD_FOCUSED && rcCapture.active) {
                     if (text.isNotBlank()) rcThreadVoiceText.text = text
                     return@runOnUiThread
                 }
@@ -1356,9 +1369,16 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                     telegramShowSendPreview(text)
                     return@runOnUiThread
                 }
-                // RC dictation final: opens the 3s undo window (or tears down if blank).
-                if (focusState == FocusState.RC_THREAD_FOCUSED && rcCapturing) {
-                    rcOnFinalTranscript(text)
+                // RC dictation final: opens the 3s undo window (or tears down if blank). Accepted
+                // only for the capture that is actually running -- a transcript belonging to a
+                // cancelled one would otherwise be sent as this capture's message.
+                if (focusState == FocusState.RC_THREAD_FOCUSED && requestId == "tg_voice") {
+                    if (rcCapture.acceptTranscript()) {
+                        rcOnFinalTranscript(text)
+                    } else {
+                        uiLog("RC: dropped a transcript from an abandoned capture " +
+                            "('${text.take(20)}')")
+                    }
                     return@runOnUiThread
                 }
                 if (focusState == FocusState.NOTIFICATION_REPLY) {
@@ -1911,16 +1931,26 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             return
         }
         rcOpenSession = row
-        // A session that ended, or a link that dropped, must revoke a capture already running --
-        // the refusal is not only about starting one.
-        val verdict = rcVoiceVerdict()
-        if ((rcCapturing || rcSendWindow.pending) && !verdict.allowed &&
-            verdict != RcVoiceGate.Verdict.Busy) {
-            uiLog("RC: voice aborted mid-flight (${verdict.name})")
-            rcCancelCapture()
-            rcClearSendWindow()
-        }
+        rcAbortVoiceIfNoLongerAllowed()
         renderRcThreadChrome()
+    }
+
+    /**
+     * Revokes a capture or a pending send the moment the session stops being able to take it.
+     *
+     * The refusal is not only about STARTING: a session can end, the orchestrator link can drop, or
+     * a prompt can arrive while the user is already speaking or watching the 3 s countdown. Sending
+     * anyway would put free text into a session that is waiting on an option pick, or into a dead
+     * one. Busy is excluded because that verdict IS the in-flight voice itself.
+     */
+    private fun rcAbortVoiceIfNoLongerAllowed() {
+        if (!rcCapture.active && !rcSendWindow.pending) return
+        val verdict = rcVoiceVerdict()
+        if (verdict.allowed || verdict == RcVoiceGate.Verdict.Busy) return
+        uiLog("RC: voice aborted mid-flight (${verdict.name})")
+        rcCancelCapture()
+        rcClearSendWindow()
+        dbg(verdict.hudText)
     }
 
     private val rcMessagesReceiver = object : BroadcastReceiver() {
@@ -1931,13 +1961,20 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 // The model drops any frame that is not the open session's -- the glasses-side belt
                 // against rendering one session's rows under another session's name.
                 if (!rcThread.accept(sessionId, json)) return@runOnUiThread
-                // Rows arriving for the open thread also clear a send that was in flight: the
-                // phone has evidently processed it.
-                rcSendInFlight = false
-                rcSendClientMsgId = null
+                // A user row confirms the phone consumed the dictation, so the in-flight guard is
+                // released. Any other row proves nothing about it: an assistant row can arrive from
+                // a turn that was already running when the send left, and clearing on that would
+                // re-open the double-send this guard exists to prevent.
+                if (rcThread.rows.any { it.role == RcThreadModel.ROLE_USER }) {
+                    rcSendInFlight = false
+                    rcSendClientMsgId = null
+                }
                 // A newly arrived prompt starts its caret at the top rather than wherever the
                 // previous prompt's caret happened to rest.
                 rcThreadAdapter.setPromptCursor(0)
+                // Whether a prompt is blocking is derived from the ROWS, not from the state push,
+                // so this is the only place a prompt arriving mid-dictation can be noticed.
+                rcAbortVoiceIfNoLongerAllowed()
                 renderRcThreadRows()
                 rcOpenSession?.let { requestRcMessages(it.id) }
             }
@@ -2025,6 +2062,14 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 btConnected = connected
                 updateDebugLine(btConnected = connected)
                 updateStartStopVisibility()
+                // The RC snapshot's `ws` flag can only be refreshed BY a state push, which travels
+                // over this very link -- so when the link dies it latches at whatever it last said.
+                // The link state is the freshness signal, and it must revoke voice, not merely
+                // refuse the next hold.
+                if (focusState == FocusState.RC_THREAD_FOCUSED) {
+                    rcAbortVoiceIfNoLongerAllowed()
+                    renderRcThreadChrome()
+                }
                 if (connected) {
                     // Load data for the active tab now that BT is connected
                     val activeTab = activeTabs.getOrNull(currentTab)
@@ -5479,7 +5524,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         val rcThreadOpen = showChatList && focusState == FocusState.RC_THREAD_FOCUSED
         if (!showChatList && ::rcThreadContainer.isInitialized &&
             focusState == FocusState.RC_THREAD_FOCUSED) {
+            // The focus state MUST be left too. Leaving it on RC_THREAD_FOCUSED off-tab strands
+            // every DPAD key in the RC branches -- which sit above the tab dispatch -- and kills
+            // tab navigation with no thread on screen to explain why.
             closeRcThread(returnToList = false)
+            focusState = FocusState.TAB_NAV
         }
         chatListRecycler.visibility = if (showChatList && !rcThreadOpen) View.VISIBLE else View.GONE
         chatListRecycler.alpha = 1f
@@ -6969,6 +7018,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             return
         }
         rcOpenSession = row
+        // A reply arm that was counting down when the thread opened can never be released here --
+        // its NUMPAD_2 is consumed by the RC branch -- and while it is latched the in-flight-reply
+        // guard blocks AI chat indefinitely. Clear it on the way in.
+        cancelReplyArm()
         rcThread.open(row.id)
         rcThreadAdapter.setPromptCursor(0)
         rcThreadAdapter.submit(rcThread.items())
@@ -7024,11 +7077,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         val session = rcOpenSession
             ?: return RcVoiceGate.Verdict.Ended
         return RcVoiceGate.evaluate(
-            wsConnected = chatListAdapter.rcWsConnected,
+            // The snapshot's ws flag is only ever refreshed BY a push over the BT link, so a dead
+            // link leaves it latched at its last value. Both must hold for the mic to run.
+            wsConnected = btConnected && chatListAdapter.rcWsConnected,
             turning = session.turning,
             ended = session.ended,
             blockingPrompt = rcThread.blockingPrompt() != null,
-            capturing = rcCapturing,
+            capturing = rcCapture.active,
             sendPending = rcSendWindow.pending,
             sendInFlight = rcSendInFlight,
         )
@@ -7053,7 +7108,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
 
         val verdict = rcVoiceVerdict()
         // Voice states own the footer; the mic affordance is only shown when idle.
-        val voiceBarUp = rcCapturing || rcSendWindow.pending
+        val voiceBarUp = rcCapture.active || rcSendWindow.pending
         rcThreadFooter.visibility = if (voiceBarUp) View.GONE else View.VISIBLE
         rcThreadMicGlyph.visibility = if (verdict.allowed) View.VISIBLE else View.GONE
         rcThreadFooterHint.text = verdict.hudText
@@ -7082,7 +7137,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             renderRcThreadChrome()
             return
         }
-        rcCapturing = true
+        rcCapture.start()
         rcThreadVoiceText.text = ""
         rcThreadVoiceBar.visibility = View.VISIBLE
         rcShowCountdown(false)
@@ -7093,24 +7148,51 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             setPackage(packageName)
             putExtra(ListenerService.EXTRA_RC_SESSION_ID, session.id)
         })
+        rcArmCaptureWatchdog()
         uiLog("RC: capture started for ${session.id}")
+    }
+
+    /**
+     * A capture that never produces a transcript must not latch the microphone shut forever. The
+     * phone can drop the utterance, the link can die, or another consumer can own the audio gate --
+     * none of which sends anything back. Time it out and say so.
+     */
+    private fun rcArmCaptureWatchdog() {
+        rcClearCaptureWatchdog()
+        val r = Runnable {
+            rcCaptureWatchdog = null
+            if (!rcCapture.active) return@Runnable
+            uiLog("RC: capture produced nothing within ${RC_CAPTURE_TIMEOUT_MS}ms -> giving up")
+            rcCancelCapture()
+            dbg("no speech")
+            renderRcThreadChrome()
+        }
+        rcCaptureWatchdog = r
+        mainHandler.postDelayed(r, RC_CAPTURE_TIMEOUT_MS)
+    }
+
+    private fun rcClearCaptureWatchdog() {
+        rcCaptureWatchdog?.let { mainHandler.removeCallbacks(it) }
+        rcCaptureWatchdog = null
     }
 
     /** Stops a capture without sending. Safe to call when none is running. */
     private fun rcCancelCapture() {
-        if (!rcCapturing) return
-        rcCapturing = false
+        rcClearCaptureWatchdog()
+        // The token is spent even if no capture was running locally, so a transcript still in
+        // flight on the phone can never be adopted after this point.
+        if (!rcCapture.cancel()) return
         sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_STOP).apply { setPackage(packageName) })
         rcThreadVoiceBar.visibility = View.GONE
         uiLog("RC: capture cancelled")
     }
 
     /**
-     * The phone's STT produced a final transcript for this thread. A blank one captured nothing:
-     * tear down rather than opening a window over whitespace.
+     * The phone's STT produced a final transcript. A blank one captured nothing: tear down rather
+     * than opening a window over whitespace.
      */
     private fun rcOnFinalTranscript(text: String) {
-        rcCapturing = false
+        rcClearCaptureWatchdog()
         sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_STOP).apply { setPackage(packageName) })
         if (!rcSendWindow.arm(text)) {
             uiLog("RC: blank transcript, nothing to send")
@@ -7182,6 +7264,17 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      */
     private fun rcCommitSend() {
         rcClearSendCallbacks()
+        // The last gate, checked at the send boundary itself. Everything upstream aborts a window
+        // that stops being allowed, but a stale posted runnable is cheap to defend against and the
+        // cost of being wrong here is a message the user never intended reaching a coding agent.
+        // Busy is expected: this pending send IS what makes the verdict Busy.
+        val verdict = rcVoiceVerdict()
+        if (!verdict.allowed && verdict != RcVoiceGate.Verdict.Busy) {
+            uiLog("RC: send abandoned at the boundary (${verdict.name})")
+            rcClearSendWindow()
+            renderRcThreadChrome()
+            return
+        }
         val text = rcSendWindow.commit() ?: return
         val session = rcOpenSession
         if (session == null) {
@@ -8067,7 +8160,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // would silently open an assistant chat instead of dictating to the coding agent. The
         // in-flight guard mirrors the [NREPLY] one: a second hold must not start a second capture.
         if (keyCode == KeyEvent.KEYCODE_NUMPAD_3 && focusState == FocusState.RC_THREAD_FOCUSED) {
-            if (rcCapturing) {
+            if (rcCapture.active) {
                 uiLog("RC: NUMPAD_3 ignored, capture already running")
             } else {
                 rcStartCapture()
@@ -8085,7 +8178,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 FocusState.TELEGRAM_PREVIEW,
                 FocusState.CALL_INCOMING,
                 FocusState.CALL_ACTIVE,
-                FocusState.STOP_MODAL
+                FocusState.STOP_MODAL,
+                // Redundant with the RC branch above, which returns first. Listed anyway so the
+                // exclusion set states the rule rather than leaving it to branch order: a reorder
+                // would otherwise silently re-open two consumers of the same hold gesture.
+                FocusState.RC_THREAD_FOCUSED
             )) {
             uiLog("[NREPLY] -> arm branch (startReplyArm, replyArming was $replyArming)")
             if (!replyArming) startReplyArm()
@@ -8295,7 +8392,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             if (focusState == FocusState.RC_THREAD_FOCUSED) {
                 // A pending send is undone by BACK without leaving the thread -- the same undo the
                 // double tap performs, on the key users reach for first.
-                if (rcSendWindow.pending || rcCapturing) {
+                if (rcSendWindow.pending || rcCapture.active) {
                     uiLog("RC: BACK cancels the pending voice send")
                     rcCancelCapture()
                     rcClearSendWindow()

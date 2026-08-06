@@ -346,6 +346,24 @@ class RcThreadInstrumentedTest {
         assertEquals(View.VISIBLE, view(R_rcThreadCountdownRow()).visibility)
         assertEquals(View.VISIBLE, view(R_rcThreadCountdownFill()).visibility)
 
+        // 13b. A transcript belonging to a capture the user ABANDONED must not be adopted by the
+        //      next one. This is the path that would otherwise ship cancelled words to the agent.
+        key(KeyEvent.KEYCODE_BACK)          // cancels the window and the capture
+        SystemClock.sleep(600)
+        key(KeyEvent.KEYCODE_NUMPAD_3)      // a fresh capture
+        pushFinalTranscript("this belonged to the cancelled capture")
+        SystemClock.sleep(HOLD_MS)
+        shoot("13b_stale_transcript_dropped")
+        assertEquals("the abandoned utterance must not arm the new capture's window",
+            View.GONE, view(R_rcThreadCountdownRow()).visibility)
+        key(KeyEvent.KEYCODE_BACK)
+        SystemClock.sleep(600)
+
+        // 13c. Re-open the window for the cancel assertions below.
+        key(KeyEvent.KEYCODE_NUMPAD_3)
+        pushFinalTranscript("yes deploy it and watch the logcat")
+        SystemClock.sleep(1000)
+
         // 14. A DOUBLE tap inside the window cancels it. A single tap must not.
         key(KeyEvent.KEYCODE_NUMPAD_2)
         assertEquals("a single tap must not discard a dictation",
@@ -385,6 +403,25 @@ class RcThreadInstrumentedTest {
         shoot("17_user_row_from_phone")
         assertEquals("the user row exists exactly once",
             1, threadRows().count { it.text == "deploy it" })
+
+        // 17b. A prompt arriving DURING the send window revokes it: free text must never land in a
+        //      session that is waiting on an option pick.
+        key(KeyEvent.KEYCODE_NUMPAD_3)
+        pushFinalTranscript("run the whole suite")
+        SystemClock.sleep(800)
+        assertEquals(View.VISIBLE, view(R_rcThreadCountdownRow()).visibility)
+        pushRows(rowsFrame(
+            """{"q":9,"r":"prompt","x":"Allow Bash?","o":["Yes","No"],"i":"req-2"}""", lastSeq = 9))
+        SystemClock.sleep(HOLD_MS)
+        shoot("17b_prompt_revokes_send")
+        assertEquals("a prompt must revoke a send already counting down",
+            View.GONE, view(R_rcThreadVoiceBar()).visibility)
+        assertHint("answer the prompt")
+        // Answer it so the thread is unblocked for the assertions below.
+        key(KeyEvent.KEYCODE_DPAD_CENTER)
+        SystemClock.sleep(900)
+        pushRows(rowsFrame("""{"q":10,"r":"assistant","x":"Running."}""", lastSeq = 10))
+        SystemClock.sleep(800)
 
         // 18. If the open session vanishes from a snapshot, the thread pops back to the list.
         pushState(true)
