@@ -266,10 +266,12 @@ class RemoteActionGateTest {
     }
 
     @Test
-    fun `back cannot turn the screen off from the top level`() {
-        // BACK in TAB_NAV calls turnScreenOff(), which pauses the UI process, drops the sink, and
-        // strands the session with no recovery from the remote device.
-        assertEquals(false, allowed(snap("TAB_NAV"), RemoteAction.BACK))
+    fun `back turns the screen off from the top level`() {
+        // BACK in TAB_NAV calls turnScreenOff(). It drops the sink, but dismissing the display
+        // is what the wearer means by a double tap at the top level, and refusing it removed a
+        // gesture they rely on. Recovery is already covered: the next remote event wakes the
+        // panel and is consumed rather than acted on.
+        assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.BACK))
     }
 
     @Test
@@ -409,9 +411,8 @@ class RemoteActionGateTest {
         assertEquals(false, allowed(snap("TELEGRAM_PREVIEW"), RemoteAction.SELECT))
         // Toggling the translation microphone.
         assertEquals(false, allowed(snap("TRANSLATE_FOCUSED"), RemoteAction.SELECT))
-        // Turning the screen off: BACK at the top level does that, which would drop the
-        // sink and strand the session with no way back from the remote device.
-        assertEquals(false, allowed(snap("TAB_NAV"), RemoteAction.BACK))
+        // Turning the screen off is NOT on this list: BACK at the top level does that, and
+        // dismissing the display is the wearer's own gesture rather than a hazard.
         // Taking ownership of the input device. Only TAP toggles tracking unconditionally;
         // the BACK toggle sits behind tracking already being on, which is REFUSED_BUSY.
         assertEquals(false, allowed(snap("MOUSE_FOCUSED"), RemoteAction.SELECT))
@@ -493,8 +494,9 @@ class RemoteActionGateTest {
      * and scroll, or the top level would be a dead end in the other direction.
      */
     @Test
-    fun `TAB_NAV refuses BACK but stays navigable`() {
-        assertEquals(false, allowed(snap("TAB_NAV"), RemoteAction.BACK))
+    fun `TAB_NAV allows every remote action`() {
+        // BACK here dismisses the display, which is what a double tap at the top level is for.
+        assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.BACK))
         assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.SELECT))
         assertEquals(true, allowed(snap("TAB_NAV"), RemoteAction.SCROLL_STEP))
     }

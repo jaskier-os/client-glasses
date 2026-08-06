@@ -263,19 +263,20 @@ object RemoteActionGate {
     /**
      * States where BACK reaches a hazard.
      *
-     * `TAB_NAV` is the load-bearing one and the only one: BACK at the top level turns
-     * the screen OFF, which pauses the UI process, drops the sink, and strands the
-     * session with no way back from the remote device.
+     * Empty on purpose.
      *
-     * `MOUSE_FOCUSED` is deliberately NOT here. Its BACK only toggles HID tracking on
-     * the branch where tracking is ALREADY on -- and that branch is unreachable from a
-     * remote source, because `mouseTracking` is refused as REFUSED_BUSY above. With
-     * tracking off, BACK is an ordinary "return to TAB_NAV". Listing it here made the
-     * state a trap the moment BACK became producible: SELECT is refused (it toggles
-     * tracking) and BACK was refused too, so a user who entered the mouse tab from the
-     * watch could not leave it from the watch.
+     * `TAB_NAV` was listed because BACK at the top level turns the screen off, which
+     * pauses the UI process and drops the sink. That is not a hazard to defend against
+     * -- it is the wearer's normal way to dismiss the display, and refusing it from the
+     * watch removed a gesture they use. Waking is already handled: the next remote event
+     * lights the panel again and is consumed rather than acted on.
+     *
+     * `MOUSE_FOCUSED` was never here. Its BACK only toggles HID tracking on the branch
+     * where tracking is ALREADY on, and that branch is unreachable from a remote source
+     * because `mouseTracking` is refused as REFUSED_BUSY above. With tracking off, BACK
+     * is an ordinary "return to TAB_NAV". Listing it would have made the state a trap:
+     * SELECT is refused there too, so the tab could be entered from the watch and not
+     * left from it.
      */
-    private val BACK_REACHES_HAZARD = setOf(
-        "TAB_NAV",
-    )
+    private val BACK_REACHES_HAZARD = emptySet<String>()
 }
