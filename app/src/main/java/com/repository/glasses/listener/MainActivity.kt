@@ -57,7 +57,9 @@ import com.repository.glasses.listener.ui.Anim
 import com.repository.glasses.listener.ui.BitmapUtils
 import com.repository.glasses.listener.ui.ChatAdapter
 import com.repository.glasses.listener.ui.ScrollDrainer
+import com.repository.glasses.listener.bt.RcStateParser
 import com.repository.glasses.listener.ui.ChatListAdapter
+import com.repository.glasses.listener.ui.ChatRow
 import com.repository.glasses.listener.ui.ChatMessage
 import com.repository.glasses.listener.ui.ChatSummaryItem
 import com.repository.glasses.listener.ui.Lum
@@ -1816,6 +1818,23 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         override fun onReceive(context: Context, intent: Intent) {
             val json = intent.getStringExtra(ListenerService.EXTRA_CHAT_LIST) ?: return
             runOnUiThread { parseChatListAndDisplay(json) }
+        }
+    }
+
+    /**
+     * A full authoritative RC session snapshot. It replaces the pinned section wholesale: a session
+     * absent from the frame is removed. A frame that will not parse is ignored, keeping whatever is
+     * on screen -- there is no way to re-request one, and a blank list is worse than a stale one.
+     */
+    private val rcStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val json = intent.getStringExtra(ListenerService.EXTRA_RC_STATE_JSON) ?: return
+            val state = RcStateParser.parse(json)
+            if (state == null) {
+                activityLog("RC state push ignored: unparseable frame (${json.length} chars)")
+                return
+            }
+            runOnUiThread { chatListAdapter.submitRcState(state) }
         }
     }
 
@@ -3990,6 +4009,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             registerReceiver(navStepsReceiver, IntentFilter(ListenerService.ACTION_NAV_STEPS))
             registerReceiver(navStepIndexReceiver, IntentFilter(ListenerService.ACTION_NAV_STEP_INDEX))
             registerReceiver(chatListReceiver, IntentFilter(ListenerService.ACTION_CHAT_LIST))
+            registerReceiver(rcStateReceiver, IntentFilter(ListenerService.ACTION_RC_STATE))
             registerReceiver(chatHistoryReceiver, IntentFilter(ListenerService.ACTION_CHAT_HISTORY_LOADED))
             registerReceiver(debugStatusReceiver, IntentFilter(ListenerService.ACTION_DEBUG_STATUS))
             registerReceiver(btStateReceiver, IntentFilter(ListenerService.ACTION_BT_STATE))
@@ -6773,6 +6793,23 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         })
     }
 
+    /**
+     * Confirm on a pinned RC row.
+     *
+     * An ended session is shown but is NOT enterable: it says so and stays put, rather than opening
+     * a thread that can never advance. The thread screen itself is not built yet -- until it is,
+     * this deliberately does nothing further rather than half-opening something.
+     */
+    private fun openSelectedRcSession() {
+        val row = chatListAdapter.selectedRow() as? ChatRow.RcSession ?: return
+        if (!row.enterable) {
+            dbg("session ended")
+            uiLog("RC: refused to open ended session ${row.id}")
+            return
+        }
+        uiLog("RC: open session ${row.id} (thread view pending)")
+    }
+
     private fun updateChatEmptyHint() {
         val show = chatRecycler.visibility == View.VISIBLE && chatAdapter.itemCount == 0 && serviceState == "IDLE"
         chatEmptyHint.visibility = if (show) View.VISIBLE else View.GONE
@@ -8139,6 +8176,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                                     } else {
                                         openAssistant()
                                     }
+                                } else if (chatListAdapter.selectedRow() is ChatRow.RcSession) {
+                                    openSelectedRcSession()
                                 } else {
                                     openSelectedChat()
                                 }
@@ -9953,7 +9992,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             stateReceiver, chatReceiver, streamingReceiver, partialTextReceiver,
             userTextReceiver, responseMetaReceiver, toolStatusReceiver, sessionResetReceiver,
             cameraPreviewReceiver, teleprompterReceiver, mapBitmapReceiver, mapArrowReceiver,
-            mapMinimapReceiver, navStepsReceiver, navStepIndexReceiver, toolThumbnailReceiver, photoProgressReceiver, chatListReceiver, chatHistoryReceiver,
+            mapMinimapReceiver, navStepsReceiver, navStepIndexReceiver, toolThumbnailReceiver, photoProgressReceiver, chatListReceiver, rcStateReceiver, chatHistoryReceiver,
             debugStatusReceiver, btStateReceiver, orchestratorStateReceiver,
             weatherUpdateReceiver, loneIndicatorReceiver, recordingStateReceiver,
             translationResultReceiver, translationConfigReceiver,

@@ -170,6 +170,9 @@ dependencies {
 
     // Local JVM unit tests (src/test)
     testImplementation("junit:junit:4.13.2")
+    // A real org.json on the unit-test classpath. android.jar ships JSONObject as a stub that
+    // throws "Stub!", so without this any wire parser could only be tested on a device.
+    testImplementation("org.json:json:20231013")
 
     // Instrumented tests (androidTest)
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

@@ -311,6 +311,17 @@ class ListenerService : LifecycleService(),
         // Debug-only trigger to fire the Lone-mode alert SFX without a real foreign-device sighting.
         const val ACTION_DEBUG_LONE_ALERT = "com.repository.glasses.listener.DEBUG_LONE_ALERT"
 
+        // Remote-control mirror (service <-> UI). The service is a pure relay here: it holds no RC
+        // state of its own, because every push is a full snapshot that replaces what the UI shows.
+        const val ACTION_RC_STATE = "com.repository.glasses.listener.RC_STATE"
+        const val ACTION_RC_MESSAGES = "com.repository.glasses.listener.RC_MESSAGES"
+        const val ACTION_RC_SEND_RESULT = "com.repository.glasses.listener.RC_SEND_RESULT"
+        const val EXTRA_RC_STATE_JSON = "rc_state_json"
+        const val EXTRA_RC_SESSION_ID = "rc_session_id"
+        const val EXTRA_RC_MESSAGES_JSON = "rc_messages_json"
+        const val EXTRA_RC_CLIENT_MSG_ID = "rc_client_msg_id"
+        const val EXTRA_RC_STATUS = "rc_status"
+
         const val EXTRA_TG_CHAT_LIST_JSON = "tg_chat_list_json"
         const val EXTRA_TG_MESSAGES_JSON = "tg_messages_json"
         const val EXTRA_TG_NEW_MESSAGE_JSON = "tg_new_message_json"
@@ -8122,6 +8133,35 @@ class ListenerService : LifecycleService(),
         if (!connected && reidController?.isRunning == true) {
             stopReid("orchestrator_disconnected")
         }
+    }
+
+    override fun onRcStatePush(stateJson: String) {
+        btLog("RC state push: ${stateJson.length} chars")
+        sendBroadcast(Intent(ACTION_RC_STATE).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_RC_STATE_JSON, stateJson)
+        })
+    }
+
+    override fun onRcMessagesResponse(sessionId: String, json: String) {
+        btLog("RC messages response: session=$sessionId ${json.length} chars")
+        // The sessionId always rides along so the UI can drop a reply that raced a navigation
+        // instead of rendering one session's rows under another session's name.
+        sendBroadcast(Intent(ACTION_RC_MESSAGES).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_RC_SESSION_ID, sessionId)
+            putExtra(EXTRA_RC_MESSAGES_JSON, json)
+        })
+    }
+
+    override fun onRcSendResult(sessionId: String, clientMsgId: String, status: String) {
+        btLog("RC send result: session=$sessionId id=$clientMsgId status=$status")
+        sendBroadcast(Intent(ACTION_RC_SEND_RESULT).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_RC_SESSION_ID, sessionId)
+            putExtra(EXTRA_RC_CLIENT_MSG_ID, clientMsgId)
+            putExtra(EXTRA_RC_STATUS, status)
+        })
     }
 
     override fun onTimeSync(epochMillis: Long, tzId: String) {

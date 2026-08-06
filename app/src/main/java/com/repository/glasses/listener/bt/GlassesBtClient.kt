@@ -68,6 +68,18 @@ class GlassesBtClient(private val relay: MessageRelay) {
         fun onTimeSync(epochMillis: Long, tzId: String) {}
         fun onContactsHash(agMac: String, hash: String) {}
         fun onContactsList(agMac: String, hash: String, json: String) {}
+
+        /**
+         * Full authoritative RC session snapshot. Replaces the list wholesale -- a session absent
+         * from [stateJson] has been removed.
+         */
+        fun onRcStatePush(stateJson: String) {}
+
+        /** Thread rows for [sessionId]. Dropped by the UI unless that session is the open one. */
+        fun onRcMessagesResponse(sessionId: String, json: String) {}
+
+        /** Outcome of a dictated send. [status] is "sent" or "error:<msg>". */
+        fun onRcSendResult(sessionId: String, clientMsgId: String, status: String) {}
     }
 
     var listener: Listener? = null
@@ -321,6 +333,26 @@ class GlassesBtClient(private val relay: MessageRelay) {
                         remoteLog?.invoke("TG messages response: chatId=$chatId ${json.length} chars")
                         listener?.onTgMessagesResponse(chatId ?: "", json)
                     }
+                }
+                BtProtocol.CH_RC_STATE_PUSH -> {
+                    // One arg, never chunked: the phone caps the snapshot below MAX_CAPS_CHARS and
+                    // truncates the session list rather than splitting the frame.
+                    val json = args.getOrElse(0) { "" }
+                    remoteLog?.invoke("RC state push: ${json.length} chars")
+                    listener?.onRcStatePush(json)
+                }
+                BtProtocol.CH_RC_MESSAGES_RESP -> {
+                    val sessionId = args.getOrElse(0) { "" }
+                    val json = args.getOrElse(1) { "" }
+                    remoteLog?.invoke("RC messages response: session=$sessionId ${json.length} chars")
+                    listener?.onRcMessagesResponse(sessionId, json)
+                }
+                BtProtocol.CH_RC_SEND_RESP -> {
+                    val sessionId = args.getOrElse(0) { "" }
+                    val clientMsgId = args.getOrElse(1) { "" }
+                    val status = args.getOrElse(2) { "" }
+                    remoteLog?.invoke("RC send result: session=$sessionId id=$clientMsgId $status")
+                    listener?.onRcSendResult(sessionId, clientMsgId, status)
                 }
                 BtProtocol.CH_TG_SEND_RESP -> {
                     val json = args.getOrElse(0) { "{}" }
