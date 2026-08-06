@@ -424,6 +424,47 @@ of `deploy-to-glasses.sh`: it builds the APKs and runs the whole priv-app overla
 "Enable sideloading" toggle, the BT/WiFi-Direct forwarder, the desktop HTTP API) is documented in
 the **phone app CLAUDE.md ("Sideloading")**; this section covers the glasses-side internals.
 
+### Two transports: LAN, or the orchestrator (READ THIS BEFORE CONCLUDING THE GLASSES ARE UNREACHABLE)
+
+There are **two** ways in, and they differ only in how the desktop reaches the phone:
+
+| Script | Desktop -> phone | Needs |
+|---|---|---|
+| `deploy-to-glasses-via-phone.sh` | direct HTTP to the phone's LAN server `:8771` | phone on the same LAN, no firewall/VPN in the way |
+| **`deploy-to-glasses-via-orchestrator.sh`** | **orchestrator WebSocket** | **nothing local -- works from anywhere** |
+
+**The orchestrator route needs no cable and no LAN.** The phone holds a persistent WS to the
+orchestrator (`/ws/device`, device id `phone-01`), so as long as the phone is online at all, the
+glasses are reachable. Do NOT conclude the devices are unreachable because `adb devices` is empty
+and the LAN scan finds nothing -- that combination is normal and the orchestrator route still works.
+
+```bash
+ORCH_URL=https://65.108.225.44:10001 ORCH_API_KEY=<key> \
+  bash scripts/deploy-to-glasses-via-orchestrator.sh
+```
+
+Wire protocol (orchestrator `src/index.js:1246`, `pendingSideloadCommands`):
+
+```
+desktop --{type:"sideload_command", requestId, commandType, payload}--> orchestrator
+orchestrator --device_command--> phone (WS)
+phone --BT + WiFi-Direct--> glasses filesync :8849 --appsud--> root
+glasses --> phone --> orchestrator --{type:"sideload_response", requestId, data}--> desktop
+```
+
+`commandType` mirrors the LAN HTTP routes: `sideload_open`, `sideload_upload` (large files are
+staged first via `POST /api/v1/sideload/stage`, then fetched by the phone from
+`/api/v1/sideload/staged/<id>`), **`sideload_exec`** (root exec with incremental output streaming,
+the same `gl_exec` semantics as the LAN path), `sideload_close`, `sideload_cleanup`.
+
+So **arbitrary root commands on the glasses are available with no cable**: `sideload_exec` runs
+through appsud as root, which covers reading `/sdcard/Download/glasses-client.log`, `logcat`,
+`dumpsys`, sysfs -- anything adb would have given you.
+
+Prerequisites, both toggled on the phone: **ADB debugging** and **Enable sideloading**
+(`GlassesSettingsFragment`, key `enable_sideloading`). The toggle is what makes the glasses
+filesync accept `/sideload/*` at all, and it also starts the phone's LAN server.
+
 ### Glasses-side architecture
 
 The **filesync APK** is the glasses end. When the listener app receives `enable_sideloading=true`
