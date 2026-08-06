@@ -374,6 +374,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private lateinit var rcThreadFooterHint: TextView
     private lateinit var rcThreadVoiceBar: LinearLayout
     private lateinit var rcThreadVoiceText: TextView
+    private lateinit var rcThreadVoiceMeter: LinearLayout
+    /** The level meter shown while capturing. The same view the Telegram voice path uses. */
+    private var rcVoiceVisualizer: com.repository.glasses.listener.ui.AudioVisualizerView? = null
+    private var rcVoiceLevelsReceiver: BroadcastReceiver? = null
     private lateinit var rcThreadCountdownTrack: View
     private lateinit var rcThreadCountdownFill: View
     private lateinit var rcThreadCountdownRow: LinearLayout
@@ -1976,6 +1980,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 // so this is the only place a prompt arriving mid-dictation can be noticed.
                 rcAbortVoiceIfNoLongerAllowed()
                 renderRcThreadRows()
+                // Sending the request IS the read acknowledgement -- there is no separate channel
+                // for it -- so rendering rows owes one carrying the new seenSeq, or the unread bar
+                // stays lit behind a thread the user is reading.
+                //
+                // This does not ping-pong. The phone replies with the same tail, whose rows are
+                // all <= the highest held, so accept() above returns false and the chain stops
+                // after exactly one extra round trip.
                 rcOpenSession?.let { requestRcMessages(it.id) }
             }
         }
@@ -3775,6 +3786,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             rcThreadFooterHint = findViewById(R.id.rcThreadFooterHint)
             rcThreadVoiceBar = findViewById(R.id.rcThreadVoiceBar)
             rcThreadVoiceText = findViewById(R.id.rcThreadVoiceText)
+            rcThreadVoiceMeter = findViewById(R.id.rcThreadVoiceMeter)
             rcThreadCountdownTrack = findViewById(R.id.rcThreadCountdownTrack)
             rcThreadCountdownFill = findViewById(R.id.rcThreadCountdownFill)
             rcThreadCountdownRow = findViewById(R.id.rcThreadCountdownRow)
@@ -7139,7 +7151,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         }
         rcCapture.start()
         rcThreadVoiceText.text = ""
+        // GLOW while speaking, per the sketch; the send window re-tints it as the user's bubble.
+        rcThreadVoiceText.setTextColor(Lum.GLOW)
+        rcThreadVoiceText.gravity = android.view.Gravity.START
+        rcThreadVoiceText.background = null
+        rcThreadVoiceText.setPadding(0, 0, 0, 0)
         rcThreadVoiceBar.visibility = View.VISIBLE
+        rcShowVoiceMeter(true)
         rcShowCountdown(false)
         renderRcThreadChrome()
         // The existing dictation pipeline, unchanged: glasses mic -> phone STT -> final user text.
@@ -7179,8 +7197,9 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     /** Stops a capture without sending. Safe to call when none is running. */
     private fun rcCancelCapture() {
         rcClearCaptureWatchdog()
-        // The token is spent even if no capture was running locally, so a transcript still in
-        // flight on the phone can never be adopted after this point.
+        rcShowVoiceMeter(false)
+        // The abandoned utterance is remembered even if no capture was running locally, so a
+        // transcript still in flight on the phone can never be adopted after this point.
         if (!rcCapture.cancel()) return
         sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_STOP).apply { setPackage(packageName) })
         rcThreadVoiceBar.visibility = View.GONE
@@ -7193,6 +7212,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      */
     private fun rcOnFinalTranscript(text: String) {
         rcClearCaptureWatchdog()
+        rcShowVoiceMeter(false)
         sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_STOP).apply { setPackage(packageName) })
         if (!rcSendWindow.arm(text)) {
             uiLog("RC: blank transcript, nothing to send")
@@ -7200,12 +7220,55 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             renderRcThreadChrome()
             return
         }
+        // The pending text is what the user is about to say, so it wears the same right-aligned
+        // trace-filled bubble their sent messages wear in the thread above.
         rcThreadVoiceText.text = rcSendWindow.text
         rcThreadVoiceText.setTextColor(Lum.BRIGHT)
+        rcThreadVoiceText.gravity = android.view.Gravity.END
+        val pad = (10 * resources.displayMetrics.density).toInt()
+        val padV = (7 * resources.displayMetrics.density).toInt()
+        rcThreadVoiceText.background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(Lum.TRACE)
+            cornerRadius = 12 * resources.displayMetrics.density
+        }
+        rcThreadVoiceText.setPadding(pad, padV, pad, padV)
         rcThreadVoiceBar.visibility = View.VISIBLE
         rcShowCountdown(true)
         rcStartSendCountdown()
         renderRcThreadChrome()
+    }
+
+    /**
+     * The capture level meter. Reuses [AudioVisualizerView] and the ACTION_AUDIO_LEVELS broadcast
+     * the Telegram voice path already drives, so there is one meter implementation, not two.
+     */
+    private fun rcShowVoiceMeter(show: Boolean) {
+        rcVoiceLevelsReceiver?.let {
+            try { unregisterReceiver(it) } catch (_: Exception) {}
+            rcVoiceLevelsReceiver = null
+        }
+        rcVoiceVisualizer?.let {
+            (it.parent as? android.view.ViewGroup)?.removeView(it)
+            rcVoiceVisualizer = null
+        }
+        rcThreadVoiceMeter.visibility = if (show) View.VISIBLE else View.GONE
+        if (!show) return
+
+        val vis = com.repository.glasses.listener.ui.AudioVisualizerView(this)
+        val dp = resources.displayMetrics.density
+        rcThreadVoiceMeter.addView(vis, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, (14 * dp).toInt()
+        ))
+        rcVoiceVisualizer = vis
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                val levels = intent.getFloatArrayExtra(ListenerService.EXTRA_AUDIO_LEVELS) ?: return
+                val bands = intent.getIntExtra(ListenerService.EXTRA_AUDIO_LEVELS_BANDS, levels.size)
+                runOnUiThread { rcVoiceVisualizer?.pushEnvelope(levels, bands) }
+            }
+        }
+        registerReceiver(receiver, IntentFilter(ListenerService.ACTION_AUDIO_LEVELS))
+        rcVoiceLevelsReceiver = receiver
     }
 
     private fun rcShowCountdown(show: Boolean) {
@@ -7252,6 +7315,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         rcClearSendCallbacks()
         rcSendWindow.cancel()
         rcShowCountdown(false)
+        rcShowVoiceMeter(false)
         rcThreadVoiceBar.visibility = View.GONE
     }
 

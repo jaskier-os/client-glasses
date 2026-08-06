@@ -323,21 +323,61 @@
                         android:focusable="false"
                         android:defaultFocusHighlightEnabled="false">
 
-                        <TextView
-                            android:id="@+id/rcThreadVoiceText"
+                        <!-- Wrapper so the send-window text can right-align as a user bubble while
+                             the capture transcript stays full-width. -->
+                        <FrameLayout
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:textColor="#00FF00"
-                            android:textSize="14sp"
-                            android:fontFamily="monospace"
                             android:background="#000000"
-                            android:maxLines="3"
-                            android:ellipsize="end"
                             android:focusable="false"
-                            android:defaultFocusHighlightEnabled="false" />
+                            android:defaultFocusHighlightEnabled="false">
 
-                        <!-- Draining countdown bar, only during the send window. -->
-                        <View
+                            <TextView
+                                android:id="@+id/rcThreadVoiceText"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:textColor="#00FF00"
+                                android:textSize="14sp"
+                                android:fontFamily="monospace"
+                                android:background="#000000"
+                                android:maxLines="3"
+                                android:ellipsize="end"
+                                android:focusable="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </FrameLayout>
+
+                        <!-- Mic glyph + level meter, shown only while capturing. -->
+                        <LinearLayout
+                            android:id="@+id/rcThreadVoiceMeter"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="bottom"
+                            android:background="#000000"
+                            android:paddingTop="8dp"
+                            android:visibility="gone"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="[mic]"
+                                android:textColor="#00FF00"
+                                android:textSize="12sp"
+                                android:fontFamily="monospace"
+                                android:background="#000000"
+                                android:paddingEnd="5dp"
+                                android:paddingStart="0dp"
+                                android:focusable="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </LinearLayout>
+
+                        <!-- Draining countdown bar: the fill sits INSIDE the track, so the two are
+                             one 2dp line whose lit portion shrinks - not two stacked lines. -->
+                        <FrameLayout
                             android:id="@+id/rcThreadCountdownTrack"
                             android:layout_width="match_parent"
                             android:layout_height="2dp"
@@ -345,16 +385,17 @@
                             android:background="#004400"
                             android:visibility="gone"
                             android:focusable="false"
-                            android:defaultFocusHighlightEnabled="false" />
+                            android:defaultFocusHighlightEnabled="false">
 
-                        <View
-                            android:id="@+id/rcThreadCountdownFill"
-                            android:layout_width="match_parent"
-                            android:layout_height="2dp"
-                            android:background="#00FF00"
-                            android:visibility="gone"
-                            android:focusable="false"
-                            android:defaultFocusHighlightEnabled="false" />
+                            <View
+                                android:id="@+id/rcThreadCountdownFill"
+                                android:layout_width="match_parent"
+                                android:layout_height="2dp"
+                                android:background="#00FF00"
+                                android:focusable="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </FrameLayout>
 
                         <LinearLayout
                             android:id="@+id/rcThreadCountdownRow"
