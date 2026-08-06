@@ -4,7 +4,6 @@ import android.util.Log
 import com.repository.glasses.tracing.GT
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "App:BtClient"
 
@@ -73,8 +72,8 @@ class GlassesBtClient(private val relay: MessageRelay) {
 
     var listener: Listener? = null
 
-    /** Chunk reassembly buffers keyed by channel name (thread-safe for BT callbacks) */
-    private val chunkBuffers = ConcurrentHashMap<String, StringBuilder>()
+    /** Chunk reassembly, bounded by age and by concurrent-stream count. */
+    private val chunkAssembler = ChunkAssembler()
 
     @Volatile
     var isConnected = false
@@ -95,17 +94,8 @@ class GlassesBtClient(private val relay: MessageRelay) {
         prefixIndex: Int = -1,
         onComplete: (prefix: String?, json: String) -> Unit
     ) {
-        val prefix = if (prefixIndex >= 0) args.getOrElse(prefixIndex) { "" } else null
-        val chunkIdx = if (prefixIndex >= 0) prefixIndex + 1 else 0
-        val chunk = args.getOrElse(chunkIdx) { "" }
-        val isFinal = args.getOrElse(chunkIdx + 1) { "" } == "1"
-        val buffer = chunkBuffers.getOrPut(channel) { StringBuilder() }
-        buffer.append(chunk)
-        if (isFinal) {
-            val complete = buffer.toString()
-            chunkBuffers.remove(channel)
-            onComplete(prefix, complete)
-        }
+        val done = chunkAssembler.accept(channel, args, prefixIndex) ?: return
+        onComplete(done.prefix, done.json)
     }
 
     private fun dispatch(channel: String, args: List<String>) {
@@ -366,16 +356,11 @@ class GlassesBtClient(private val relay: MessageRelay) {
                         "LIST" -> {
                             // Wire: ["LIST", agMac, hash, jsonChunk, isFinal("0"/"1")]
                             val agMac = args.getOrElse(1) { "" }
-                            val hash = args.getOrElse(2) { "" }
-                            val chunk = args.getOrElse(3) { "" }
-                            val isFinal = args.getOrElse(4) { "" } == "1"
-                            val buffer = chunkBuffers.getOrPut(BtProtocol.CH_CONTACTS) { StringBuilder() }
-                            buffer.append(chunk)
-                            if (isFinal) {
-                                val complete = buffer.toString()
-                                chunkBuffers.remove(BtProtocol.CH_CONTACTS)
-                                remoteLog?.invoke("Contacts LIST complete: ${complete.length} chars")
-                                listener?.onContactsList(agMac, hash, complete)
+                            // The hash sits where a prefix would, so the assembler carries it.
+                            val done = chunkAssembler.accept(BtProtocol.CH_CONTACTS, args, prefixIndex = 2)
+                            if (done != null) {
+                                remoteLog?.invoke("Contacts LIST complete: ${done.json.length} chars")
+                                listener?.onContactsList(agMac, done.prefix ?: "", done.json)
                             }
                         }
                         else -> remoteLog?.invoke("Contacts: unknown op '$op'")
@@ -407,7 +392,7 @@ class GlassesBtClient(private val relay: MessageRelay) {
                 override fun onDisconnected() {
                     remoteLog?.invoke("BT disconnected (MessageRelay)")
                     isConnected = false
-                    chunkBuffers.clear()
+                    chunkAssembler.clear()
                     listener?.onDisconnected()
                 }
 
@@ -688,7 +673,7 @@ class GlassesBtClient(private val relay: MessageRelay) {
 
     fun release() {
         isConnected = false
-        chunkBuffers.clear()
+        chunkAssembler.clear()
         relay.listener = null
         relay.stop()
     }
