@@ -325,6 +325,79 @@ class ChunkAssemblerTest {
     }
 
     @Test
+    fun aMultiChunkFrameWhoseTrailingArgsLackTheSentinelIsReadAsLegacy() {
+        // Discriminating: on the legacy path these two frames concatenate and the prefix comes
+        // from the FINAL chunk. On the new path they would be an orphan (seq "7" first). If the
+        // sentinel condition were dropped from the detector, this assertion fails.
+        val a = asm()
+        assertEquals(
+            ChunkAssembler.Outcome.None,
+            outcome(a, "ch.h", listOf("p1", "aaa", "0", "cs#ch.h#1", "7"), prefixIndex = 0)
+        )
+        assertEquals(
+            ChunkAssembler.Outcome.Completed("p2", "aaabbb"),
+            outcome(a, "ch.h", listOf("p2", "bbb", "1", "cs#ch.h#1", "8"), prefixIndex = 0)
+        )
+    }
+
+    @Test
+    fun aFrameWithOneArgTooManyIsReadAsLegacyEvenWithASentinelAndDigitSeq() {
+        // Discriminating on ARITY. The extra arg is itself a sentinel/digit pair, so a detector
+        // that only inspected the LAST TWO args (dropping the exact-arity condition) would read
+        // this as new-format seq 7 -> an orphan. The exact-arity rule forces the legacy path,
+        // where args[0..1] are the chunk and isFinal and the frames concatenate.
+        val a = asm()
+        assertEquals(
+            ChunkAssembler.Outcome.None,
+            outcome(a, "ch.a", listOf("aaa", "0", "ignored", "${S}ch.a#1", "7"))
+        )
+        assertEquals(
+            ChunkAssembler.Outcome.Completed(null, "aaabbb"),
+            outcome(a, "ch.a", listOf("bbb", "1", "ignored", "${S}ch.a#1", "8"))
+        )
+    }
+
+    @Test
+    fun aNewFormatStreamDoesNotInheritATornLegacyBufferOnTheSameChannel() {
+        // Discriminating for the D-F6 purge: after the purge the torn legacy text is gone, so a
+        // LATER legacy stream on that channel starts clean instead of carrying "TORN".
+        val a = asm()
+        outcome(a, "ch.a", listOf("TORN", "0"))
+        outcome(a, "ch.a", listOf("aaa", "0", "${S}ch.a#1", "0"))
+        assertEquals(
+            ChunkAssembler.Outcome.Completed(null, "later"),
+            outcome(a, "ch.a", listOf("later", "1"))
+        )
+    }
+
+    @Test
+    fun aReusedStreamIdStartingAtSeqZeroIsAcceptedNotSwallowed() {
+        // The phone can restart and mint the same id again; a tombstone must not deafen it.
+        val a = asm()
+        outcome(a, "ch.a", listOf("aaa", "0", "${S}ch.a#1", "0"))
+        outcome(a, "ch.a", listOf("ccc", "0", "${S}ch.a#1", "2")) // gap -> dropped + tombstoned
+        assertEquals(
+            ChunkAssembler.Outcome.Completed(null, "fresh"),
+            outcome(a, "ch.a", listOf("fresh", "1", "${S}ch.a#1", "0"))
+        )
+    }
+
+    @Test
+    fun everyEvictedStreamIsReportedNotJustTheLastOne() {
+        var now = 0L
+        val a = asm { now }
+        outcome(a, "ch.a", listOf("a", "0", "${S}ch.a#1", "0"))
+        outcome(a, "ch.b", listOf("b", "0", "${S}ch.b#1", "0"))
+        now = 61_000L
+        // One sweep expires both; neither failure may be lost.
+        val first = outcome(a, "ch.c", listOf("c", "0", "${S}ch.c#1", "0"))
+        val reported = mutableListOf<String>()
+        if (first is ChunkAssembler.Outcome.Failed) reported.add(first.channel)
+        reported.addAll(a.drainFailures().map { it.channel })
+        assertEquals(listOf("ch.a", "ch.b"), reported)
+    }
+
+    @Test
     fun clearDropsNewFormatStreamsToo() {
         val a = asm()
         outcome(a, "ch.a", listOf("aaa", "0", "${S}ch.a#1", "0"))

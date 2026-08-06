@@ -47,6 +47,9 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
      */
     private val dropped = LinkedHashMap<String, Long>()
 
+    /** Failures raised by evictions, waiting to be reported to their channels. */
+    private val pending = ArrayList<Outcome.Failed>()
+
     /**
      * @param prefixIndex index of the prefix arg, or -1 when the channel carries no prefix.
      * @return [Outcome.Completed] when this chunk finished a payload, [Outcome.Failed] when a
@@ -55,15 +58,32 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
     @Synchronized
     fun acceptFrame(channel: String, args: List<String>, prefixIndex: Int): Outcome {
         val now = nowMs()
-        val swept = sweep(now)
+        sweep(now)
 
         val chunkIdx = if (prefixIndex >= 0) prefixIndex + 1 else 0
         val outcome =
             if (isNewFormat(args, chunkIdx)) acceptNew(channel, args, chunkIdx, prefixIndex, now)
             else acceptLegacy(channel, args, chunkIdx, prefixIndex, now)
 
-        // A sweep failure must not be lost behind a None, but a real result for THIS frame wins.
-        return if (outcome is Outcome.None && swept != null) swept else outcome
+        // A sweep or overflow failure for ANOTHER stream must not be lost behind this frame's own
+        // result, so it is queued rather than returned. The caller drains it.
+        if (outcome is Outcome.Failed) return outcome
+        return drainOne() ?: outcome
+    }
+
+    /** @return every failure raised by evictions since the last drain, oldest first. */
+    @Synchronized
+    fun drainFailures(): List<Outcome.Failed> {
+        val out = pending.toList()
+        pending.clear()
+        return out
+    }
+
+    private fun drainOne(): Outcome? = if (pending.isEmpty()) null else pending.removeAt(0)
+
+    private fun raise(channel: String, reason: String) {
+        pending.add(Outcome.Failed(channel, reason))
+        while (pending.size > MAX_PENDING) pending.removeAt(0)
     }
 
     /**
@@ -91,8 +111,13 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
         val prefix = if (prefixIndex >= 0) args.getOrElse(prefixIndex) { "" } else null
 
         if (dropped.containsKey(streamId)) {
-            if (isFinal) dropped.remove(streamId) else dropped[streamId] = now
-            return Outcome.None
+            // seq 0 is a genuinely new stream (the phone reused the id after a restart), so it
+            // reclaims the key instead of being swallowed for the rest of the tombstone's life.
+            if (seq == 0) dropped.remove(streamId)
+            else {
+                if (isFinal) dropped.remove(streamId) else dropped[streamId] = now
+                return Outcome.None
+            }
         }
 
         val partial = streams[streamId] ?: run {
@@ -123,7 +148,7 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
             if (!isFinal) markDropped(streamId, now)
             return Outcome.Failed(channel, REASON_TOO_LARGE)
         }
-        evictOverflow(streams, keep = streamId, now = now)?.let { return it }
+        evictOverflow(streams, keep = streamId, now = now)
 
         if (!isFinal) return Outcome.None
         streams.remove(streamId)
@@ -157,7 +182,7 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
             if (!isFinal) markDropped(channel, now)
             return Outcome.Failed(channel, REASON_TOO_LARGE)
         }
-        evictOverflow(legacy, keep = channel, now = now)?.let { return it }
+        evictOverflow(legacy, keep = channel, now = now)
 
         if (!isFinal) return Outcome.None
         legacy.remove(channel)
@@ -172,34 +197,30 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
         dropped.clear()
     }
 
-    /** Drops streams silent for STALE_MS. @return one failure to report, if anything was dropped. */
-    private fun sweep(now: Long): Outcome? {
+    /** Drops streams silent for STALE_MS. Every drop is queued as a failure, none are lost. */
+    private fun sweep(now: Long) {
         val cutoff = now - STALE_MS
-        var failure: Outcome? = null
         listOf(streams, legacy).forEach { map ->
-            map.entries.filter { it.value.touchedAt <= cutoff }.forEach { (key, partial) ->
+            map.entries.filter { it.value.touchedAt <= cutoff }.toList().forEach { (key, partial) ->
                 map.remove(key)
                 markDropped(key, now)
-                failure = Outcome.Failed(partial.channel, REASON_STALE)
+                raise(partial.channel, REASON_STALE)
             }
         }
         // Tombstones expire on the same clock, so a key is never deaf forever.
         dropped.entries.filter { it.value <= cutoff }.map { it.key }.forEach { dropped.remove(it) }
-        return failure
     }
 
     /** Drops least-recently-touched streams until at most MAX_STREAMS remain. */
-    private fun evictOverflow(map: LinkedHashMap<String, Partial>, keep: String, now: Long): Outcome? {
-        var failure: Outcome? = null
+    private fun evictOverflow(map: LinkedHashMap<String, Partial>, keep: String, now: Long) {
         while (map.size > MAX_STREAMS) {
             val oldest = map.entries
                 .filter { it.key != keep }
-                .minByOrNull { it.value.touchedAt } ?: return failure
+                .minByOrNull { it.value.touchedAt } ?: return
             map.remove(oldest.key)
             markDropped(oldest.key, now)
-            failure = Outcome.Failed(oldest.value.channel, REASON_OVERFLOW)
+            raise(oldest.value.channel, REASON_OVERFLOW)
         }
-        return failure
     }
 
     private fun markDropped(key: String, now: Long) {
@@ -217,6 +238,7 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
         const val STALE_MS = 60_000L
         const val MAX_STREAMS = 16
         const val MAX_DROPPED = 64
+        const val MAX_PENDING = 32
 
         /** Ceiling on one stream's payload, so a peer that never sends a final chunk cannot grow
          *  a StringBuilder without limit. */

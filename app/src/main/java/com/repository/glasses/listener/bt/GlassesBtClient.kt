@@ -103,13 +103,19 @@ class GlassesBtClient(private val relay: MessageRelay) {
             is ChunkAssembler.Outcome.Failed -> {
                 remoteLog?.invoke("Chunk stream dropped on ${outcome.channel}: ${outcome.reason}")
                 // A sweep can report another channel's stream; only this channel's handler may be
-                // resolved from here, or the wrong screen would be told its request finished.
+                // resolved from here, or the wrong screen would be told its request finished. A
+                // failure for a different channel is still logged, so it is never silent.
                 if (outcome.channel == channel) {
                     val prefix = if (prefixIndex >= 0) args.getOrElse(prefixIndex) { "" } else null
                     onComplete(prefix, "")
                 }
             }
             ChunkAssembler.Outcome.None -> Unit
+        }
+        // Evictions can strand a failure on a channel that is no longer receiving frames; log them
+        // so a dropped stream is never invisible in the field.
+        chunkAssembler.drainFailures().forEach {
+            remoteLog?.invoke("Chunk stream dropped on ${it.channel}: ${it.reason}")
         }
     }
 
@@ -373,8 +379,15 @@ class GlassesBtClient(private val relay: MessageRelay) {
                             val agMac = args.getOrElse(1) { "" }
                             // The hash sits where a prefix would, so the assembler carries it.
                             handleChunkedJson(BtProtocol.CH_CONTACTS, args, prefixIndex = 2) { hash, json ->
-                                remoteLog?.invoke("Contacts LIST complete: ${json.length} chars")
-                                listener?.onContactsList(agMac, hash ?: "", json)
+                                if (json.isEmpty()) {
+                                    // A dropped stream must not overwrite the cache with nothing:
+                                    // that would erase caller-ID and store a hash matching the
+                                    // phone's, so no re-sync would ever be triggered.
+                                    remoteLog?.invoke("Contacts LIST dropped, keeping the cache")
+                                } else {
+                                    remoteLog?.invoke("Contacts LIST complete: ${json.length} chars")
+                                    listener?.onContactsList(agMac, hash ?: "", json)
+                                }
                             }
                         }
                         else -> remoteLog?.invoke("Contacts: unknown op '$op'")
