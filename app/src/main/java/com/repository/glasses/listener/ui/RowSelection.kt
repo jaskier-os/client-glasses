@@ -70,25 +70,37 @@ class RowSelection {
         return true
     }
 
-    fun selectIndex(pos: Int): Boolean = select(rows.getOrNull(pos)?.key)
-
-    fun moveDown() {
-        var i = index + 1
-        while (i <= rows.lastIndex) {
-            if (rows[i].selectable) { select(rows[i].key); return }
-            i++
-        }
+    /**
+     * An index off either end is a caller bug, never an instruction to clear the caret. Routing it
+     * through select(null) would report SUCCESS while dropping the caret, so the caller would
+     * repaint nothing and the user would watch their caret disappear.
+     */
+    fun selectIndex(pos: Int): Boolean {
+        val key = rows.getOrNull(pos)?.key ?: return false
+        return select(key)
     }
 
-    fun moveUp() {
+    /** @return false when there is no selectable row below, so the caret did not move. */
+    fun moveDown(): Boolean {
+        var i = index + 1
+        while (i <= rows.lastIndex) {
+            if (rows[i].selectable) return select(rows[i].key)
+            i++
+        }
+        return false
+    }
+
+    /** @return false when there is no selectable row above, so the caret did not move. */
+    fun moveUp(): Boolean {
         val from = index
         // With no caret, an up-press claims the first row rather than silently swallowing the key.
-        if (from < 0) { moveDown(); return }
+        if (from < 0) return moveDown()
         var i = from - 1
         while (i >= 0) {
-            if (rows[i].selectable) { select(rows[i].key); return }
+            if (rows[i].selectable) return select(rows[i].key)
             i--
         }
+        return false
     }
 
     fun selectedRow(): ChatRow? = rows.getOrNull(index)

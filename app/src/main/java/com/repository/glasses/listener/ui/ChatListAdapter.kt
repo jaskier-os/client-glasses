@@ -727,21 +727,33 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         override fun getChangePayload(oldPos: Int, newPos: Int): Any = PAYLOAD_CONTENT
     }
 
-    fun selectPosition(pos: Int) = selectKey(rows.getOrNull(pos)?.key)
+    /**
+     * @return false when the caret did NOT move there -- the position is out of range, or its row
+     *         is not selectable. Callers that assume a caret exists afterwards must check this.
+     */
+    fun selectPosition(pos: Int): Boolean = repaintCaretAround { selection.selectIndex(pos) }
 
-    fun selectKey(key: String?) = repaintCaretAround { selection.select(key) }
+    /** @return false when [key] is absent from the list or its row is not selectable. */
+    fun selectKey(key: String?): Boolean = repaintCaretAround { selection.select(key) }
 
-    fun moveSelectionDown() = repaintCaretAround { selection.moveDown() }
+    /** @return false when the caret was already on the last selectable row. */
+    fun moveSelectionDown(): Boolean = repaintCaretAround { selection.moveDown() }
 
-    fun moveSelectionUp() = repaintCaretAround { selection.moveUp() }
+    /** @return false when the caret was already on the first selectable row. */
+    fun moveSelectionUp(): Boolean = repaintCaretAround { selection.moveUp() }
 
-    /** Runs a caret move and rebinds only the two rows whose border can have changed. */
-    private fun repaintCaretAround(move: () -> Unit) {
+    /**
+     * Runs a caret move and rebinds only the two rows whose border can have changed.
+     *
+     * @return whatever [move] reported, so a refusal reaches the caller rather than being
+     *         swallowed by the repaint bookkeeping.
+     */
+    private fun repaintCaretAround(move: () -> Boolean): Boolean {
         val old = selectedPosition
-        move()
+        val moved = move()
         // The move itself is pure state; only the repaint has to wait for a quiet RecyclerView.
-        if (runWhenIdle { repaintCaretFrom(old) }) return
-        repaintCaretFrom(old)
+        if (!runWhenIdle { repaintCaretFrom(old) }) repaintCaretFrom(old)
+        return moved
     }
 
     private fun repaintCaretFrom(old: Int) {

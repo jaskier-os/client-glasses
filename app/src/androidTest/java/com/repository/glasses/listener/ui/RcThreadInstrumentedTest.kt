@@ -456,10 +456,14 @@ class RcThreadInstrumentedTest {
 
     /** Puts the caret on the RC row and confirms it, using the real key path. */
     private fun openTheRcSession() {
-        onUi {
+        // Assert the caret actually landed. A refused selectKey would leave the caret elsewhere and
+        // the DPAD_CENTER below would confirm a DIFFERENT row -- possibly the one that starts the
+        // microphone -- while the failure surfaced as a confusing later assertion.
+        val landed = onUi {
             listAdapter.setFocused(true)
             listAdapter.selectKey("rc:$SESSION")
         }
+        assertTrue("the caret must reach rc:$SESSION before it can be confirmed", landed)
         device.waitForIdle()
         // The confirm runs after the double-tap window, exactly as a real single tap does.
         key(KeyEvent.KEYCODE_DPAD_CENTER)

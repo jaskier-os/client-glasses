@@ -126,7 +126,9 @@ class RcMirrorListInstrumentedTest {
 
     /** The view currently rendering [key], or null when it is not laid out. */
     private fun viewFor(key: String): View? = onUi {
-        val idx = rows().indexOfFirst { it.key == key }
+        // Read the adapter directly rather than calling rows(): rows() hops to the main thread
+        // via onUi, and a nested runOnMainSync from the main thread throws.
+        val idx = activity.adapter.currentRows.indexOfFirst { it.key == key }
         if (idx < 0) null else activity.recycler.findViewHolderForAdapterPosition(idx)?.itemView
     }
 
@@ -266,8 +268,13 @@ class RcMirrorListInstrumentedTest {
         assertFalse("an ended session may not show an unread bar", ended.unread)
         assertEquals(View.GONE, spinnerOf("rc:s-live")?.visibility ?: View.GONE)
         assertEquals(View.GONE, unreadBarOf("rc:s-live")?.visibility ?: View.GONE)
+        // An ended row is still SELECTABLE -- it is only non-enterable -- so a refusal here would
+        // mean the caret never reached it and the assertion below would pass for the wrong reason.
+        val endedSelected = onUi { activity.adapter.selectKey("rc:s-live") }
+        assertTrue("the caret must reach the ended row for this assertion to mean anything",
+            endedSelected)
         assertNull("confirming an ended session must open nothing",
-            onUi { activity.adapter.selectKey("rc:s-live"); activity.adapter.getSelectedRcSession() })
+            onUi { activity.adapter.getSelectedRcSession() })
 
         // 9. Absence from the next snapshot IS the removal instruction.
         pushRcState(snapshot(true, session("s-idle", "mirror runbook - branch protection")))
@@ -277,12 +284,19 @@ class RcMirrorListInstrumentedTest {
             listOf("s-idle"), rcRows().map { it.id })
 
         // 10. An empty snapshot removes the whole pinned block, group marker included.
+        // Re-push the conversations first: on a live device the phone's own chat-list reply can
+        // land mid-test and replace them, which would fail the comparison below for a reason that
+        // has nothing to do with RC rows being removed.
+        pushChatList("c1", "c2")
+        SystemClock.sleep(600)
+        val expectedAfter = keys().filterNot { it.startsWith("rc:") || it == "hdr:rc" }
+
         pushRcState(snapshot(true))
         SystemClock.sleep(HOLD_MS)
         shoot("8_rc_gone")
         assertTrue(rcRows().isEmpty())
         assertFalse("the group marker goes with the last RC row", keys().contains("hdr:rc"))
-        assertEquals("the conversations are exactly as they were", baselineKeys, keys())
+        assertEquals("the conversations are exactly as they were", expectedAfter, keys())
 
         Log.i(tag, "rcMirrorListFlow: done -> ${artifactDir().absolutePath}")
     }
@@ -296,17 +310,28 @@ class RcMirrorListInstrumentedTest {
         pushRcState(snapshot(true))
         SystemClock.sleep(600)
 
-        onUi {
+        // Re-assert the conversations: this test runs on a live device, where a real chat-list
+        // reply from the phone (MainActivity re-requests it on BT connect and on tab entry) can
+        // land during the earlier holds and evict conv:c1/c2. Without this the caret has no row
+        // to sit on and legitimately falls back to the first fallback-safe row, which is a header.
+        pushChatList("c1", "c2")
+        SystemClock.sleep(600)
+        assertTrue("conv:c2 must exist before it can be selected, rows=${keys()}",
+            keys().contains("conv:c2"))
+
+        // Act and read back immediately: holding before the assert only widens the window for
+        // another chat-list push to race in.
+        val keyBefore = onUi {
             activity.adapter.setFocused(true)
             activity.adapter.selectKey("conv:c2")
+            activity.adapter.selectedKey
         }
+        val indexBefore = onUi { activity.adapter.selectedPosition }
+        assertEquals("conv:c2", keyBefore)
+
         device.waitForIdle()
         SystemClock.sleep(HOLD_MS)
         shoot("9a_caret_before_insert")
-
-        val keyBefore = onUi { activity.adapter.selectedKey }
-        val indexBefore = onUi { activity.adapter.selectedPosition }
-        assertEquals("conv:c2", keyBefore)
 
         // Four sessions arrive at once, above the caret.
         pushRcState(
@@ -318,6 +343,13 @@ class RcMirrorListInstrumentedTest {
                 session("i4", "async insert four"),
             )
         )
+        // The push is an async broadcast: wait for it to actually reach the adapter and be
+        // deferred, otherwise the focus toggle below releases an empty gate and the insert only
+        // lands later, while still focused.
+        SystemClock.sleep(800)
+        assertTrue("the set change must be held while focused, not applied",
+            onUi { activity.adapter.hasPendingListChange })
+
         // While the list is FOCUSED the set change is deferred, so leaving focus is what lands it.
         onUi { activity.adapter.setFocused(false); activity.adapter.setFocused(true) }
         device.waitForIdle()

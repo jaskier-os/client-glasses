@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 /**
@@ -144,5 +145,66 @@ class RowSelectionTest {
         s.select("conv:c1")
         s.select("conv:nope")
         assertEquals("conv:c1", s.key)
+    }
+
+    /**
+     * A refusal has to be REPORTED, not merely obeyed. A caller that asks for a caret, is silently
+     * refused, and goes on believing one exists will act on whatever row the index later lands on
+     * -- and on this list that can be the Assistant row, which starts the microphone.
+     */
+    @Test
+    fun everyRefusalSaysSoRatherThanReportingSuccess() {
+        val withGroup = sel(rows(listOf(rc("a")), listOf(conv("c1"))))
+        val groupIdx = rows(listOf(rc("a")), listOf(conv("c1")))
+            .indexOfFirst { it is ChatRow.RcGroup }
+        assertTrue("the fixture must actually contain a group marker", groupIdx >= 0)
+
+        assertTrue("a present, selectable key is accepted", withGroup.select("conv:c1"))
+        assertFalse("an absent key is refused and says so", withGroup.select("conv:nope"))
+        assertFalse("the group marker is refused and says so", withGroup.selectIndex(groupIdx))
+        assertFalse("an index off the end is refused and says so", withGroup.selectIndex(99))
+        assertEquals("no refusal moved the caret", "conv:c1", withGroup.key)
+    }
+
+    /**
+     * An index off the end of the list is a caller bug, never an instruction to clear the caret.
+     * Routing it through select(null) would report SUCCESS while dropping the caret entirely, so
+     * the caller would repaint nothing and the user would watch their caret vanish.
+     */
+    @Test
+    fun anOutOfRangeIndexIsRefusedAndLeavesTheCaretWhereItWas() {
+        val s = sel(rows(conv = listOf(conv("c1"), conv("c2"))))
+        s.select("conv:c2")
+        assertFalse("past the end is refused", s.selectIndex(99))
+        assertFalse("before the start is refused", s.selectIndex(-1))
+        assertEquals("neither refusal touched the caret", "conv:c2", s.key)
+    }
+
+    /**
+     * A move that hits the end of the list is a refusal like any other and must say so. Reporting
+     * a constant success here would reintroduce exactly the swallowed-refusal class this whole
+     * selection type exists to close.
+     */
+    @Test
+    fun aMoveThatHitsTheEndOfTheListReportsThatItRefused() {
+        val r = rows(conv = listOf(conv("c1")))
+        val s = sel(r)
+        assertTrue("the first down-press claims a row", s.moveDown())
+        // BOUNDED, deliberately. The loop condition IS the thing under test, so an implementation
+        // that always reports success would turn this into an infinite loop -- a wedged worker
+        // instead of a red bar. Past one press per row the implementation is wrong, so say so.
+        walk(r.size) { s.moveDown() }
+        assertFalse("there is nothing below the last row", s.moveDown())
+        assertEquals("the refused move left the caret on the last row", "conv:c1", s.key)
+
+        walk(r.size) { s.moveUp() }
+        assertFalse("there is nothing above the first row", s.moveUp())
+        assertEquals(ChatRow.NewChat.key, s.key)
+    }
+
+    /** Runs [step] until it refuses, failing rather than spinning if it never does. */
+    private fun walk(limit: Int, step: () -> Boolean) {
+        repeat(limit) { if (!step()) return }
+        fail("a move reported success more than $limit times on a $limit-row list")
     }
 }

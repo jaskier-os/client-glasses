@@ -7431,7 +7431,12 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             }
             chatListAdapter.submitList(items)
             if (chatListAdapter.selectedPosition < 0 && items.isNotEmpty()) {
-                chatListAdapter.selectPosition(0)
+                // A focused list defers the set change, so row 0 need not exist yet. A refusal
+                // correctly leaves the caret absent -- the deferred submit plants it later --
+                // but it must be visible, not swallowed.
+                if (!chatListAdapter.selectPosition(0)) {
+                    activityLog("chat list: initial caret refused, rows have not landed yet")
+                }
             }
         } catch (e: Exception) {
             activityLog("parseChatListAndDisplay failed: ${e.message}")
