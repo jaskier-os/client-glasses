@@ -79,6 +79,9 @@ class RcThreadInstrumentedTest {
     private val EXTRA_RC_TEXT = "rc_text"
     private val EXTRA_RC_REQUEST_ID = "rc_request_id"
 
+    /** Test-only, matched by no production receiver. Used to prove the spy is still alive. */
+    private val ACTION_SPY_PROBE = "$pkg.TEST_SPY_PROBE"
+
     private val HOLD_MS = 2600L
     private val SESSION = "s-live"
 
@@ -113,6 +116,23 @@ class RcThreadInstrumentedTest {
             sent.clear()
             return out
         }
+    }
+
+    /**
+     * Proves the spy is ALIVE before an assertion that a frame was NOT sent.
+     *
+     * "no SEND frame arrived" is equally satisfied by a spy that stopped receiving anything at all,
+     * which would turn every negative assertion in this test green while the code under test was
+     * broken. Round-tripping one known frame first removes that reading.
+     */
+    private fun assertSpyIsListening() {
+        drainSent()
+        // A test-only action. Reusing a production one would make the real ListenerService receiver
+        // put a fabricated frame on the wire to the phone, which is not this test's business.
+        ctx.sendBroadcast(Intent(ACTION_SPY_PROBE).apply { setPackage(pkg) })
+        SystemClock.sleep(400)
+        assertTrue("the frame spy stopped receiving; every negative assertion below is meaningless",
+            drainSent().contains(ACTION_SPY_PROBE))
     }
 
     private fun artifactDir(): File =
@@ -257,6 +277,7 @@ class RcThreadInstrumentedTest {
             addAction(ACTION_RC_MESSAGES_REQ)
             addAction(ACTION_RC_SEND_MSG)
             addAction(ACTION_RC_ANSWER)
+            addAction(ACTION_SPY_PROBE)
         }
         ctx.registerReceiver(sentSpy, f, Context.RECEIVER_NOT_EXPORTED)
     }
@@ -450,8 +471,10 @@ class RcThreadInstrumentedTest {
         assertFalse("a cancelled send must never append a row",
             threadRows().any { it.text.contains("logcat") })
         // The load-bearing half: a cancel must stop the frame, not merely hide the bar.
+        val afterCancel = drainSent()
+        assertSpyIsListening()
         assertTrue("a cancelled dictation must never reach the wire",
-            drainSent().none { it.startsWith("SEND|") })
+            afterCancel.none { it.startsWith("SEND|") })
 
         // 15. The window commits on expiry, and NO optimistic local user row appears -- the user
         //     row arrives only from the phone.
@@ -469,8 +492,17 @@ class RcThreadInstrumentedTest {
         key(KeyEvent.KEYCODE_NUMPAD_3)
         assertEquals("a second hold must not start while a send is in flight",
             View.GONE, view(R_rcThreadVoiceBar()).visibility)
-        assertTrue("a second hold in flight must emit no second frame",
-            drainSent().none { it.startsWith("SEND|") })
+        // Drive the refused hold all the way through the path that WOULD send: a final transcript
+        // and a full window. Without those, no frame could arrive whatever the guard did, and the
+        // assertion below would be true by construction rather than by the guard working.
+        pushFinalTranscript("this must never reach the agent")
+        SystemClock.sleep(3600)
+        val afterRefusedHold = drainSent()
+        assertSpyIsListening()
+        assertTrue("a hold refused in flight must emit no second frame, even after a full window",
+            afterRefusedHold.none { it.startsWith("SEND|") })
+        assertFalse("and it must not render either",
+            threadRows().any { it.text.contains("never reach the agent") })
         pushSendResult("sent")
         SystemClock.sleep(HOLD_MS)
         shoot("16_send_acked")
@@ -556,9 +588,13 @@ class RcThreadInstrumentedTest {
         SystemClock.sleep(900)
         // Opening asks for the rows, and THAT request is the read acknowledgement. Nothing is held
         // yet, so seenSeq is -1; a wrong value here would clear an unread bar the user never saw.
+        //
+        // Only the FIRST request is pinned. An open thread re-acknowledges on every rows push with
+        // the new seenSeq, so on a live link the phone's own reply legitimately adds more requests
+        // here; asserting the whole list would fail for a reason that is correct behaviour.
         assertEquals("opening a thread must request its rows with seenSeq -1",
-            listOf("MSGS_REQ|$SESSION|-1"),
-            drainSent().filter { it.startsWith("MSGS_REQ|") })
+            "MSGS_REQ|$SESSION|-1",
+            drainSent().first { it.startsWith("MSGS_REQ|") })
         assertEquals("the thread must open", View.VISIBLE, view(R_rcThreadContainer()).visibility)
     }
 
