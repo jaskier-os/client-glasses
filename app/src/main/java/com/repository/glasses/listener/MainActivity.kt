@@ -5398,10 +5398,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         uiLog("NAV: switchToTab idx=$safeIndex tabId=$newTabId prev=$prevTab($prevTabId) tabs=${activeTabs.size} animate=$animate focus=$focusState")
         currentTabId = newTabId
         updateChatKeepScreenOnFlag()
-        sendBroadcast(Intent(ListenerService.ACTION_TAB_CHANGED).apply {
-            setPackage(packageName)
-            putExtra(ListenerService.EXTRA_TAB_ID, newTabId.name)
-        })
         if (newTabId == TabId.MAP || prevTabId == TabId.MAP) {
             sendBroadcast(Intent(ListenerService.ACTION_MAP_TAB_VISIBLE).apply {
                 setPackage(packageName)

@@ -157,8 +157,6 @@ class ListenerService : LifecycleService(),
         const val EXTRA_PADDING = "padding"
         const val ACTION_CHAT_FONT_SIZE = "com.repository.glasses.listener.CHAT_FONT_SIZE"
         const val EXTRA_CHAT_FONT_SIZE = "chat_font_size"
-        const val ACTION_TAB_CHANGED = "com.repository.glasses.listener.TAB_CHANGED"
-        const val EXTRA_TAB_ID = "tab_id"
         const val ACTION_CANCEL_SESSION = "com.repository.glasses.listener.CANCEL_SESSION"
         const val ACTION_SENSOR_LONG_PRESS = "com.repository.glasses.listener.SENSOR_LONG_PRESS"
         const val ACTION_STOP_JOURNEY = "com.repository.glasses.listener.STOP_JOURNEY"
@@ -3302,12 +3300,6 @@ class ListenerService : LifecycleService(),
         registerReceiver(
             mapTabVisibleReceiver,
             IntentFilter(ACTION_MAP_TAB_VISIBLE),
-            Context.RECEIVER_NOT_EXPORTED
-        )
-
-        registerReceiver(
-            tabChangedReceiver,
-            IntentFilter(ACTION_TAB_CHANGED),
             Context.RECEIVER_NOT_EXPORTED
         )
 
@@ -7370,14 +7362,6 @@ class ListenerService : LifecycleService(),
         }
     }
 
-    @Volatile private var currentTabId: String = "CHAT"
-
-    private val tabChangedReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            currentTabId = intent.getStringExtra(EXTRA_TAB_ID) ?: "CHAT"
-        }
-    }
-
     /** Last call-audio-active state relayed to the phone, to avoid redundant CH_CALL_STATE sends. */
     @Volatile private var lastRelayedCallAudioActive = false
 
@@ -9298,7 +9282,6 @@ class ListenerService : LifecycleService(),
         try { unregisterReceiver(switchChatReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(mapPinReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(mapTabVisibleReceiver) } catch (_: Exception) {}
-        try { unregisterReceiver(tabChangedReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(translationToggleReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(assistantToggleReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(assistantStateQueryReceiver) } catch (_: Exception) {}
