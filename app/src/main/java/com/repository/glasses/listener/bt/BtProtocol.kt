@@ -137,6 +137,16 @@ object BtProtocol {
     const val CH_TG_TOPICS_RESP = "listener_tg_topics_resp"
     const val CH_TG_VOICE_START = "listener_tg_voice_start"
     const val CH_TG_VOICE_STOP = "listener_tg_voice_stop"
+
+    // --- RC mirror (spec 2026-08-06, six channels; there is deliberately no CH_RC_LIST_REQ:
+    // the state push is a full unsolicited snapshot, re-sent on every link-up) ---
+    const val CH_RC_STATE_PUSH    = "listener_rc_state_push"   // phone -> glasses
+    const val CH_RC_MESSAGES_REQ  = "listener_rc_msgs_req"     // glasses -> phone
+    const val CH_RC_MESSAGES_RESP = "listener_rc_msgs_resp"    // phone -> glasses
+    const val CH_RC_SEND_REQ      = "listener_rc_send_req"     // glasses -> phone
+    const val CH_RC_SEND_RESP     = "listener_rc_send_resp"    // phone -> glasses (errors only)
+    const val CH_RC_ANSWER_REQ    = "listener_rc_answer_req"   // glasses -> phone
+
     // Notifications (phone -> glasses)
     const val CH_NOTIFICATION = "listener_notification"
     const val CH_NOTIFICATION_TTS = "listener_notification_tts"
