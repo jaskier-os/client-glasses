@@ -13,7 +13,11 @@ import android.view.animation.LinearInterpolator
  * Minimal spinning arc indicator for the waveguide display.
  * Draws a green arc that rotates continuously.
  */
-class SpinnerView(context: Context, private val sizeDp: Int = 16) : View(context) {
+class SpinnerView(
+    context: Context,
+    private val sizeDp: Int = 16,
+    tint: Int = Lum.DIM,
+) : View(context) {
 
     private val sizePx = (sizeDp * Resources.getSystem().displayMetrics.density).toInt()
     private val strokePx = (1.5f * Resources.getSystem().displayMetrics.density)
@@ -22,7 +26,7 @@ class SpinnerView(context: Context, private val sizeDp: Int = 16) : View(context
         style = Paint.Style.STROKE
         strokeWidth = strokePx
         strokeCap = Paint.Cap.ROUND
-        color = Lum.DIM
+        color = tint
     }
 
     private val rect = RectF()
@@ -40,8 +44,15 @@ class SpinnerView(context: Context, private val sizeDp: Int = 16) : View(context
         canvas.drawArc(rect, 0f, 270f, false, paint)
     }
 
+    /** True while the arc is spinning. */
+    val isRunning: Boolean get() = animator != null
+
+    /**
+     * Idempotent: a second call while already spinning is a no-op. Restarting would snap the arc
+     * back to 0 degrees, and callers rebind on every unrelated content change.
+     */
     fun start() {
-        animator?.cancel()
+        if (animator != null) return
         animator = ValueAnimator.ofFloat(0f, 360f).apply {
             duration = 800L
             repeatCount = ValueAnimator.INFINITE

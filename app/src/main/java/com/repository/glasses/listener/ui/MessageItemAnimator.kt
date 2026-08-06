@@ -27,6 +27,9 @@ class MessageItemAnimator : DefaultItemAnimator() {
 
     override fun animateAdd(holder: RecyclerView.ViewHolder): Boolean {
         val view = holder.itemView
+        // Cancel first: a holder can be re-added while its previous fade-in is still running, and
+        // the second animate() would otherwise not own the alpha it is starting from.
+        view.animate().cancel()
         view.alpha = 0f
         view.translationY = 8f.dpToPx()
 
@@ -39,6 +42,29 @@ class MessageItemAnimator : DefaultItemAnimator() {
             .start()
 
         return true
+    }
+
+    /**
+     * RecyclerView calls these to abort in-flight animations, e.g. when a row is removed or
+     * re-bound mid-fade. Without restoring alpha/translation the holder is recycled still
+     * transparent, so the next row that reuses it renders INVISIBLE. Reachable now that the chat
+     * list diffs its updates and therefore actually dispatches inserts.
+     */
+    override fun endAnimation(holder: RecyclerView.ViewHolder) {
+        reset(holder)
+        super.endAnimation(holder)
+    }
+
+    override fun onAnimationFinished(viewHolder: RecyclerView.ViewHolder) {
+        reset(viewHolder)
+        super.onAnimationFinished(viewHolder)
+    }
+
+    private fun reset(holder: RecyclerView.ViewHolder) {
+        val view = holder.itemView
+        view.animate().cancel()
+        view.alpha = 1f
+        view.translationY = 0f
     }
 
     override fun animateChange(

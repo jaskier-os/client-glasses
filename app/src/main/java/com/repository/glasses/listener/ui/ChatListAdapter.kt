@@ -229,8 +229,12 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         // at this size reads as noise, and the unread state has to survive a glance.
         val unreadBar = View(ctx).apply { setBackgroundColor(Lum.GLOW) }
 
-        // The existing spinner component, not a new arc.
-        val spinner = SpinnerView(ctx, sizeDp = 14).apply { setBackgroundColor(Lum.VOID) }
+        // The existing spinner component, not a new arc. GLOW because "this session is working" is
+        // the most urgent thing a row can say; the component's DIM default would rank it below the
+        // row's own title, which inverts the hierarchy.
+        val spinner = SpinnerView(ctx, sizeDp = 14, tint = Lum.GLOW).apply {
+            setBackgroundColor(Lum.VOID)
+        }
 
         val titleRow = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -407,27 +411,48 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     ) {
         val row = rows.getOrNull(position) ?: return
         val isSelected = focused && row.key == selectedKey
+        // Every cast below is a SAFE cast on the ROW, not on the holder. A holder whose type no
+        // longer matches its row means a bind raced a list swap; skipping the content update is
+        // recoverable, a ClassCastException is not.
         when (holder) {
             is NewChatViewHolder -> if (selection) applyCaret(
                 holder.container, isSelected,
-                { holder.borderAnimator }, { d, a -> holder.currentDrawable = d; holder.borderAnimator = a },
+                { holder.currentDrawable }, { holder.borderAnimator },
+                { d, a -> holder.currentDrawable = d; holder.borderAnimator = a },
             )
             is RcGroupViewHolder -> Unit
             is RcSessionViewHolder -> {
-                if (content) bindRcSession(holder, row as ChatRow.RcSession)
-                if (selection) applyCaret(
+                // The title's colour depends on selection as well as on content, so a
+                // selection-only rebind still has to recolour it (sketch: .rc.sel .title = GLOW).
+                (row as? ChatRow.RcSession)?.let {
+                    if (content) bindRcSession(holder, it)
+                    holder.titleView.setTextColor(rcTitleColor(it, isSelected))
+                }
+                // The TRACE fill is what marks the pinned block as one region; it must survive the
+                // caret arriving and leaving, so it is applied on both branches.
+                applyCaret(
                     holder.container, isSelected,
-                    { holder.borderAnimator }, { d, a -> holder.currentDrawable = d; holder.borderAnimator = a },
+                    { holder.currentDrawable }, { holder.borderAnimator },
+                    { d, a -> holder.currentDrawable = d; holder.borderAnimator = a },
+                    fillColor = Lum.TRACE,
                 )
             }
             is ChatItemViewHolder -> {
-                if (content) bindChat(holder, (row as ChatRow.Conversation).summary)
+                if (content) (row as? ChatRow.Conversation)?.let { bindChat(holder, it.summary) }
                 if (selection) applyCaret(
                     holder.container, isSelected,
-                    { holder.borderAnimator }, { d, a -> holder.currentDrawable = d; holder.borderAnimator = a },
+                    { holder.currentDrawable }, { holder.borderAnimator },
+                    { d, a -> holder.currentDrawable = d; holder.borderAnimator = a },
                 )
             }
         }
+    }
+
+    /** GLOW when the caret is on it, DIM when the session is dead or the link is down, else BRIGHT. */
+    private fun rcTitleColor(row: ChatRow.RcSession, isSelected: Boolean): Int = when {
+        isSelected -> Lum.GLOW
+        row.dim -> Lum.DIM
+        else -> Lum.BRIGHT
     }
 
     private fun bindRcSession(holder: RcSessionViewHolder, row: ChatRow.RcSession) {
@@ -436,7 +461,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
         // Dimming is a colour step down the luminance ladder, never alpha: the waveguide has no
         // real blending, and an alpha'd green just reads as a dirtier green.
-        holder.titleView.setTextColor(if (row.dim) Lum.DIM else Lum.BRIGHT)
         holder.folderView.setTextColor(if (row.dim) Lum.TRACE else Lum.DIM)
         holder.desktopIcon.setColorFilter(if (row.dim) Lum.TRACE else Lum.DIM)
         holder.rail.setBackgroundColor(
@@ -472,18 +496,31 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         )
     }
 
+    /**
+     * @param fillColor the row's own background under the caret border. RC rows carry a TRACE fill
+     *        that marks the pinned block; every other row is VOID, i.e. see-through.
+     */
     private fun applyCaret(
         container: LinearLayout,
         isSelected: Boolean,
+        currentDrawable: () -> GradientDrawable?,
         currentAnimator: () -> ValueAnimator?,
-        store: (GradientDrawable?, ValueAnimator?) -> Unit
+        store: (GradientDrawable?, ValueAnimator?) -> Unit,
+        fillColor: Int = Lum.VOID,
     ) {
-        currentAnimator()?.cancel()
         if (isSelected) {
-            animateBorder(container) { drawable, animator -> store(drawable, animator) }
+            // A rebind for an unrelated reason must not replay the 150 ms stroke: the caret would
+            // flicker every time the list scrolled or a spinner elsewhere changed.
+            val existing = currentDrawable()
+            if (existing != null && container.background === existing) {
+                existing.setColor(fillColor)
+                return
+            }
+            animateBorder(container, fillColor) { drawable, animator -> store(drawable, animator) }
         } else {
+            currentAnimator()?.cancel()
             store(null, null)
-            container.setBackgroundColor(Lum.VOID)
+            container.setBackgroundColor(fillColor)
         }
     }
 
@@ -503,10 +540,11 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     private fun animateBorder(
         container: LinearLayout,
+        fillColor: Int = Lum.VOID,
         onCreated: (GradientDrawable, ValueAnimator) -> Unit
     ) {
         val drawable = GradientDrawable().apply {
-            setColor(Lum.VOID)
+            setColor(fillColor)
             cornerRadius = 8f.dpToPx()
             setStroke(0, Lum.GLOW)
         }
@@ -541,7 +579,21 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         rebuild()
     }
 
+    /**
+     * A phone push can land in the middle of a scroll frame -- the touchpad daemon drives
+     * `ScrollDrainer`, which calls `scrollBy` once per animation frame, so "RecyclerView is
+     * computing a layout or scrolling" is the normal case, not a corner case. Notifying then throws.
+     * Re-post to the RecyclerView's own handler and run once it is quiet.
+     */
+    private fun runWhenIdle(block: () -> Unit): Boolean {
+        val rv = attachedRecycler ?: return false
+        if (!rv.isComputingLayout && rv.scrollState == RecyclerView.SCROLL_STATE_IDLE) return false
+        rv.post { block() }
+        return true
+    }
+
     private fun rebuild() {
+        if (runWhenIdle { rebuild() }) return
         val next = ChatRowBuilder.build(rcState, conversations)
         when (val decision = gate.submit(rows.toList(), next, focused)) {
             is ListMutationGate.Decision.None -> Unit
@@ -584,6 +636,15 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     override fun onDetachedFromRecyclerView(recyclerView: RecyclerView) {
         cancelHoldExpiry()
+        // Detaching does not recycle the ATTACHED holders, so without this their infinite spinner
+        // animators keep ticking and invalidating off-screen for as long as the process lives.
+        for (i in 0 until recyclerView.childCount) {
+            val holder = recyclerView.getChildViewHolder(recyclerView.getChildAt(i))
+            if (holder is RcSessionViewHolder) holder.spinner.stop()
+            (holder as? ChatItemViewHolder)?.borderAnimator?.cancel()
+            (holder as? RcSessionViewHolder)?.borderAnimator?.cancel()
+            (holder as? NewChatViewHolder)?.borderAnimator?.cancel()
+        }
         attachedRecycler = null
         super.onDetachedFromRecyclerView(recyclerView)
     }
@@ -595,6 +656,7 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
      * ([force] = true) and from the hold expiry; both are no-ops when nothing is pending.
      */
     fun flushPendingIfDue(force: Boolean) {
+        if (runWhenIdle { flushPendingIfDue(force) }) return
         val pending = if (force) gate.release() else gate.tick()
         if (pending != null) {
             applyRows(pending)
@@ -648,9 +710,15 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     fun moveSelectionUp() = repaintCaretAround { selection.moveUp() }
 
     /** Runs a caret move and rebinds only the two rows whose border can have changed. */
-    private inline fun repaintCaretAround(move: () -> Unit) {
+    private fun repaintCaretAround(move: () -> Unit) {
         val old = selectedPosition
         move()
+        // The move itself is pure state; only the repaint has to wait for a quiet RecyclerView.
+        if (runWhenIdle { repaintCaretFrom(old) }) return
+        repaintCaretFrom(old)
+    }
+
+    private fun repaintCaretFrom(old: Int) {
         val now = selectedPosition
         if (old == now) return
         if (old >= 0) notifyItemChanged(old, PAYLOAD_SELECTION)
@@ -663,7 +731,9 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         // Leaving the list is the natural moment to land anything that was held back.
         if (!isFocused) flushPendingIfDue(force = true)
         val pos = selectedPosition
-        if (pos >= 0) notifyItemChanged(pos, PAYLOAD_SELECTION)
+        if (pos < 0) return
+        if (runWhenIdle { notifyItemChanged(pos, PAYLOAD_SELECTION) }) return
+        notifyItemChanged(pos, PAYLOAD_SELECTION)
     }
 
     fun selectedRow(): ChatRow? = selection.selectedRow()
@@ -679,6 +749,7 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     /** Drops all data rows. The two headers survive -- they are not data and never were. */
     fun clear() {
+        if (runWhenIdle { clear() }) return
         conversations = emptyList()
         rcState = RcState.EMPTY
         gate.release()
