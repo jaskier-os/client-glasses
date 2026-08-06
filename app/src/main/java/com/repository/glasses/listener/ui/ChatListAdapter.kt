@@ -64,20 +64,23 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     private var rcState: RcState = RcState.EMPTY
     private val gate = ListMutationGate()
 
-    // The two header rows exist before any data arrives, exactly as they did when the count was
-    // items.size + HEADER_COUNT.
-    private val rows = ChatRowBuilder.build(RcState.EMPTY, emptyList()).toMutableList()
+    /** All caret state and policy. Pure, JVM-tested; the adapter only renders its decisions. */
+    private val selection = RowSelection().apply {
+        // The two header rows exist before any data arrives, exactly as they did when the count was
+        // items.size + HEADER_COUNT.
+        onRowsReplaced(ChatRowBuilder.build(RcState.EMPTY, emptyList()))
+    }
+
+    private val rows: List<ChatRow> get() = selection.rows
 
     /** The caret's identity. Everything else about selection is derived from it. */
-    var selectedKey: String? = null
-        private set
+    val selectedKey: String? get() = selection.key
 
     var focused: Boolean = false
         private set
 
     /** Where the caret currently sits, or -1. Derived; never the source of truth. */
-    val selectedPosition: Int
-        get() = selectedKey?.let { key -> rows.indexOfFirst { it.key == key } } ?: -1
+    val selectedPosition: Int get() = selection.index
 
     init {
         setHasStableIds(true)
@@ -124,8 +127,19 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     override fun getItemCount(): Int = rows.size
 
-    /** Stable across rebuilds because the key is; this is what lets DiffUtil animate correctly. */
-    override fun getItemId(position: Int): Long = rows[position].key.hashCode().toLong()
+    /**
+     * Stable across rebuilds because the key is. A 64-bit FNV-1a rather than String.hashCode:
+     * hashCode is 32-bit and RecyclerView treats colliding stable ids as the same item, which with
+     * a session id and a conversation id in the same list would swap two rows' views.
+     */
+    override fun getItemId(position: Int): Long {
+        var h = -0x340d631b7bdddcdbL // FNV-1a 64 offset basis
+        for (c in rows[position].key) {
+            h = h xor c.code.toLong()
+            h *= 0x100000001b3L
+        }
+        return h
+    }
 
     /** Derived from the row TYPE. No positional arithmetic anywhere in this adapter. */
     override fun getItemViewType(position: Int): Int = when (rows[position]) {
@@ -533,46 +547,84 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
             is ListMutationGate.Decision.None -> Unit
             is ListMutationGate.Decision.Apply -> applyRows(decision.rows)
             is ListMutationGate.Decision.ContentOnly -> applyRows(decision.rows)
-            is ListMutationGate.Decision.Deferred -> applyRows(decision.rows)
+            is ListMutationGate.Decision.Deferred -> {
+                applyRows(decision.rows)
+                scheduleHoldExpiry()
+            }
         }
+        if (!gate.hasPending) cancelHoldExpiry()
     }
 
     /**
-     * Flush a set change that was held back while the caret was live. Call on focus exit and from
-     * the periodic tick; both are no-ops when nothing is pending.
+     * The hold is bounded, so it needs something to fire at the end of it: a user who walks away
+     * with the list focused must still end up looking at a current list. Scheduled on the attached
+     * RecyclerView so it dies with the view rather than outliving the screen.
+     */
+    private fun scheduleHoldExpiry() {
+        val rv = attachedRecycler ?: return
+        rv.removeCallbacks(holdExpiryRunnable)
+        rv.postDelayed(holdExpiryRunnable, ListMutationGate.HOLD_MS + 50L)
+    }
+
+    private fun cancelHoldExpiry() {
+        attachedRecycler?.removeCallbacks(holdExpiryRunnable)
+    }
+
+    private val holdExpiryRunnable = Runnable {
+        flushPendingIfDue(force = false)
+        // tick() refuses before the deadline; re-arm so a submit that reset nothing still lands.
+        if (gate.hasPending) scheduleHoldExpiry()
+    }
+
+    override fun onAttachedToRecyclerView(recyclerView: RecyclerView) {
+        super.onAttachedToRecyclerView(recyclerView)
+        attachedRecycler = recyclerView
+        if (gate.hasPending) scheduleHoldExpiry()
+    }
+
+    override fun onDetachedFromRecyclerView(recyclerView: RecyclerView) {
+        cancelHoldExpiry()
+        attachedRecycler = null
+        super.onDetachedFromRecyclerView(recyclerView)
+    }
+
+    private var attachedRecycler: RecyclerView? = null
+
+    /**
+     * Flush a set change that was held back while the caret was live. Called on focus exit
+     * ([force] = true) and from the hold expiry; both are no-ops when nothing is pending.
      */
     fun flushPendingIfDue(force: Boolean) {
         val pending = if (force) gate.release() else gate.tick()
-        if (pending != null) applyRows(pending)
+        if (pending != null) {
+            applyRows(pending)
+            cancelHoldExpiry()
+        }
     }
 
     val hasPendingListChange: Boolean get() = gate.hasPending
 
-    private fun applyRows(next: List<ChatRow>) {
+    /**
+     * @param dropSelection true to end with no caret at all (used by [clear]). The old caret's row
+     *        is still explicitly rebound, so its border cannot survive as an orphan.
+     */
+    private fun applyRows(next: List<ChatRow>, dropSelection: Boolean = false) {
         val previous = rows.toList()
-        val previousIndex = selectedPosition
-        val diff = DiffUtil.calculateDiff(RowDiff(previous, next), true)
-        rows.clear()
-        rows.addAll(next)
-
-        // No caret means no caret. Re-resolving from null would silently plant one on row 0, which
-        // is the same class of bug as re-aiming it: a keypress would then open something.
         val previousKey = selectedKey
-        val resolvedIndex =
-            if (previousKey == null) -1
-            else ChatRowBuilder.resolveSelection(rows, previousKey, previousIndex)
-        selectedKey = rows.getOrNull(resolvedIndex)?.key
+        val diff = DiffUtil.calculateDiff(RowDiff(previous, next), true)
 
+        val change = selection.onRowsReplaced(next, dropSelection)
         diff.dispatchUpdatesTo(this)
 
         // A row that neither moved nor changed content is not rebound by the diff, so a caret that
-        // had to fall back to a different key would otherwise leave two borders on screen.
-        if (previousKey != selectedKey) {
+        // moved to a different key -- or was dropped -- would otherwise leave its border painted.
+        if (change == RowSelection.Change.REHOMED || change == RowSelection.Change.DROPPED) {
             previousKey?.let { key ->
                 val idx = rows.indexOfFirst { it.key == key }
                 if (idx >= 0) notifyItemChanged(idx, PAYLOAD_SELECTION)
             }
-            if (resolvedIndex >= 0) notifyItemChanged(resolvedIndex, PAYLOAD_SELECTION)
+            val now = selectedPosition
+            if (now >= 0) notifyItemChanged(now, PAYLOAD_SELECTION)
         }
     }
 
@@ -587,38 +639,22 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         override fun getChangePayload(oldPos: Int, newPos: Int): Any = PAYLOAD_CONTENT
     }
 
-    fun selectPosition(pos: Int) {
-        val row = rows.getOrNull(pos) ?: return
-        if (!row.selectable) return
-        selectKey(row.key)
-    }
+    fun selectPosition(pos: Int) = selectKey(rows.getOrNull(pos)?.key)
 
-    fun selectKey(key: String?) {
-        if (selectedKey == key) return
+    fun selectKey(key: String?) = repaintCaretAround { selection.select(key) }
+
+    fun moveSelectionDown() = repaintCaretAround { selection.moveDown() }
+
+    fun moveSelectionUp() = repaintCaretAround { selection.moveUp() }
+
+    /** Runs a caret move and rebinds only the two rows whose border can have changed. */
+    private inline fun repaintCaretAround(move: () -> Unit) {
         val old = selectedPosition
-        selectedKey = key
-        if (old >= 0) notifyItemChanged(old, PAYLOAD_SELECTION)
+        move()
         val now = selectedPosition
+        if (old == now) return
+        if (old >= 0) notifyItemChanged(old, PAYLOAD_SELECTION)
         if (now >= 0) notifyItemChanged(now, PAYLOAD_SELECTION)
-    }
-
-    fun moveSelectionDown() {
-        val from = selectedPosition
-        var i = from + 1
-        while (i <= rows.lastIndex) {
-            if (rows[i].selectable) { selectPosition(i); return }
-            i++
-        }
-    }
-
-    fun moveSelectionUp() {
-        val from = selectedPosition
-        if (from < 0) return
-        var i = from - 1
-        while (i >= 0) {
-            if (rows[i].selectable) { selectPosition(i); return }
-            i--
-        }
     }
 
     fun setFocused(isFocused: Boolean) {
@@ -630,25 +666,23 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         if (pos >= 0) notifyItemChanged(pos, PAYLOAD_SELECTION)
     }
 
-    fun selectedRow(): ChatRow? = rows.getOrNull(selectedPosition)
+    fun selectedRow(): ChatRow? = selection.selectedRow()
 
-    fun isNewChatSelected(): Boolean = selectedRow() is ChatRow.NewChat
+    fun isNewChatSelected(): Boolean = selection.isNewChatSelected()
 
-    fun isAssistantSelected(): Boolean = selectedRow() is ChatRow.Assistant
+    fun isAssistantSelected(): Boolean = selection.isAssistantSelected()
 
-    fun getSelectedItem(): ChatSummaryItem? = (selectedRow() as? ChatRow.Conversation)?.summary
+    fun getSelectedItem(): ChatSummaryItem? = selection.selectedConversation()
 
     /** The selected RC session, or null. Null for an ended session -- it is not enterable. */
-    fun getSelectedRcSession(): ChatRow.RcSession? =
-        (selectedRow() as? ChatRow.RcSession)?.takeIf { it.enterable }
+    fun getSelectedRcSession(): ChatRow.RcSession? = selection.selectedRcSession()
 
     /** Drops all data rows. The two headers survive -- they are not data and never were. */
     fun clear() {
         conversations = emptyList()
         rcState = RcState.EMPTY
         gate.release()
-        selectedKey = null
-        applyRows(ChatRowBuilder.build(RcState.EMPTY, emptyList()))
-        selectedKey = null
+        cancelHoldExpiry()
+        applyRows(ChatRowBuilder.build(RcState.EMPTY, emptyList()), dropSelection = true)
     }
 }

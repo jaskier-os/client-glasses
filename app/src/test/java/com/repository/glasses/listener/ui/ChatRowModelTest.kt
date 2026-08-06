@@ -93,12 +93,35 @@ class ChatRowModelTest {
 
     @Test
     fun selectionOnTheAssistantRowSurvivesAnRcInsertAbove() {
-        // The dangerous case: the Assistant row starts the mic. It must stay put.
+        // The Assistant row starts the mic. An RC insert must not shift what "selected" means, and
+        // the anchor deliberately does NOT coincide with the answer: only the key lookup can pass.
         val after = build(listOf(rc("x"), rc("y")), listOf(conv("c1")))
         assertEquals(
             ChatRow.Assistant,
-            after[ChatRowBuilder.resolveSelection(after, ChatRow.Assistant.key, 1)],
+            after[ChatRowBuilder.resolveSelection(after, ChatRow.Assistant.key, previousIndex = 4)],
         )
+    }
+
+    @Test
+    fun aVanishedSelectionNeverFallsBackOntoTheAssistantRow() {
+        // The caret sat on the only RC row; the next snapshot drops it. The anchor clamp would
+        // otherwise land on index 1, which is Assistant, and the very next tap starts the mic.
+        val before = build(listOf(rc("a")))
+        val anchor = before.indexOfFirst { it.key == "rc:a" }
+        val after = build()
+        val landed = after[ChatRowBuilder.resolveSelection(after, "rc:a", anchor)]
+        assertNotEquals("a fallback may never arm the microphone", ChatRow.Assistant, landed)
+        assertEquals(ChatRow.NewChat, landed)
+    }
+
+    @Test
+    fun fallbackSkipsTheRcGroupMarkerBecauseItOpensNothing() {
+        val rows = build(listOf(rc("a")), listOf(conv("c1")))
+        val groupIdx = rows.indexOfFirst { it is ChatRow.RcGroup }
+        assertTrue(groupIdx > 0)
+        val landed = rows[ChatRowBuilder.resolveSelection(rows, "conv:gone", groupIdx)]
+        assertFalse("the group marker is not selectable", landed is ChatRow.RcGroup)
+        assertTrue(landed.selectable)
     }
 
     @Test
@@ -156,7 +179,10 @@ class ChatRowModelTest {
         val rows = build((1..9).map { rc("s$it") }, listOf(conv("c1")))
         val rcRows = rows.filterIsInstance<ChatRow.RcSession>()
         assertEquals(ChatRowBuilder.MAX_PINNED_RC, rcRows.size)
-        assertTrue("the cap keeps the newest sessions", rcRows.map { it.id }.contains("s1"))
+        assertEquals(
+            "the cap keeps the newest sessions, in snapshot order",
+            listOf("s1", "s2", "s3", "s4", "s5"), rcRows.map { it.id },
+        )
         assertTrue(rows.any { it is ChatRow.Conversation })
     }
 

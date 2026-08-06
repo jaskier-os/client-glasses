@@ -1,0 +1,137 @@
+package com.repository.glasses.listener.ui
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * The caret, extracted from the adapter so the one property that must never break is provable
+ * without a device: no sequence of asynchronous list swaps can move the caret onto a row the user
+ * did not aim at.
+ */
+class RowSelectionTest {
+
+    private fun rc(id: String, ended: Boolean = false) =
+        RcSessionState(id, "s$id", "~/w", turning = false, unread = false, ended = ended, lastSeq = 0)
+
+    private fun conv(id: String) = ChatSummaryItem(id, "chat $id", "1m", 1, false)
+
+    private fun rows(rc: List<RcSessionState> = emptyList(), conv: List<ChatSummaryItem> = emptyList()) =
+        ChatRowBuilder.build(RcState(true, rc), conv)
+
+    private fun sel(initial: List<ChatRow>) = RowSelection().apply { onRowsReplaced(initial) }
+
+    @Test
+    fun freshSelectionIsEmptyAndOpensNothing() {
+        val s = sel(rows(conv = listOf(conv("c1"))))
+        assertNull(s.key)
+        assertEquals(-1, s.index)
+        assertNull(s.selectedRow())
+        assertFalse(s.isAssistantSelected())
+    }
+
+    @Test
+    fun theCaretStaysOnItsRowWhenRcRowsAppearAbove() {
+        val s = sel(rows(conv = listOf(conv("c1"), conv("c2"))))
+        s.select("conv:c2")
+        val before = s.index
+        val change = s.onRowsReplaced(rows(listOf(rc("a"), rc("b")), listOf(conv("c1"), conv("c2"))))
+        assertEquals("conv:c2", s.key)
+        assertTrue("the row genuinely moved, so this is not a no-op test", s.index > before)
+        assertEquals(RowSelection.Change.MOVED, change)
+    }
+
+    @Test
+    fun theCaretOnTheAssistantRowIsNeverReAimedByAnAsyncInsert() {
+        val s = sel(rows(conv = listOf(conv("c1"))))
+        s.select(ChatRow.Assistant.key)
+        repeat(6) { i -> s.onRowsReplaced(rows((0..i).map { rc("s$it") }, listOf(conv("c1")))) }
+        assertEquals(ChatRow.Assistant.key, s.key)
+        assertTrue(s.isAssistantSelected())
+    }
+
+    @Test
+    fun aVanishedCaretNeverLandsOnTheAssistantRow() {
+        val s = sel(rows(listOf(rc("a"))))
+        s.select("rc:a")
+        s.onRowsReplaced(rows())
+        assertFalse("a snapshot removal may not arm the microphone", s.isAssistantSelected())
+        assertEquals(ChatRow.NewChat.key, s.key)
+    }
+
+    @Test
+    fun aVanishedCaretLandsNearWhereTheUserWasLooking() {
+        val s = sel(rows(conv = listOf(conv("c1"), conv("c2"), conv("c3"))))
+        s.select("conv:c2")
+        s.onRowsReplaced(rows(conv = listOf(conv("c1"), conv("c3"))))
+        assertEquals("conv:c3", s.key)
+    }
+
+    @Test
+    fun theCaretNeverRestsOnTheRcGroupMarker() {
+        val s = sel(rows(listOf(rc("a")), listOf(conv("c1"))))
+        val groupIdx = s.rows.indexOfFirst { it is ChatRow.RcGroup }
+        s.selectIndex(groupIdx)
+        assertNull("the group marker is not selectable", s.key)
+        // It is also skipped over by navigation in both directions.
+        s.select(ChatRow.Assistant.key)
+        s.moveDown()
+        assertEquals("rc:a", s.key)
+        s.moveUp()
+        assertEquals(ChatRow.Assistant.key, s.key)
+    }
+
+    @Test
+    fun navigationStopsAtBothEndsWithoutLosingTheCaret() {
+        val s = sel(rows(conv = listOf(conv("c1"))))
+        s.select(ChatRow.NewChat.key)
+        s.moveUp()
+        assertEquals(ChatRow.NewChat.key, s.key)
+        repeat(10) { s.moveDown() }
+        assertEquals("conv:c1", s.key)
+    }
+
+    @Test
+    fun anEmptyCaretIsClaimedByEitherDirection() {
+        val down = sel(rows(conv = listOf(conv("c1"))))
+        down.moveDown()
+        assertEquals(ChatRow.NewChat.key, down.key)
+        val up = sel(rows(conv = listOf(conv("c1"))))
+        up.moveUp()
+        assertEquals(ChatRow.NewChat.key, up.key)
+    }
+
+    @Test
+    fun clearingDropsTheCaretEntirelyRatherThanRehomingIt() {
+        val s = sel(rows(conv = listOf(conv("c1"))))
+        s.select("conv:c1")
+        assertEquals(RowSelection.Change.DROPPED, s.onRowsReplaced(rows(), dropSelection = true))
+        assertNull(s.key)
+        assertEquals(-1, s.index)
+    }
+
+    @Test
+    fun anEmptyCaretIsNotPlantedByASubsequentSwap() {
+        val s = sel(rows(conv = listOf(conv("c1"))))
+        s.onRowsReplaced(rows(listOf(rc("a")), listOf(conv("c1"))))
+        assertNull("a list update must not create a caret out of nothing", s.key)
+    }
+
+    @Test
+    fun anEndedSessionIsSelectableButNotEnterable() {
+        val s = sel(rows(listOf(rc("a", ended = true))))
+        s.select("rc:a")
+        assertEquals("rc:a", s.key)
+        assertNull("an ended session may not be opened", s.selectedRcSession())
+    }
+
+    @Test
+    fun selectingAKeyThatIsNotPresentIsRefusedRatherThanGuessed() {
+        val s = sel(rows(conv = listOf(conv("c1"))))
+        s.select("conv:c1")
+        s.select("conv:nope")
+        assertEquals("conv:c1", s.key)
+    }
+}

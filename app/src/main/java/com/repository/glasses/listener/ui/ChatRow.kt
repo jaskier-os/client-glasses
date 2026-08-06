@@ -75,9 +75,18 @@ sealed class ChatRow {
         override val key: String = "conv:${summary.id}"
     }
 
-    /** True for rows that open something when confirmed. Headers and group marks do not. */
+    /** True for rows the caret may rest on. The RC group marker opens nothing, so it may not. */
     val selectable: Boolean
         get() = this !is RcGroup
+
+    /**
+     * True for rows the caret may be moved onto WITHOUT the user aiming at them.
+     *
+     * The Assistant row starts the microphone. A row vanishing from a snapshot is not consent to
+     * arm it, so it is excluded from every fallback path; the user can still reach it by scrolling.
+     */
+    val fallbackSafe: Boolean
+        get() = selectable && this !is Assistant
 }
 
 /**
@@ -147,25 +156,27 @@ object ChatRowBuilder {
             val exact = rows.indexOfFirst { it.key == selectedKey }
             if (exact >= 0) return exact
         }
-        // The key is gone. Land as close as possible to where the user was looking, deterministically.
+        // The key is gone. Land as close as possible to where the user was looking, deterministically,
+        // and never on a row that would act on the next keypress without them having aimed at it.
         val anchor = if (previousIndex < 0) 0 else previousIndex.coerceAtMost(rows.lastIndex)
-        return nearestSelectable(rows, anchor)
+        return nearestFallbackSafe(rows, anchor)
     }
 
-    private fun nearestSelectable(rows: List<ChatRow>, anchor: Int): Int {
-        if (rows[anchor].selectable) return anchor
+    private fun nearestFallbackSafe(rows: List<ChatRow>, anchor: Int): Int {
+        if (rows[anchor].fallbackSafe) return anchor
         var down = anchor + 1
         var up = anchor - 1
         while (down <= rows.lastIndex || up >= 0) {
             if (down <= rows.lastIndex) {
-                if (rows[down].selectable) return down
+                if (rows[down].fallbackSafe) return down
                 down++
             }
             if (up >= 0) {
-                if (rows[up].selectable) return up
+                if (rows[up].fallbackSafe) return up
                 up--
             }
         }
+        // Unreachable in practice: NewChat is always present and always fallback-safe.
         return 0
     }
 }
