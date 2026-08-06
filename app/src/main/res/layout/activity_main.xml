@@ -444,6 +444,65 @@
 
                 </LinearLayout>
 
+                <!-- Copilot content (shown when COPILOT tab active).
+                     The ambient fact-check cards themselves are drawn by
+                     CopilotCardOverlay in a separate TYPE_APPLICATION_OVERLAY
+                     window, so this panel carries only the start/stop control
+                     and a status line reflecting the real running state. -->
+                <LinearLayout
+                    android:id="@+id/copilotContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:orientation="vertical"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="0dp"
+                        android:layout_weight="1"
+                        android:background="#000000" />
+
+                    <TextView
+                        android:id="@+id/copilotStatus"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:text=""
+                        android:textColor="#007700"
+                        android:textSize="11sp"
+                        android:fontFamily="monospace"
+                        android:background="#000000"
+                        android:paddingBottom="4dp"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <FrameLayout
+                        android:id="@+id/copilotStartStopContainer"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:layout_gravity="center"
+                        android:layout_marginBottom="12dp"
+                        android:background="#000000"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <ImageView
+                            android:id="@+id/copilotStartStopIcon"
+                            android:layout_width="16dp"
+                            android:layout_height="16dp"
+                            android:layout_gravity="center"
+                            android:src="@drawable/ic_play"
+                            android:background="#000000"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                    </FrameLayout>
+
+                </LinearLayout>
+
                 <!-- ReID Intel Modal (full-screen overlay, depth 3) -->
                 <ScrollView
                     android:id="@+id/reidIntelModal"
@@ -1370,7 +1429,7 @@
                 <!-- Centered tab container (no pill outline) -->
                 <FrameLayout
                     android:id="@+id/pillContainer"
-                    android:layout_width="190dp"
+                    android:layout_width="203dp"
                     android:layout_height="28dp"
                     android:layout_gravity="center_horizontal|bottom"
                     android:background="@android:color/transparent"
@@ -1494,6 +1553,23 @@
                                 android:layout_height="13dp"
                                 android:layout_gravity="center"
                                 android:src="@drawable/ic_person"
+                                android:focusable="false"
+                                android:focusableInTouchMode="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1">
+
+                            <ImageView
+                                android:id="@+id/tabCopilot"
+                                android:layout_width="13dp"
+                                android:layout_height="13dp"
+                                android:layout_gravity="center"
+                                android:src="@drawable/ic_copilot"
                                 android:focusable="false"
                                 android:focusableInTouchMode="false"
                                 android:defaultFocusHighlightEnabled="false" />

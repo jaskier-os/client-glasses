@@ -126,6 +126,15 @@ class ListenerService : LifecycleService(),
 
         const val ACTION_REQUEST_NEW_CHAT = "com.repository.glasses.listener.REQUEST_NEW_CHAT"
         const val ACTION_TOGGLE_ASSISTANT = "com.repository.glasses.listener.TOGGLE_ASSISTANT"
+        // Copilot (called "assistant" throughout the glasses code) run state, pushed to
+        // MainActivity. The UI process must never infer this from its own button press:
+        // the phone owns copilotMode, so the only truthful signal is the phone's
+        // start_assistant / stop_assistant command actually arriving here.
+        const val ACTION_ASSISTANT_STATE = "com.repository.glasses.listener.ASSISTANT_STATE"
+        const val EXTRA_ASSISTANT_ACTIVE = "assistant_active"
+        // Asks the service to re-emit ACTION_ASSISTANT_STATE, so a UI that started or
+        // resumed after the last transition still shows the true state.
+        const val ACTION_QUERY_ASSISTANT_STATE = "com.repository.glasses.listener.QUERY_ASSISTANT_STATE"
         const val ACTION_REQUEST_CHAT_LIST = "com.repository.glasses.listener.REQUEST_CHAT_LIST"
         const val ACTION_SWITCH_CHAT = "com.repository.glasses.listener.SWITCH_CHAT"
         const val ACTION_DEBUG_STATUS = "com.repository.glasses.listener.DEBUG_STATUS"
@@ -3190,6 +3199,11 @@ class ListenerService : LifecycleService(),
         registerReceiver(
             assistantToggleReceiver,
             IntentFilter(ACTION_TOGGLE_ASSISTANT),
+            Context.RECEIVER_NOT_EXPORTED
+        )
+        registerReceiver(
+            assistantStateQueryReceiver,
+            IntentFilter(ACTION_QUERY_ASSISTANT_STATE),
             Context.RECEIVER_NOT_EXPORTED
         )
         btLog("Chat list receivers registered")
@@ -6571,6 +6585,7 @@ class ListenerService : LifecycleService(),
                 assistantActive = true
                 startFrontMicForTranslation(twoWay = true)
                 assistantCardOverlay.hideAll()
+                broadcastAssistantState()
                 btClient.sendCommandResult(requestId, """{"status":"started"}""")
             }
             "stop_assistant" -> {
@@ -6579,6 +6594,7 @@ class ListenerService : LifecycleService(),
                 stopFrontMicForTranslation()
                 assistantCardOverlay.hideAll()
                 assistantActive = false
+                broadcastAssistantState()
                 btClient.sendCommandResult(requestId, """{"status":"stopped"}""")
             }
             "assistant_show_card" -> {
@@ -7436,22 +7452,52 @@ class ListenerService : LifecycleService(),
         }
     }
 
+    /**
+     * Push the real Copilot run state to the UI process.
+     *
+     * [assistantActive] flips only when the phone's start_assistant / stop_assistant
+     * command is handled, i.e. only once the phone has actually entered copilotMode.
+     * The UI therefore shows what the system is doing rather than what the user asked
+     * for, and a request the phone drops or refuses leaves the button showing "stopped".
+     */
+    private fun broadcastAssistantState() {
+        sendBroadcast(Intent(ACTION_ASSISTANT_STATE).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_ASSISTANT_ACTIVE, assistantActive)
+        })
+    }
+
+    /**
+     * Ask the phone to start or stop Copilot. The phone owns copilotMode, so the glasses
+     * can only ever REQUEST -- calling the local start path directly would move the mic
+     * while the phone stayed disabled and never emitted a card.
+     */
+    private fun requestAssistant(start: Boolean) {
+        if (start) {
+            val ctx = this@ListenerService
+            val params = JSONObject().apply {
+                put("wearer_lang", GlassesConfig.getAssistantWearerLang(ctx))
+                put("interlocutor_lang", GlassesConfig.getAssistantInterlocutorLang(ctx))
+                put("interlocutor_source", GlassesConfig.getAssistantInterlocutorSource(ctx))
+                put("model", GlassesConfig.getAssistantModel(ctx))
+            }
+            btClient.sendGlassesCommand("request_start_assistant", params)
+            btLog("Assistant: requesting start")
+        } else {
+            btClient.sendGlassesCommand("request_stop_assistant")
+            btLog("Assistant: requesting stop")
+        }
+    }
+
     private val assistantToggleReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (!assistantActive) {
-                val ctx = this@ListenerService
-                val params = JSONObject().apply {
-                    put("wearer_lang", GlassesConfig.getAssistantWearerLang(ctx))
-                    put("interlocutor_lang", GlassesConfig.getAssistantInterlocutorLang(ctx))
-                    put("interlocutor_source", GlassesConfig.getAssistantInterlocutorSource(ctx))
-                    put("model", GlassesConfig.getAssistantModel(ctx))
-                }
-                btClient.sendGlassesCommand("request_start_assistant", params)
-                btLog("Assistant toggle: requesting start")
-            } else {
-                btClient.sendGlassesCommand("request_stop_assistant")
-                btLog("Assistant toggle: requesting stop")
-            }
+            requestAssistant(start = !assistantActive)
+        }
+    }
+
+    private val assistantStateQueryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            broadcastAssistantState()
         }
     }
 
@@ -9121,6 +9167,7 @@ class ListenerService : LifecycleService(),
         try { unregisterReceiver(tabChangedReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(translationToggleReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(assistantToggleReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(assistantStateQueryReceiver) } catch (_: Exception) {}
         try { if (assistantActive) assistantCardOverlay.hideAll() } catch (_: Exception) {}
         try { unregisterReceiver(stopJourneyReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(mediaCommandReceiver) } catch (_: Exception) {}

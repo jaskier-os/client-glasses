@@ -47,7 +47,7 @@ class RemoteActionGateTest {
     private val allStates = listOf(
         "TAB_NAV", "CHAT_FOCUSED", "LIST_FOCUSED", "MAP_FOCUSED", "MAP_ZOOM_FOCUSED",
         "STOP_MODAL", "STEPS_MODAL", "TRANSLATE_FOCUSED", "TELEPROMPTER_FOCUSED",
-        "REID_FOCUSED", "REID_FACES_FOCUSED", "REID_INTEL_MODAL", "TODO_FOCUSED",
+        "REID_FOCUSED", "REID_FACES_FOCUSED", "REID_INTEL_MODAL", "COPILOT_FOCUSED", "TODO_FOCUSED",
         "NIGHTVISION_FOCUSED", "MOUSE_FOCUSED", "MUSIC_FOCUSED", "TELEGRAM_LIST_FOCUSED",
         "TELEGRAM_TOPICS_FOCUSED", "TELEGRAM_CHAT_FOCUSED", "TELEGRAM_RECORDING",
         "TELEGRAM_PREVIEW", "NOTIFICATION_REPLY", "CALL_INCOMING", "CALL_ACTIVE",
@@ -189,6 +189,16 @@ class RemoteActionGateTest {
     @Test
     fun `tap cannot toggle live translation`() {
         assertEquals(false, allowed(snap("TRANSLATE_FOCUSED"), RemoteAction.SELECT))
+    }
+
+    @Test
+    fun `tap cannot toggle copilot, but the tab can still be left`() {
+        // Starting Copilot opens the front mic on the wearer's surroundings, so SELECT is
+        // refused for the same reason as translation. BACK must stay allowed or a remote
+        // user who opened the tab would be stuck in it.
+        assertEquals(false, allowed(snap("COPILOT_FOCUSED"), RemoteAction.SELECT))
+        assertEquals(true, allowed(snap("COPILOT_FOCUSED"), RemoteAction.BACK))
+        assertEquals(true, allowed(snap("COPILOT_FOCUSED"), RemoteAction.SCROLL_STEP))
     }
 
     @Test

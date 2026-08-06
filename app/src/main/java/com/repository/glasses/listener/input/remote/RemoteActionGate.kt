@@ -143,6 +143,7 @@ object RemoteActionGate {
         "REID_FOCUSED",
         "REID_FACES_FOCUSED",
         "REID_INTEL_MODAL",
+        "COPILOT_FOCUSED",
         "TODO_FOCUSED",
         "NIGHTVISION_FOCUSED",
         "MUSIC_FOCUSED",
@@ -248,6 +249,11 @@ object RemoteActionGate {
     private val SELECT_REACHES_HAZARD = setOf(
         // Toggles live translation, i.e. the microphone.
         "TRANSLATE_FOCUSED",
+        // Toggles Copilot, which opens the front mic and streams ambient speech to the
+        // phone for fact-checking. Same hazard class as TRANSLATE_FOCUSED: a remote user
+        // must not be able to start listening to the wearer's surroundings. BACK stays
+        // permitted, so the state is escapable and not a trap.
+        "COPILOT_FOCUSED",
         // Starts a voice recording addressed to a real contact.
         "TELEGRAM_CHAT_FOCUSED",
         // Toggles HID tracking, which takes ownership of the input device.
