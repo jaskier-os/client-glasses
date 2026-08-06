@@ -63,6 +63,11 @@ import com.repository.glasses.listener.ui.ChatRow
 import com.repository.glasses.listener.ui.ChatMessage
 import com.repository.glasses.listener.ui.ChatSummaryItem
 import com.repository.glasses.listener.ui.Lum
+import com.repository.glasses.listener.ui.RcSendWindow
+import com.repository.glasses.listener.ui.RcThreadAdapter
+import com.repository.glasses.listener.ui.RcThreadModel
+import com.repository.glasses.listener.ui.RcVoiceGate
+import com.repository.glasses.listener.ui.SpinnerView
 import com.repository.glasses.listener.ui.TabHighlightView
 import com.repository.glasses.listener.ui.VerticalHighlightView
 import com.repository.glasses.listener.ui.MessageItemAnimator
@@ -140,7 +145,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     }
 
     // --- Focus state machine ---
-    enum class FocusState { TAB_NAV, CHAT_FOCUSED, LIST_FOCUSED, MAP_FOCUSED, MAP_ZOOM_FOCUSED, STOP_MODAL, STEPS_MODAL, TRANSLATE_FOCUSED, TELEPROMPTER_FOCUSED, REID_FOCUSED, REID_FACES_FOCUSED, REID_INTEL_MODAL, COPILOT_FOCUSED, TODO_FOCUSED, NIGHTVISION_FOCUSED, MOUSE_FOCUSED, MUSIC_FOCUSED, TELEGRAM_LIST_FOCUSED, TELEGRAM_TOPICS_FOCUSED, TELEGRAM_CHAT_FOCUSED, TELEGRAM_RECORDING, TELEGRAM_PREVIEW, NOTIFICATION_REPLY, CALL_INCOMING, CALL_ACTIVE }
+    enum class FocusState { TAB_NAV, CHAT_FOCUSED, LIST_FOCUSED, MAP_FOCUSED, MAP_ZOOM_FOCUSED, STOP_MODAL, STEPS_MODAL, TRANSLATE_FOCUSED, TELEPROMPTER_FOCUSED, REID_FOCUSED, REID_FACES_FOCUSED, REID_INTEL_MODAL, COPILOT_FOCUSED, TODO_FOCUSED, NIGHTVISION_FOCUSED, MOUSE_FOCUSED, MUSIC_FOCUSED, TELEGRAM_LIST_FOCUSED, TELEGRAM_TOPICS_FOCUSED, TELEGRAM_CHAT_FOCUSED, TELEGRAM_RECORDING, TELEGRAM_PREVIEW, NOTIFICATION_REPLY, CALL_INCOMING, CALL_ACTIVE, RC_THREAD_FOCUSED }
 
     private var focusState = FocusState.TAB_NAV
 
@@ -354,6 +359,45 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private lateinit var chatListRecycler: RecyclerView
     private lateinit var chatListAdapter: ChatListAdapter
     private lateinit var chatListLayoutManager: LinearLayoutManager
+
+    // --- RC thread view (remote-control session mirror) ---
+    private lateinit var rcThreadContainer: LinearLayout
+    private lateinit var rcThreadTitle: TextView
+    private lateinit var rcThreadFolder: TextView
+    private lateinit var rcThreadSpinnerSlot: FrameLayout
+    private var rcThreadSpinner: SpinnerView? = null
+    private lateinit var rcThreadRecycler: RecyclerView
+    private lateinit var rcThreadAdapter: RcThreadAdapter
+    private lateinit var rcThreadFooter: LinearLayout
+    private lateinit var rcThreadMicGlyph: TextView
+    private lateinit var rcThreadFooterHint: TextView
+    private lateinit var rcThreadVoiceBar: LinearLayout
+    private lateinit var rcThreadVoiceText: TextView
+    private lateinit var rcThreadCountdownTrack: View
+    private lateinit var rcThreadCountdownFill: View
+    private lateinit var rcThreadCountdownRow: LinearLayout
+    private lateinit var rcThreadCountdownSecs: TextView
+
+    /** Merges CH_RC_MESSAGES_RESP frames. Empty until a session is opened. */
+    private val rcThread = RcThreadModel()
+
+    /** The session-list row the open thread belongs to, refreshed by every state push. */
+    private var rcOpenSession: ChatRow.RcSession? = null
+
+    /** The 3 s undo between the transcript and the agent. A field, deliberately not a FocusState. */
+    private val rcSendWindow = RcSendWindow()
+    private var rcSendRunnable: Runnable? = null
+    private var rcSendTickRunnable: Runnable? = null
+
+    /** True while the glasses mic is streaming for THIS thread. */
+    private var rcCapturing = false
+
+    /** True from writing a CH_RC_SEND_REQ until the phone answers; blocks a double-press resend. */
+    private var rcSendInFlight = false
+
+    /** Correlation id of the send in flight, matched against CH_RC_SEND_RESP. */
+    private var rcSendClientMsgId: String? = null
+
     private lateinit var statusArea: View
     private lateinit var statusBar: TextView
     private lateinit var doubleTapHint: View
@@ -1276,6 +1320,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 if (focusState == FocusState.NOTIFICATION_REPLY) {
                     return@runOnUiThread
                 }
+                // RC dictation: the partial renders in the thread's voice bar.
+                if (focusState == FocusState.RC_THREAD_FOCUSED && rcCapturing) {
+                    if (text.isNotBlank()) rcThreadVoiceText.text = text
+                    return@runOnUiThread
+                }
                 if (serviceState != "LISTENING") return@runOnUiThread
                 if (partialsSuppressed) return@runOnUiThread
                 if (text.isBlank()) return@runOnUiThread
@@ -1305,6 +1354,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 // Route to Telegram send preview if recording
                 if (focusState == FocusState.TELEGRAM_RECORDING) {
                     telegramShowSendPreview(text)
+                    return@runOnUiThread
+                }
+                // RC dictation final: opens the 3s undo window (or tears down if blank).
+                if (focusState == FocusState.RC_THREAD_FOCUSED && rcCapturing) {
+                    rcOnFinalTranscript(text)
                     return@runOnUiThread
                 }
                 if (focusState == FocusState.NOTIFICATION_REPLY) {
@@ -1834,7 +1888,80 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 activityLog("RC state push ignored: unparseable frame (${json.length} chars)")
                 return
             }
-            runOnUiThread { chatListAdapter.submitRcState(state) }
+            runOnUiThread {
+                chatListAdapter.submitRcState(state)
+                onRcStateApplied()
+            }
+        }
+    }
+
+    /**
+     * Keeps an open thread in step with the authoritative snapshot.
+     *
+     * A session absent from a snapshot has been removed, so the thread pops back to the list rather
+     * than rendering an orphan whose spinner and mic would both be lying.
+     */
+    private fun onRcStateApplied() {
+        if (focusState != FocusState.RC_THREAD_FOCUSED) return
+        val id = rcOpenSession?.id ?: return
+        val row = chatListAdapter.rcSessionRow(id)
+        if (row == null) {
+            uiLog("RC: open session $id vanished from the snapshot -> back to the list")
+            closeRcThread()
+            return
+        }
+        rcOpenSession = row
+        // A session that ended, or a link that dropped, must revoke a capture already running --
+        // the refusal is not only about starting one.
+        val verdict = rcVoiceVerdict()
+        if ((rcCapturing || rcSendWindow.pending) && !verdict.allowed &&
+            verdict != RcVoiceGate.Verdict.Busy) {
+            uiLog("RC: voice aborted mid-flight (${verdict.name})")
+            rcCancelCapture()
+            rcClearSendWindow()
+        }
+        renderRcThreadChrome()
+    }
+
+    private val rcMessagesReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val sessionId = intent.getStringExtra(ListenerService.EXTRA_RC_SESSION_ID) ?: return
+            val json = intent.getStringExtra(ListenerService.EXTRA_RC_MESSAGES_JSON) ?: return
+            runOnUiThread {
+                // The model drops any frame that is not the open session's -- the glasses-side belt
+                // against rendering one session's rows under another session's name.
+                if (!rcThread.accept(sessionId, json)) return@runOnUiThread
+                // Rows arriving for the open thread also clear a send that was in flight: the
+                // phone has evidently processed it.
+                rcSendInFlight = false
+                rcSendClientMsgId = null
+                // A newly arrived prompt starts its caret at the top rather than wherever the
+                // previous prompt's caret happened to rest.
+                rcThreadAdapter.setPromptCursor(0)
+                renderRcThreadRows()
+                rcOpenSession?.let { requestRcMessages(it.id) }
+            }
+        }
+    }
+
+    private val rcSendResultReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val sessionId = intent.getStringExtra(ListenerService.EXTRA_RC_SESSION_ID) ?: return
+            val clientMsgId = intent.getStringExtra(ListenerService.EXTRA_RC_CLIENT_MSG_ID) ?: ""
+            val status = intent.getStringExtra(ListenerService.EXTRA_RC_STATUS) ?: return
+            runOnUiThread {
+                if (sessionId != rcOpenSession?.id) return@runOnUiThread
+                if (clientMsgId.isNotEmpty() && clientMsgId != rcSendClientMsgId) return@runOnUiThread
+                rcSendInFlight = false
+                rcSendClientMsgId = null
+                // A rejected send produces no turn and therefore no confirming row: without this
+                // the user would believe a dictation landed when it never did.
+                if (status != "sent") {
+                    uiLog("RC: send failed: $status")
+                    dbg("send failed")
+                }
+                renderRcThreadChrome()
+            }
         }
     }
 
@@ -3593,6 +3720,20 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             debugStatus = findViewById(R.id.debugStatus)
             chatRecycler = findViewById(R.id.chatRecycler)
             chatListRecycler = findViewById(R.id.chatListRecycler)
+            rcThreadContainer = findViewById(R.id.rcThreadContainer)
+            rcThreadTitle = findViewById(R.id.rcThreadTitle)
+            rcThreadFolder = findViewById(R.id.rcThreadFolder)
+            rcThreadSpinnerSlot = findViewById(R.id.rcThreadSpinnerSlot)
+            rcThreadRecycler = findViewById(R.id.rcThreadRecycler)
+            rcThreadFooter = findViewById(R.id.rcThreadFooter)
+            rcThreadMicGlyph = findViewById(R.id.rcThreadMicGlyph)
+            rcThreadFooterHint = findViewById(R.id.rcThreadFooterHint)
+            rcThreadVoiceBar = findViewById(R.id.rcThreadVoiceBar)
+            rcThreadVoiceText = findViewById(R.id.rcThreadVoiceText)
+            rcThreadCountdownTrack = findViewById(R.id.rcThreadCountdownTrack)
+            rcThreadCountdownFill = findViewById(R.id.rcThreadCountdownFill)
+            rcThreadCountdownRow = findViewById(R.id.rcThreadCountdownRow)
+            rcThreadCountdownSecs = findViewById(R.id.rcThreadCountdownSecs)
             statusArea = findViewById(R.id.statusArea)
             statusBar = findViewById(R.id.statusBar)
             remoteInputGlyph = findViewById(R.id.remoteInputGlyph)
@@ -3976,6 +4117,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 }
             })
 
+            rcThreadAdapter = RcThreadAdapter()
+            rcThreadRecycler.layoutManager = LinearLayoutManager(this)
+            rcThreadRecycler.adapter = rcThreadAdapter
+            rcThreadSpinner = SpinnerView(this, sizeDp = 11, tint = Lum.GLOW).also {
+                rcThreadSpinnerSlot.addView(it)
+            }
+
             // Set initial focus visual on pill tab bar and switch to first tab
             updateFocusVisual(FocusState.TAB_NAV)
             switchToTab(currentTab, animate = false)
@@ -4010,6 +4158,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             registerReceiver(navStepIndexReceiver, IntentFilter(ListenerService.ACTION_NAV_STEP_INDEX))
             registerReceiver(chatListReceiver, IntentFilter(ListenerService.ACTION_CHAT_LIST))
             registerReceiver(rcStateReceiver, IntentFilter(ListenerService.ACTION_RC_STATE))
+            registerReceiver(rcMessagesReceiver, IntentFilter(ListenerService.ACTION_RC_MESSAGES))
+            registerReceiver(rcSendResultReceiver, IntentFilter(ListenerService.ACTION_RC_SEND_RESULT))
             registerReceiver(chatHistoryReceiver, IntentFilter(ListenerService.ACTION_CHAT_HISTORY_LOADED))
             registerReceiver(debugStatusReceiver, IntentFilter(ListenerService.ACTION_DEBUG_STATUS))
             registerReceiver(btStateReceiver, IntentFilter(ListenerService.ACTION_BT_STATE))
@@ -5323,8 +5473,20 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         chatRecycler.visibility = if (showChat) View.VISIBLE else View.GONE
         chatRecycler.alpha = 1f
         chatEmptyHint.visibility = if (showChat && chatAdapter.itemCount == 0 && serviceState == "IDLE") View.VISIBLE else View.GONE
-        chatListRecycler.visibility = if (showChatList) View.VISIBLE else View.GONE
+        // The RC thread lives on this tab and REPLACES the list while it is open, so the list is
+        // only shown when no thread is. Leaving the tab closes the thread outright: keeping it
+        // "open" off-screen would leave live row pushes flowing to a view nobody can see.
+        val rcThreadOpen = showChatList && focusState == FocusState.RC_THREAD_FOCUSED
+        if (!showChatList && ::rcThreadContainer.isInitialized &&
+            focusState == FocusState.RC_THREAD_FOCUSED) {
+            closeRcThread(returnToList = false)
+        }
+        chatListRecycler.visibility = if (showChatList && !rcThreadOpen) View.VISIBLE else View.GONE
         chatListRecycler.alpha = 1f
+        if (::rcThreadContainer.isInitialized) {
+            rcThreadContainer.visibility = if (rcThreadOpen) View.VISIBLE else View.GONE
+            if (!rcThreadOpen) rcThreadSpinner?.stop()
+        }
         reidContainer.visibility = if (showReid) View.VISIBLE else View.GONE
         copilotContainer.visibility = if (showCopilot) View.VISIBLE else View.GONE
         if (showCopilot) {
@@ -6797,8 +6959,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * Confirm on a pinned RC row.
      *
      * An ended session is shown but is NOT enterable: it says so and stays put, rather than opening
-     * a thread that can never advance. The thread screen itself is not built yet -- until it is,
-     * this deliberately does nothing further rather than half-opening something.
+     * a thread that can never advance.
      */
     private fun openSelectedRcSession() {
         val row = chatListAdapter.selectedRow() as? ChatRow.RcSession ?: return
@@ -6807,7 +6968,276 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             uiLog("RC: refused to open ended session ${row.id}")
             return
         }
-        uiLog("RC: open session ${row.id} (thread view pending)")
+        rcOpenSession = row
+        rcThread.open(row.id)
+        rcThreadAdapter.setPromptCursor(0)
+        rcThreadAdapter.submit(rcThread.items())
+        focusState = FocusState.RC_THREAD_FOCUSED
+        chatListRecycler.visibility = View.GONE
+        rcThreadContainer.visibility = View.VISIBLE
+        renderRcThreadChrome()
+        // Asking for the rows IS the read acknowledgement; seenSeq is -1 because nothing is held.
+        requestRcMessages(row.id)
+        uiLog("RC: opened session ${row.id}")
+    }
+
+    /** args = [sessionId, seenSeq]. An empty sessionId tells the phone to stop pushing rows. */
+    private fun requestRcMessages(sessionId: String) {
+        sendBroadcast(Intent(ListenerService.ACTION_RC_MESSAGES_REQ).apply {
+            setPackage(packageName)
+            putExtra(ListenerService.EXTRA_RC_SESSION_ID, sessionId)
+            putExtra(ListenerService.EXTRA_RC_SEEN_SEQ, rcThread.seenSeq())
+        })
+    }
+
+    /**
+     * Leaves the thread for the session list.
+     *
+     * Tells the phone with an EMPTY sessionId, which is what stops live row pushes for a thread
+     * nobody is looking at -- without it they keep flowing forever.
+     */
+    private fun closeRcThread(returnToList: Boolean = true) {
+        rcCancelCapture()
+        rcClearSendWindow()
+        rcThread.close()
+        rcOpenSession = null
+        rcThreadAdapter.submit(emptyList())
+        rcThreadContainer.visibility = View.GONE
+        rcThreadSpinner?.stop()
+        // A tab switch already owns focus and visibility for the tab it is moving to; forcing the
+        // chat list back on there would show it over a different tab's content.
+        if (returnToList) {
+            chatListRecycler.visibility = View.VISIBLE
+            focusState = FocusState.LIST_FOCUSED
+            updateFocusVisual(focusState)
+        }
+        sendBroadcast(Intent(ListenerService.ACTION_RC_MESSAGES_REQ).apply {
+            setPackage(packageName)
+            putExtra(ListenerService.EXTRA_RC_SESSION_ID, "")
+            putExtra(ListenerService.EXTRA_RC_SEEN_SEQ, -1L)
+        })
+        uiLog("RC: closed thread")
+    }
+
+    /** The current microphone verdict for the open thread. */
+    private fun rcVoiceVerdict(): RcVoiceGate.Verdict {
+        val session = rcOpenSession
+            ?: return RcVoiceGate.Verdict.Ended
+        return RcVoiceGate.evaluate(
+            wsConnected = chatListAdapter.rcWsConnected,
+            turning = session.turning,
+            ended = session.ended,
+            blockingPrompt = rcThread.blockingPrompt() != null,
+            capturing = rcCapturing,
+            sendPending = rcSendWindow.pending,
+            sendInFlight = rcSendInFlight,
+        )
+    }
+
+    /** Header, spinner and footer. The mic affordance is absent whenever voice is refused. */
+    private fun renderRcThreadChrome() {
+        val session = rcOpenSession ?: return
+        rcThreadTitle.text = session.name
+        rcThreadFolder.text = session.folder
+        // Dim the whole header when the orchestrator link is down, matching the list rows.
+        val dim = session.dim
+        rcThreadTitle.setTextColor(if (dim) Lum.DIM else Lum.GLOW)
+        rcThreadFolder.setTextColor(if (dim) Lum.GHOST else Lum.DIM)
+        if (session.turning) {
+            rcThreadSpinnerSlot.visibility = View.VISIBLE
+            rcThreadSpinner?.start()
+        } else {
+            rcThreadSpinnerSlot.visibility = View.GONE
+            rcThreadSpinner?.stop()
+        }
+
+        val verdict = rcVoiceVerdict()
+        // Voice states own the footer; the mic affordance is only shown when idle.
+        val voiceBarUp = rcCapturing || rcSendWindow.pending
+        rcThreadFooter.visibility = if (voiceBarUp) View.GONE else View.VISIBLE
+        rcThreadMicGlyph.visibility = if (verdict.allowed) View.VISIBLE else View.GONE
+        rcThreadFooterHint.text = verdict.hudText
+        rcThreadFooterHint.visibility = if (verdict.allowed) View.GONE else View.VISIBLE
+    }
+
+    private fun renderRcThreadRows() {
+        rcThreadAdapter.submit(rcThread.items())
+        val last = rcThreadAdapter.itemCount - 1
+        if (last >= 0) rcThreadRecycler.scrollToPosition(last)
+        renderRcThreadChrome()
+    }
+
+    // --- RC hold-to-speak ---
+
+    /**
+     * NUMPAD_3 held inside a thread. Refuses loudly rather than silently whenever the session
+     * cannot take a message: a swallowed dictation into a coding agent is the worst outcome here.
+     */
+    private fun rcStartCapture() {
+        val session = rcOpenSession ?: return
+        val verdict = rcVoiceVerdict()
+        if (!verdict.allowed) {
+            uiLog("RC: hold-to-speak refused (${verdict.name}) session=${session.id}")
+            dbg(verdict.hudText)
+            renderRcThreadChrome()
+            return
+        }
+        rcCapturing = true
+        rcThreadVoiceText.text = ""
+        rcThreadVoiceBar.visibility = View.VISIBLE
+        rcShowCountdown(false)
+        renderRcThreadChrome()
+        // The existing dictation pipeline, unchanged: glasses mic -> phone STT -> final user text.
+        sendBroadcast(Intent(ListenerService.ACTION_TG_VOICE_STOP).apply { setPackage(packageName) })
+        sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_START).apply {
+            setPackage(packageName)
+            putExtra(ListenerService.EXTRA_RC_SESSION_ID, session.id)
+        })
+        uiLog("RC: capture started for ${session.id}")
+    }
+
+    /** Stops a capture without sending. Safe to call when none is running. */
+    private fun rcCancelCapture() {
+        if (!rcCapturing) return
+        rcCapturing = false
+        sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_STOP).apply { setPackage(packageName) })
+        rcThreadVoiceBar.visibility = View.GONE
+        uiLog("RC: capture cancelled")
+    }
+
+    /**
+     * The phone's STT produced a final transcript for this thread. A blank one captured nothing:
+     * tear down rather than opening a window over whitespace.
+     */
+    private fun rcOnFinalTranscript(text: String) {
+        rcCapturing = false
+        sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_STOP).apply { setPackage(packageName) })
+        if (!rcSendWindow.arm(text)) {
+            uiLog("RC: blank transcript, nothing to send")
+            rcThreadVoiceBar.visibility = View.GONE
+            renderRcThreadChrome()
+            return
+        }
+        rcThreadVoiceText.text = rcSendWindow.text
+        rcThreadVoiceText.setTextColor(Lum.BRIGHT)
+        rcThreadVoiceBar.visibility = View.VISIBLE
+        rcShowCountdown(true)
+        rcStartSendCountdown()
+        renderRcThreadChrome()
+    }
+
+    private fun rcShowCountdown(show: Boolean) {
+        val vis = if (show) View.VISIBLE else View.GONE
+        rcThreadCountdownTrack.visibility = vis
+        rcThreadCountdownFill.visibility = vis
+        rcThreadCountdownRow.visibility = vis
+    }
+
+    private fun rcStartSendCountdown() {
+        rcClearSendCallbacks()
+        val startedAt = SystemClock.uptimeMillis()
+        rcThreadCountdownFill.scaleX = 1f
+        rcThreadCountdownFill.pivotX = 0f
+        rcThreadCountdownSecs.text = "3s"
+        val tick = object : Runnable {
+            override fun run() {
+                if (!rcSendWindow.pending) return
+                val elapsed = SystemClock.uptimeMillis() - startedAt
+                val remaining = (RcSendWindow.WINDOW_MS - elapsed).coerceAtLeast(0L)
+                rcThreadCountdownFill.scaleX = remaining.toFloat() / RcSendWindow.WINDOW_MS
+                rcThreadCountdownSecs.text = "${((remaining + 999) / 1000)}s"
+                if (remaining > 0) {
+                    rcSendTickRunnable = this
+                    mainHandler.postDelayed(this, 100L)
+                }
+            }
+        }
+        rcSendTickRunnable = tick
+        mainHandler.post(tick)
+        val commit = Runnable { rcCommitSend() }
+        rcSendRunnable = commit
+        mainHandler.postDelayed(commit, RcSendWindow.WINDOW_MS)
+    }
+
+    private fun rcClearSendCallbacks() {
+        rcSendRunnable?.let { mainHandler.removeCallbacks(it) }
+        rcSendRunnable = null
+        rcSendTickRunnable?.let { mainHandler.removeCallbacks(it) }
+        rcSendTickRunnable = null
+    }
+
+    private fun rcClearSendWindow() {
+        rcClearSendCallbacks()
+        rcSendWindow.cancel()
+        rcShowCountdown(false)
+        rcThreadVoiceBar.visibility = View.GONE
+    }
+
+    /**
+     * The window elapsed. Writes CH_RC_SEND_REQ exactly once and marks the send in flight, so a
+     * second key press cannot produce a second frame.
+     *
+     * No optimistic local user row is appended: `seq` is minted phone-side and the row schema has
+     * no correlation id, so an optimistic row could never be matched away and would render twice.
+     */
+    private fun rcCommitSend() {
+        rcClearSendCallbacks()
+        val text = rcSendWindow.commit() ?: return
+        val session = rcOpenSession
+        if (session == null) {
+            uiLog("RC: send dropped, thread already closed")
+            rcShowCountdown(false)
+            rcThreadVoiceBar.visibility = View.GONE
+            return
+        }
+        val clientMsgId = UUID.randomUUID().toString()
+        rcSendClientMsgId = clientMsgId
+        rcSendInFlight = true
+        sendBroadcast(Intent(ListenerService.ACTION_RC_SEND_MSG).apply {
+            setPackage(packageName)
+            putExtra(ListenerService.EXTRA_RC_SESSION_ID, session.id)
+            putExtra(ListenerService.EXTRA_RC_CLIENT_MSG_ID, clientMsgId)
+            putExtra(ListenerService.EXTRA_RC_TEXT, text)
+        })
+        rcShowCountdown(false)
+        rcThreadVoiceBar.visibility = View.GONE
+        renderRcThreadChrome()
+        uiLog("RC: sent ${text.take(40)} to ${session.id}")
+    }
+
+    /** The blocking prompt's options, empty when the session is not waiting on one. */
+    private fun rcPromptOptions(): List<String> = rcThread.blockingPrompt()?.options ?: emptyList()
+
+    private fun rcMovePromptCursor(delta: Int) {
+        val options = rcPromptOptions()
+        if (options.isEmpty()) return
+        val next = (rcThreadAdapter.promptCursor() + delta).coerceIn(0, options.lastIndex)
+        rcThreadAdapter.setPromptCursor(next)
+        rcThreadRecycler.scrollToPosition(rcThreadAdapter.itemCount - 1)
+    }
+
+    /**
+     * Confirms the highlighted option of a blocking prompt.
+     *
+     * Prompts are ALWAYS answered this way, never by voice: an option is an exact string the agent
+     * matches on, and a transcription of it is not the same thing.
+     */
+    private fun rcConfirmPromptOption() {
+        val prompt = rcThread.blockingPrompt() ?: return
+        val session = rcOpenSession ?: return
+        val option = prompt.options.getOrNull(rcThreadAdapter.promptCursor()) ?: return
+        if (prompt.requestId.isEmpty()) {
+            uiLog("RC: prompt has no request id, answer it on the phone")
+            dbg("answer on phone")
+            return
+        }
+        sendBroadcast(Intent(ListenerService.ACTION_RC_ANSWER).apply {
+            setPackage(packageName)
+            putExtra(ListenerService.EXTRA_RC_SESSION_ID, session.id)
+            putExtra(ListenerService.EXTRA_RC_REQUEST_ID, prompt.requestId)
+            putExtra(ListenerService.EXTRA_RC_TEXT, option)
+        })
+        uiLog("RC: answered prompt ${prompt.requestId} with $option")
     }
 
     private fun updateChatEmptyHint() {
@@ -7632,6 +8062,18 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             dpadHandler.listener?.onRightClick()
             return true
         }
+        // RC thread hold-to-speak. Must be checked BEFORE the notification-reply arm and the
+        // generic NUMPAD_3 -> ACTION_SENSOR_LONG_PRESS forward below, or a hold inside a thread
+        // would silently open an assistant chat instead of dictating to the coding agent. The
+        // in-flight guard mirrors the [NREPLY] one: a second hold must not start a second capture.
+        if (keyCode == KeyEvent.KEYCODE_NUMPAD_3 && focusState == FocusState.RC_THREAD_FOCUSED) {
+            if (rcCapturing) {
+                uiLog("RC: NUMPAD_3 ignored, capture already running")
+            } else {
+                rcStartCapture()
+            }
+            return true
+        }
         if (keyCode == KeyEvent.KEYCODE_NUMPAD_3) {
             uiLog("[NREPLY] NUMPAD_3 down: repliable=$notificationRepliable pendingNotifId=${pendingNotifId?.take(12)} activeReplyNotifId=${activeReplyNotifId?.take(12)} focus=$focusState replyArming=$replyArming")
         }
@@ -7675,6 +8117,22 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             sendBroadcast(Intent(com.repository.glasses.listener.service.ListenerService.ACTION_SENSOR_LONG_PRESS).apply {
                 setPackage(packageName)
             })
+            return true
+        }
+        // NUMPAD_2 inside an RC thread. Placed here -- above the reply branches and above the
+        // TAB_NAV screen-off chain -- because a release that belongs to the hold gesture must not
+        // register as an unrelated tap, and because a double tap here means "cancel the pending
+        // send", never "leave the screen".
+        if (keyCode == KeyEvent.KEYCODE_NUMPAD_2 && focusState == FocusState.RC_THREAD_FOCUSED) {
+            // Hands-free, exactly like the notification reply: the finger release during a capture
+            // is a no-op, and the phone's VAD decides when the utterance ended.
+            if (rcSendWindow.pending && rcSendWindow.tapCancel(SystemClock.uptimeMillis())) {
+                uiLog("RC: double-tap in send window -> cancel")
+                rcClearSendWindow()
+                renderRcThreadChrome()
+            }
+            // Consumed either way, so a tap in a thread can never fall through to screen-off.
+            lastNumpad2Ms = 0L
             return true
         }
         // NUMPAD_2 (finger lifted / tap) during reply arming or NOTIFICATION_REPLY.
@@ -7831,6 +8289,22 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 hideStepsModal()
                 return true
             }
+            // BACK inside an RC thread. Above the cancel-session branch on purpose: a dictation
+            // running for the coding agent is not the assistant session that branch cancels, and
+            // letting it through would tear down the wrong thing and strand the thread.
+            if (focusState == FocusState.RC_THREAD_FOCUSED) {
+                // A pending send is undone by BACK without leaving the thread -- the same undo the
+                // double tap performs, on the key users reach for first.
+                if (rcSendWindow.pending || rcCapturing) {
+                    uiLog("RC: BACK cancels the pending voice send")
+                    rcCancelCapture()
+                    rcClearSendWindow()
+                    renderRcThreadChrome()
+                    return true
+                }
+                closeRcThread()
+                return true
+            }
             // Cancel active session FIRST, regardless of focus state
             if (serviceState in listOf("LISTENING", "RESPONDING")) {
                 uiLog("KEY: BACK cancel session (was focus=$focusState)")
@@ -7956,6 +8430,41 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             return true
         }
 
+        // RC thread navigation. Sits ABOVE the global double-tap-to-cancel branch below, which
+        // fires on any CENTER while serviceState is LISTENING/RESPONDING -- and an RC dictation
+        // puts the service in exactly that state. Without this ordering, confirming a prompt
+        // option mid-capture would instead cancel the assistant session and never reach the agent.
+        if (focusState == FocusState.RC_THREAD_FOCUSED) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    if (!isScrollThrottled()) {
+                        if (rcPromptOptions().isNotEmpty()) rcMovePromptCursor(1)
+                        else ScrollDrainer.enqueueY(rcThreadRecycler, CHAT_SCROLL_STEP_PX)
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_UP -> {
+                    if (!isScrollThrottled()) {
+                        if (rcPromptOptions().isNotEmpty()) rcMovePromptCursor(-1)
+                        else ScrollDrainer.enqueueY(rcThreadRecycler, -CHAT_SCROLL_STEP_PX)
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                    if (isDoubleTap()) {
+                        pendingTapRunnable?.let { mainHandler.removeCallbacks(it) }
+                        pendingTapRunnable = null
+                        lastCenterPressTime = 0L
+                        closeRcThread()
+                    } else if (rcPromptOptions().isNotEmpty()) {
+                        pendingTapRunnable?.let { mainHandler.removeCallbacks(it) }
+                        runAfterTapWindow(Runnable { rcConfirmPromptOption() })
+                    }
+                    return true
+                }
+            }
+        }
+
         // Double-tap to cancel listening or TTS playback
         // First tap is consumed (shows hint), second tap cancels
         if ((keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER)
@@ -7997,6 +8506,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         }
 
         when (focusState) {
+            // Every RC_THREAD_FOCUSED key is decided above, before the global double-tap-cancel
+            // branch, because an RC dictation puts serviceState in LISTENING and that branch would
+            // otherwise swallow the confirm. Nothing is left for this dispatch to do.
+            FocusState.RC_THREAD_FOCUSED -> {}
             FocusState.TAB_NAV -> {
                 when (keyCode) {
                     KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_DOWN -> {

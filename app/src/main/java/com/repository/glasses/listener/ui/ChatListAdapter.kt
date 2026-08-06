@@ -81,6 +81,21 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     /** The rows currently rendered, in order. Read-only; the caller cannot mutate the adapter. */
     val currentRows: List<ChatRow> get() = selection.rows
 
+    /**
+     * The phone's orchestrator link as of the last snapshot. Defaults to false so a thread opened
+     * before any snapshot refuses the microphone rather than inviting a dictation into a void.
+     */
+    val rcWsConnected: Boolean get() = rcState.wsConnected
+
+    /**
+     * The rendered RC row for [sessionId], or null once the snapshot no longer carries it.
+     *
+     * Absence IS the removal instruction, so a null here is what tells an open thread to pop back
+     * to the list rather than render an orphan.
+     */
+    fun rcSessionRow(sessionId: String): ChatRow.RcSession? =
+        selection.rows.filterIsInstance<ChatRow.RcSession>().firstOrNull { it.id == sessionId }
+
     private val rows: List<ChatRow> get() = selection.rows
 
     /** The caret's identity. Everything else about selection is derived from it. */

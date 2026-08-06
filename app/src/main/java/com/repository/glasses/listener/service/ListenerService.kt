@@ -322,6 +322,16 @@ class ListenerService : LifecycleService(),
         const val EXTRA_RC_CLIENT_MSG_ID = "rc_client_msg_id"
         const val EXTRA_RC_STATUS = "rc_status"
 
+        // UI -> service, the glasses->phone half of the RC mirror.
+        const val ACTION_RC_MESSAGES_REQ = "com.repository.glasses.listener.RC_MESSAGES_REQ"
+        const val ACTION_RC_SEND_MSG = "com.repository.glasses.listener.RC_SEND_MSG"
+        const val ACTION_RC_ANSWER = "com.repository.glasses.listener.RC_ANSWER"
+        const val ACTION_RC_VOICE_START = "com.repository.glasses.listener.RC_VOICE_START"
+        const val ACTION_RC_VOICE_STOP = "com.repository.glasses.listener.RC_VOICE_STOP"
+        const val EXTRA_RC_SEEN_SEQ = "rc_seen_seq"
+        const val EXTRA_RC_TEXT = "rc_text"
+        const val EXTRA_RC_REQUEST_ID = "rc_request_id"
+
         const val EXTRA_TG_CHAT_LIST_JSON = "tg_chat_list_json"
         const val EXTRA_TG_MESSAGES_JSON = "tg_messages_json"
         const val EXTRA_TG_NEW_MESSAGE_JSON = "tg_new_message_json"
@@ -3263,6 +3273,11 @@ class ListenerService : LifecycleService(),
         registerReceiver(tgCloseChatReceiver, IntentFilter(ACTION_TG_CLOSE_CHAT), Context.RECEIVER_NOT_EXPORTED)
         registerReceiver(tgVoiceStartReceiver, IntentFilter(ACTION_TG_VOICE_START), Context.RECEIVER_NOT_EXPORTED)
         registerReceiver(tgVoiceStopReceiver, IntentFilter(ACTION_TG_VOICE_STOP), Context.RECEIVER_NOT_EXPORTED)
+        registerReceiver(rcMessagesReqReceiver, IntentFilter(ACTION_RC_MESSAGES_REQ), Context.RECEIVER_NOT_EXPORTED)
+        registerReceiver(rcSendMsgReceiver, IntentFilter(ACTION_RC_SEND_MSG), Context.RECEIVER_NOT_EXPORTED)
+        registerReceiver(rcAnswerReceiver, IntentFilter(ACTION_RC_ANSWER), Context.RECEIVER_NOT_EXPORTED)
+        registerReceiver(rcVoiceStartReceiver, IntentFilter(ACTION_RC_VOICE_START), Context.RECEIVER_NOT_EXPORTED)
+        registerReceiver(rcVoiceStopReceiver, IntentFilter(ACTION_RC_VOICE_STOP), Context.RECEIVER_NOT_EXPORTED)
         registerReceiver(notifHoldProgressReceiver, IntentFilter(ACTION_NOTIF_HOLD_PROGRESS), Context.RECEIVER_NOT_EXPORTED)
         registerReceiver(notifHoldFreezeReceiver, IntentFilter(ACTION_NOTIF_HOLD_FREEZE), Context.RECEIVER_NOT_EXPORTED)
         registerReceiver(notifReplyStartReceiver, IntentFilter(ACTION_NOTIF_REPLY_START), Context.RECEIVER_NOT_EXPORTED)
@@ -8544,6 +8559,83 @@ class ListenerService : LifecycleService(),
             // Balance the signalAudioStart above: close the live-stream gate (the
             // mic itself stays up for other MicBus consumers).
             stopGlassesAudioStream("tg-voice-stop")
+            btClient.sendTgVoiceStop()
+        }
+    }
+
+    // --- RC mirror: the glasses -> phone half ---
+
+    private val rcMessagesReqReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            // An empty sessionId is meaningful here: it is how the UI says it left the thread.
+            val sessionId = intent.getStringExtra(EXTRA_RC_SESSION_ID) ?: return
+            val seenSeq = intent.getLongExtra(EXTRA_RC_SEEN_SEQ, -1L)
+            btLog("RC messages request: session=${sessionId.ifEmpty { "<closed>" }} seenSeq=$seenSeq")
+            btClient.sendRcMessagesRequest(sessionId, seenSeq)
+        }
+    }
+
+    private val rcSendMsgReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val sessionId = intent.getStringExtra(EXTRA_RC_SESSION_ID) ?: return
+            val clientMsgId = intent.getStringExtra(EXTRA_RC_CLIENT_MSG_ID) ?: return
+            val text = intent.getStringExtra(EXTRA_RC_TEXT) ?: return
+            if (sessionId.isEmpty() || text.isBlank()) {
+                btLog("RC send ignored: empty session or text")
+                return
+            }
+            btLog("RC send: session=$sessionId ${text.length} chars")
+            btClient.sendRcUserMessage(sessionId, clientMsgId, text)
+        }
+    }
+
+    private val rcAnswerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val sessionId = intent.getStringExtra(EXTRA_RC_SESSION_ID) ?: return
+            val requestId = intent.getStringExtra(EXTRA_RC_REQUEST_ID) ?: return
+            val text = intent.getStringExtra(EXTRA_RC_TEXT) ?: return
+            if (sessionId.isEmpty() || requestId.isEmpty() || text.isEmpty()) {
+                btLog("RC answer ignored: incomplete")
+                return
+            }
+            btLog("RC answer: session=$sessionId request=$requestId")
+            btClient.sendRcAnswer(sessionId, requestId, text)
+        }
+    }
+
+    /**
+     * RC dictation reuses the Telegram-voice capture path verbatim: the same mic, the same
+     * glasses->phone audio gate, the same phone-side STT, and the same "tg_voice" final-text
+     * delivery. Only the destination of the finished text differs, and that is decided in the UI.
+     *
+     * A notification reply owns the shared audio gate exclusively, so RC yields to it rather than
+     * tearing its stream down.
+     */
+    private val rcVoiceStartReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val sessionId = intent.getStringExtra(EXTRA_RC_SESSION_ID) ?: return
+            if (notifReplyId != null) {
+                btLog("RC voice start ignored: notif reply in progress (notifId=$notifReplyId)")
+                return
+            }
+            btLog("RC voice start: session=$sessionId")
+            mediaPlayingSnapshot = mediaSessionMonitor.isPlaying
+            telegramVoiceActive = true
+            updateDuckState()
+            signalAudioStart("rc-voice", force = true, durationMs = 0L)
+            // The chatId argument is the phone's capture key; RC has no chat, so it carries the
+            // session id. The phone only uses it to key the capture, and RC's final text is
+            // routed by the glasses UI, not by that key.
+            btClient.sendTgVoiceStart(sessionId)
+        }
+    }
+
+    private val rcVoiceStopReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            btLog("RC voice stop")
+            telegramVoiceActive = false
+            updateDuckState()
+            stopGlassesAudioStream("rc-voice-stop")
             btClient.sendTgVoiceStop()
         }
     }

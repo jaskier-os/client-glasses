@@ -190,6 +190,215 @@
                     android:defaultFocusHighlightEnabled="false"
                     android:visibility="gone" />
 
+                <!-- Remote-control session thread (RC mirror). Lives on the CHAT_LIST tab and
+                     replaces the list while RC_THREAD_FOCUSED. -->
+                <LinearLayout
+                    android:id="@+id/rcThreadContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:orientation="vertical"
+                    android:background="#000000"
+                    android:visibility="gone"
+                    android:focusable="false"
+                    android:focusableInTouchMode="false"
+                    android:defaultFocusHighlightEnabled="false">
+
+                    <TextView
+                        android:id="@+id/rcThreadTitle"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textColor="#00FF00"
+                        android:textSize="14sp"
+                        android:fontFamily="monospace"
+                        android:background="#000000"
+                        android:maxLines="1"
+                        android:ellipsize="end"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <LinearLayout
+                        android:id="@+id/rcThreadSubRow"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:background="#000000"
+                        android:paddingTop="3dp"
+                        android:paddingBottom="7dp"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <TextView
+                            android:id="@+id/rcThreadFolder"
+                            android:layout_width="0dp"
+                            android:layout_weight="1"
+                            android:layout_height="wrap_content"
+                            android:textColor="#007700"
+                            android:textSize="11sp"
+                            android:fontFamily="monospace"
+                            android:background="#000000"
+                            android:maxLines="1"
+                            android:ellipsize="start"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                        <!-- The turning spinner is added here programmatically: SpinnerView is
+                             constructed with its size and tint and has no XML constructor. -->
+                        <FrameLayout
+                            android:id="@+id/rcThreadSpinnerSlot"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="7dp"
+                            android:background="#000000"
+                            android:visibility="gone"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                    </LinearLayout>
+
+                    <androidx.recyclerview.widget.RecyclerView
+                        android:id="@+id/rcThreadRecycler"
+                        android:layout_width="match_parent"
+                        android:layout_height="0dp"
+                        android:layout_weight="1"
+                        android:background="#000000"
+                        android:clipToPadding="false"
+                        android:overScrollMode="never"
+                        android:scrollbars="none"
+                        android:focusable="false"
+                        android:focusableInTouchMode="false"
+                        android:defaultFocusHighlightEnabled="false" />
+
+                    <!-- Footer: mic affordance and the reason it is refused. -->
+                    <LinearLayout
+                        android:id="@+id/rcThreadFooter"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:background="#000000"
+                        android:paddingTop="8dp"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <TextView
+                            android:id="@+id/rcThreadMicGlyph"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="[mic]"
+                            android:textColor="#008800"
+                            android:textSize="12sp"
+                            android:fontFamily="monospace"
+                            android:background="#000000"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                        <TextView
+                            android:id="@+id/rcThreadFooterHint"
+                            android:layout_width="0dp"
+                            android:layout_weight="1"
+                            android:layout_height="wrap_content"
+                            android:textColor="#007700"
+                            android:textSize="11sp"
+                            android:fontFamily="monospace"
+                            android:background="#000000"
+                            android:paddingStart="7dp"
+                            android:paddingEnd="0dp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                    </LinearLayout>
+
+                    <!-- Voice bar: live transcript while capturing, then the 3s send window. -->
+                    <LinearLayout
+                        android:id="@+id/rcThreadVoiceBar"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:background="#000000"
+                        android:paddingTop="9dp"
+                        android:visibility="gone"
+                        android:focusable="false"
+                        android:defaultFocusHighlightEnabled="false">
+
+                        <TextView
+                            android:id="@+id/rcThreadVoiceText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:textColor="#00FF00"
+                            android:textSize="14sp"
+                            android:fontFamily="monospace"
+                            android:background="#000000"
+                            android:maxLines="3"
+                            android:ellipsize="end"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                        <!-- Draining countdown bar, only during the send window. -->
+                        <View
+                            android:id="@+id/rcThreadCountdownTrack"
+                            android:layout_width="match_parent"
+                            android:layout_height="2dp"
+                            android:layout_marginTop="9dp"
+                            android:background="#004400"
+                            android:visibility="gone"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                        <View
+                            android:id="@+id/rcThreadCountdownFill"
+                            android:layout_width="match_parent"
+                            android:layout_height="2dp"
+                            android:background="#00FF00"
+                            android:visibility="gone"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                        <LinearLayout
+                            android:id="@+id/rcThreadCountdownRow"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical"
+                            android:background="#000000"
+                            android:paddingTop="6dp"
+                            android:visibility="gone"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false">
+
+                            <TextView
+                                android:id="@+id/rcThreadCancelHint"
+                                android:layout_width="0dp"
+                                android:layout_weight="1"
+                                android:layout_height="wrap_content"
+                                android:text="DOUBLE-TAP TO CANCEL"
+                                android:textColor="#008800"
+                                android:textSize="10sp"
+                                android:fontFamily="monospace"
+                                android:letterSpacing="0.18"
+                                android:background="#000000"
+                                android:focusable="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                            <TextView
+                                android:id="@+id/rcThreadCountdownSecs"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:textColor="#00FF00"
+                                android:textSize="13sp"
+                                android:fontFamily="monospace"
+                                android:background="#000000"
+                                android:focusable="false"
+                                android:defaultFocusHighlightEnabled="false" />
+
+                        </LinearLayout>
+
+                    </LinearLayout>
+
+                </LinearLayout>
+
                 <!-- Scroll position indicator bar -->
                 <View
                     android:id="@+id/scrollIndicator"

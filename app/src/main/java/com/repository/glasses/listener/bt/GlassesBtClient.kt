@@ -742,6 +742,27 @@ class GlassesBtClient(private val relay: MessageRelay) {
         relay.publish(BtProtocol.CH_TG_VOICE_STOP, "stop")
     }
 
+    /**
+     * Asks for [sessionId]'s thread rows. [seenSeq] is the highest seq already rendered, -1 when
+     * none: sending this IS the read acknowledgement, and the phone refuses to clear the unread
+     * bar when a turn finished after that seq.
+     *
+     * An EMPTY [sessionId] means the glasses left the thread, and stops the live row pushes.
+     */
+    fun sendRcMessagesRequest(sessionId: String, seenSeq: Long) {
+        relay.publish(BtProtocol.CH_RC_MESSAGES_REQ, sessionId, seenSeq.toString())
+    }
+
+    /** A dictated message. [clientMsgId] correlates the CH_RC_SEND_RESP that reports the outcome. */
+    fun sendRcUserMessage(sessionId: String, clientMsgId: String, text: String) {
+        relay.publish(BtProtocol.CH_RC_SEND_REQ, sessionId, clientMsgId, text)
+    }
+
+    /** The chosen option of a blocking prompt, verbatim -- never a transcription of it. */
+    fun sendRcAnswer(sessionId: String, requestId: String, optionText: String) {
+        relay.publish(BtProtocol.CH_RC_ANSWER_REQ, sessionId, requestId, optionText)
+    }
+
     fun release() {
         isConnected = false
         chunkAssembler.clear()
