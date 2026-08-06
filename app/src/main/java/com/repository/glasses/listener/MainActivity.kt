@@ -138,7 +138,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     }
 
     // --- Focus state machine ---
-    enum class FocusState { TAB_NAV, CHAT_FOCUSED, LIST_FOCUSED, MAP_FOCUSED, MAP_ZOOM_FOCUSED, STOP_MODAL, STEPS_MODAL, TRANSLATE_FOCUSED, TELEPROMPTER_FOCUSED, REID_FOCUSED, REID_FACES_FOCUSED, REID_INTEL_MODAL, TODO_FOCUSED, NIGHTVISION_FOCUSED, MOUSE_FOCUSED, MUSIC_FOCUSED, TELEGRAM_LIST_FOCUSED, TELEGRAM_TOPICS_FOCUSED, TELEGRAM_CHAT_FOCUSED, TELEGRAM_RECORDING, TELEGRAM_PREVIEW, NOTIFICATION_REPLY, CALL_INCOMING, CALL_ACTIVE }
+    enum class FocusState { TAB_NAV, CHAT_FOCUSED, LIST_FOCUSED, MAP_FOCUSED, MAP_ZOOM_FOCUSED, STOP_MODAL, STEPS_MODAL, TRANSLATE_FOCUSED, TELEPROMPTER_FOCUSED, REID_FOCUSED, REID_FACES_FOCUSED, REID_INTEL_MODAL, COPILOT_FOCUSED, TODO_FOCUSED, NIGHTVISION_FOCUSED, MOUSE_FOCUSED, MUSIC_FOCUSED, TELEGRAM_LIST_FOCUSED, TELEGRAM_TOPICS_FOCUSED, TELEGRAM_CHAT_FOCUSED, TELEGRAM_RECORDING, TELEGRAM_PREVIEW, NOTIFICATION_REPLY, CALL_INCOMING, CALL_ACTIVE }
 
     private var focusState = FocusState.TAB_NAV
 
@@ -289,6 +289,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         TabId.CHAT_LIST -> tabChatList
         TabId.TELEGRAM -> tabTelegram
         TabId.REID -> tabReid
+        TabId.COPILOT -> tabCopilot
         TabId.TODO -> tabTodo
         TabId.NIGHTVISION -> null
         TabId.TRANSLATE -> translateTabIcon
@@ -503,14 +504,18 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     }
 
     // --- Dynamic tab system ---
-    enum class TabId { MUSIC, CHAT, CHAT_LIST, TELEGRAM, REID, TODO, NIGHTVISION, TRANSLATE, MAP, TELEPROMPTER, MOUSE }
+    enum class TabId { MUSIC, CHAT, CHAT_LIST, TELEGRAM, REID, COPILOT, TODO, NIGHTVISION, TRANSLATE, MAP, TELEPROMPTER, MOUSE }
     // Music is added dynamically when an A2DP source exposes a MediaSession.
     // CONTRACT: every mutation of this list (add / remove / reorder) MUST be
     // followed by exactly one afterTabsChanged() call. That hook resizes the
     // pill container and re-anchors the highlight on currentTabId, so the
     // pill stays under the selected tab even when its numeric index shifts.
     // Bypassing this hook desyncs the pill from the icon row.
-    private val activeTabs = mutableListOf(TabId.TODO, TabId.CHAT, TabId.CHAT_LIST, TabId.TRANSLATE, TabId.TELEGRAM, TabId.REID)
+    // COPILOT is STATIC, not dynamic. A dynamic tab would have to be added when
+    // Copilot starts -- but the tab IS the only on-device way to start it, so it
+    // would never appear. Its icon therefore lives in the XML row like REID's, and
+    // no insertTabFrameAt/afterTabsChanged pair is needed for it.
+    private val activeTabs = mutableListOf(TabId.TODO, TabId.CHAT, TabId.CHAT_LIST, TabId.TRANSLATE, TabId.TELEGRAM, TabId.REID, TabId.COPILOT)
     private val maxTab: Int get() = activeTabs.size - 1
 
     // --- Map tab (created programmatically) ---
@@ -619,6 +624,18 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private lateinit var reidFaceBar: LinearLayout
     private lateinit var reidFaceIdLabel: TextView
     private lateinit var tabReid: ImageView
+
+    // --- Copilot tab ---
+    private lateinit var copilotContainer: View
+    private lateinit var copilotStartStopIcon: ImageView
+    private lateinit var copilotStartStopContainer: FrameLayout
+    private lateinit var copilotStatus: TextView
+    private lateinit var tabCopilot: ImageView
+    // Mirrors ListenerService.assistantActive, which itself only flips when the phone's
+    // start/stop command lands. Never set from a local button press -- pressing start
+    // while the phone is unreachable must keep showing "stopped", because it IS stopped.
+    private var copilotRunning = false
+
     private var reidRunning = false
     private var reidSelectedFaceIndex = -1
     private var reidVerifiedFaces = listOf<JSONObject>()
@@ -1861,7 +1878,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             runOnUiThread {
                 btConnected = connected
                 updateDebugLine(btConnected = connected)
-                reidStartStopContainer.visibility = if (btConnected && orchConnected) View.VISIBLE else View.GONE
+                updateStartStopVisibility()
                 if (connected) {
                     // Load data for the active tab now that BT is connected
                     val activeTab = activeTabs.getOrNull(currentTab)
@@ -1884,12 +1901,23 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         }
     }
 
+    /**
+     * Both start/stop controls need BT + orchestrator up to do anything: ReID uploads
+     * crops, Copilot's request travels to the phone over RFCOMM. Hiding them while
+     * disconnected keeps a press from looking like it worked.
+     */
+    private fun updateStartStopVisibility() {
+        val visible = if (btConnected && orchConnected) View.VISIBLE else View.GONE
+        reidStartStopContainer.visibility = visible
+        copilotStartStopContainer.visibility = visible
+    }
+
     private val orchestratorStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val connected = intent.getBooleanExtra(ListenerService.EXTRA_ORCHESTRATOR_CONNECTED, true)
             runOnUiThread {
                 orchConnected = connected
-                reidStartStopContainer.visibility = if (btConnected && orchConnected) View.VISIBLE else View.GONE
+                updateStartStopVisibility()
                 if (!connected && btConnected) {
                     statusArea.visibility = View.VISIBLE
                     setStatus("Orchestrator disconnected", R.drawable.ic_status_dot, Lum.GHOST)
@@ -3613,6 +3641,16 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             reidIntelModal = findViewById(R.id.reidIntelModal)
             reidIntelContent = findViewById(R.id.reidIntelContent)
             tabReid = findViewById(R.id.tabReid)
+            copilotContainer = findViewById(R.id.copilotContainer)
+            copilotStartStopIcon = findViewById(R.id.copilotStartStopIcon)
+            copilotStartStopContainer = findViewById(R.id.copilotStartStopContainer)
+            copilotStatus = findViewById(R.id.copilotStatus)
+            tabCopilot = findViewById(R.id.tabCopilot)
+            // Apply the connectivity gate once up front. Both start/stop containers are
+            // VISIBLE in XML, and updateStartStopVisibility otherwise runs only on a
+            // BT/orchestrator broadcast -- so before the first one arrives the buttons
+            // would offer an action that cannot reach the phone.
+            updateStartStopVisibility()
             todoContainer = findViewById(R.id.todoContainer)
             tabTodo = findViewById(R.id.tabTodo)
 
@@ -3872,19 +3910,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
 
             // Initial icon tints: all inactive except currentTab (CHAT)
             for ((i, id) in activeTabs.withIndex()) {
-                val icon = when (id) {
-                    TabId.MUSIC -> tabMusic
-                    TabId.CHAT -> tabChat
-                    TabId.CHAT_LIST -> tabChatList
-                    TabId.TELEGRAM -> tabTelegram
-                    TabId.REID -> tabReid
-                    TabId.TODO -> tabTodo
-                    TabId.NIGHTVISION -> null
-                    TabId.TRANSLATE -> translateTabIcon
-                    TabId.MAP -> mapTabIcon
-                    TabId.TELEPROMPTER -> teleprompterTabIcon
-                    TabId.MOUSE -> mouseTabIcon
-                } ?: continue
+                val icon = iconForTab(id) ?: continue
                 val color = if (i == currentTab) Lum.GLOW else Lum.SOFT
                 icon.setColorFilter(color, PorterDuff.Mode.SRC_IN)
             }
@@ -3983,6 +4009,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             registerReceiver(reidStatsReceiver, IntentFilter(ListenerService.ACTION_REID_STATS))
             registerReceiver(reidBpmReceiver, IntentFilter(ListenerService.ACTION_REID_BPM))
             registerReceiver(reidStatusReceiver, IntentFilter(ListenerService.ACTION_REID_STATUS))
+            registerReceiver(copilotStateReceiver, IntentFilter(ListenerService.ACTION_ASSISTANT_STATE))
             registerReceiver(reidPersonResponseReceiver, IntentFilter(ListenerService.ACTION_REID_PERSON_RESPONSE))
             registerReceiver(reidBestThumbReceiver, IntentFilter(ListenerService.ACTION_REID_BEST_THUMB))
             registerReceiver(todoListReceiver, IntentFilter(ListenerService.ACTION_TODO_LIST_LOADED))
@@ -4730,6 +4757,31 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 return
             }
 
+            // COPILOT_FOCUSED (depth 1): the tab has exactly one control, so there is
+            // no sub-selection to track -- the border always lands on start/stop.
+            if (state == FocusState.COPILOT_FOCUSED) {
+                updatePinFocus(false)
+                updateStopFocus(false)
+                updateTpStopFocus(false)
+                val drawable = GradientDrawable().apply {
+                    setColor(Lum.VOID)
+                    cornerRadius = 4f * density
+                    setStroke(thinStroke, Lum.GLOW)
+                }
+                copilotStartStopContainer.background = drawable
+                focusedDrawable = drawable
+                previousFocusedView = copilotStartStopContainer
+                focusBorderAnimator = ValueAnimator.ofInt(thinStroke, thickStroke).apply {
+                    duration = 150L
+                    interpolator = android.view.animation.DecelerateInterpolator()
+                    addUpdateListener {
+                        drawable.setStroke(it.animatedValue as Int, Lum.GLOW)
+                    }
+                    start()
+                }
+                return
+            }
+
             // REID_FACES_FOCUSED (depth 2): no container border, face selection in updateReidFaceBar
             if (state == FocusState.REID_FACES_FOCUSED) {
                 updatePinFocus(false)
@@ -5034,6 +5086,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         TabId.CHAT_LIST -> tabChatList.parent as? View
         TabId.TELEGRAM -> tabTelegram.parent as? View
         TabId.REID -> tabReid.parent as? View
+        TabId.COPILOT -> tabCopilot.parent as? View
         TabId.TRANSLATE -> translateTabFrame
         TabId.MAP -> mapTabFrame
         TabId.TELEPROMPTER -> teleprompterTabFrame
@@ -5180,19 +5233,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 pillHighlight.translationX = targetX
             }
             for ((i, id) in activeTabs.withIndex()) {
-                val icon = when (id) {
-                    TabId.MUSIC -> tabMusic
-                    TabId.CHAT -> tabChat
-                    TabId.CHAT_LIST -> tabChatList
-                    TabId.TELEGRAM -> tabTelegram
-                    TabId.REID -> tabReid
-                    TabId.TODO -> tabTodo
-                    TabId.NIGHTVISION -> null // night vision tab commented out
-                    TabId.TRANSLATE -> translateTabIcon
-                    TabId.MAP -> mapTabIcon
-                    TabId.TELEPROMPTER -> teleprompterTabIcon
-                    TabId.MOUSE -> mouseTabIcon
-                } ?: continue
+                val icon = iconForTab(id) ?: continue
                 if (animate && !skipTabIconAnims) {
                     if (i == resolvedIndex) {
                         tintActiveAnimator = Anim.tintColor(icon, Lum.SOFT, Lum.GLOW, 150L)
@@ -5229,6 +5270,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         val showChat = tabId == TabId.CHAT
         val showChatList = tabId == TabId.CHAT_LIST
         val showReid = tabId == TabId.REID
+        val showCopilot = tabId == TabId.COPILOT
         val showTodo = tabId == TabId.TODO
         val showNightvision = tabId == TabId.NIGHTVISION
         val showMusic = tabId == TabId.MUSIC
@@ -5264,6 +5306,17 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         chatListRecycler.visibility = if (showChatList) View.VISIBLE else View.GONE
         chatListRecycler.alpha = 1f
         reidContainer.visibility = if (showReid) View.VISIBLE else View.GONE
+        copilotContainer.visibility = if (showCopilot) View.VISIBLE else View.GONE
+        if (showCopilot) {
+            hideLoadingSpinner()
+            // Copilot can have been started from the phone while this tab was unseen,
+            // and the state broadcast is edge-triggered. Re-ask on entry so the icon is
+            // never stale. Unlike ReID, leaving the tab must NOT stop it: Copilot is an
+            // ambient feature whose cards are drawn by an overlay outside this tab.
+            sendBroadcast(Intent(ListenerService.ACTION_QUERY_ASSISTANT_STATE).apply {
+                setPackage(packageName)
+            })
+        }
         if (showReid) hideLoadingSpinner()
         if (!showReid && reidRunning) {
             sendBroadcast(Intent(ListenerService.ACTION_REID_STOP).apply { setPackage(packageName) })
@@ -7116,8 +7169,26 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      */
     private var remoteWakeLock: android.os.PowerManager.WakeLock? = null
 
-    /** How long the wake lock is held. The panel's own timeout takes over after this. */
-    private val REMOTE_WAKE_HOLD_MS = 5_000L
+    /**
+     * The same hold, but with `ACQUIRE_CAUSES_WAKEUP`.
+     *
+     * Separate field because wake-lock flags are fixed at `newWakeLock` time and cannot be changed
+     * on an existing lock. Keeping both means the common path (panel already lit) reuses its lock
+     * forever and never allocates.
+     */
+    private var remoteWakeUpLock: android.os.PowerManager.WakeLock? = null
+
+    /**
+     * Fallback hold when the system screen-off timeout cannot be read.
+     *
+     * Never used as the normal value: see [remoteScreenHoldMs], which mirrors the system setting so
+     * a remote user gets exactly the idle behaviour a touchpad user gets.
+     */
+    private val REMOTE_WAKE_HOLD_FALLBACK_MS = 15_000L
+
+    /** Floor/ceiling for the hold, so a pathological system setting cannot pin the panel on. */
+    private val REMOTE_HOLD_MIN_MS = 5_000L
+    private val REMOTE_HOLD_MAX_MS = 10 * 60_000L
 
     /**
      * How long after a wake further events stop being treated as wake events.
@@ -7132,6 +7203,84 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
 
     /** elapsedRealtime of the last wake this path triggered; 0 before the first. */
     private var lastRemoteWakeMs = 0L
+
+    /**
+     * How long the panel is held on per remote event: the system's OWN screen-off timeout.
+     *
+     * Read live rather than cached because the power daemon rewrites `screen_off_timeout` from
+     * `/data/local/diy-overlay/glasses-power.conf` on every config reload, so a cached value would
+     * silently diverge from the policy the panel is actually running.
+     */
+    private fun remoteScreenHoldMs(): Long = try {
+        android.provider.Settings.System.getInt(
+            contentResolver,
+            android.provider.Settings.System.SCREEN_OFF_TIMEOUT,
+        ).toLong().coerceIn(REMOTE_HOLD_MIN_MS, REMOTE_HOLD_MAX_MS)
+    } catch (e: Exception) {
+        REMOTE_WAKE_HOLD_FALLBACK_MS
+    }
+
+    /**
+     * Hold the panel on for one more screen-timeout period, starting now.
+     *
+     * THIS is the remote equivalent of the user-activity poke that a physical key press gets for
+     * free. Remote input arrives as `onRemoteInput`, NOT as a real `InputEvent` through
+     * `InputDispatcher`, so `PowerManagerService` never sees it and never restarts the display
+     * idle timer -- and `PowerManager.userActivity()` needs `DEVICE_POWER`, a signature permission
+     * this app does not hold (verified absent from its granted set on device). Without this, the
+     * panel died on the system's fixed timeout MID-INTERACTION no matter how fast the user was
+     * scrolling the watch bezel, and the next event was spent re-waking it. That produced the
+     * ~15 s wake / sleep / re-wake sawtooth the user experienced as "screen-on isn't debounced":
+     * the screen was not bouncing on a single input, it was expiring on a timer that remote input
+     * could not reset.
+     *
+     * ONE non-reference-counted lock is re-acquired rather than a new lock per event. Re-acquiring
+     * an already-held non-counted lock only cancels and re-posts its release callback, so a fast
+     * bezel spin (tens of events per second) costs no further binder traffic into system_server and
+     * no BatteryStats churn -- whereas newWakeLock-per-event would be an acquire plus a release
+     * transaction per detent. The timeout is what makes this safe: the panel is released even if
+     * the process dies mid-interaction, so no path can pin the waveguide on indefinitely.
+     *
+     * @param causeWakeup true only for the event that is genuinely turning a dark panel on. The
+     *   flag is fixed at construction, so waking needs its own lock instance; the two are kept in
+     *   separate fields rather than rebuilding one, so the steady-state scroll path never allocates.
+     */
+    private fun holdPanelForRemoteActivity(causeWakeup: Boolean) {
+        // A folded device must never be held on. Folded means pocket or case: the waveguide would
+        // burn battery lighting nothing, and RemoteActionGate refuses every action in that state,
+        // so the events arriving here are all going to be declined anyway. Without this, a watch
+        // jostling in a pocket re-armed the hold forever.
+        if (foldedState) return
+        val holdMs = remoteScreenHoldMs()
+        try {
+            val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+            @Suppress("DEPRECATION")
+            val flags = android.os.PowerManager.FULL_WAKE_LOCK or
+                if (causeWakeup) android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP else 0
+            val lock = (if (causeWakeup) remoteWakeUpLock else remoteWakeLock)
+                ?: pm.newWakeLock(flags, "GlassesListener::RemoteWake").also {
+                    // Not reference counted: every acquire is the SAME hold being extended, not a
+                    // nested one. With counting on, N acquires would need N releases and the
+                    // timeout would only release the outermost, leaving the panel pinned.
+                    it.setReferenceCounted(false)
+                    if (causeWakeup) remoteWakeUpLock = it else remoteWakeLock = it
+                }
+            lock.acquire(holdMs)
+        } catch (ex: Exception) {
+            uiLog("[RemoteInput] panel hold failed: ${ex.message}")
+        }
+    }
+
+    /** Release both remote holds. The panel reverts to whatever the system policy says. */
+    private fun releaseRemotePanelHolds() {
+        listOf(remoteWakeLock, remoteWakeUpLock).forEach { lock ->
+            try {
+                if (lock != null && lock.isHeld) lock.release()
+            } catch (ex: Exception) {
+                uiLog("[RemoteInput] hold release failed: ${ex.message}")
+            }
+        }
+    }
 
     /**
      * True when the panel is genuinely dark.
@@ -7218,19 +7367,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         }
         lastRemoteWakeMs = now
 
-        try {
-            val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
-            remoteWakeLock?.let { if (it.isHeld) it.release() }
-            @Suppress("DEPRECATION")
-            remoteWakeLock = pm.newWakeLock(
-                android.os.PowerManager.FULL_WAKE_LOCK or
-                    android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "GlassesListener::RemoteWake",
-            ).apply { acquire(REMOTE_WAKE_HOLD_MS) }
-            uiLog("[RemoteInput] ${e.action} consumed to WAKE the panel (held ${REMOTE_WAKE_HOLD_MS}ms)")
-        } catch (ex: Exception) {
-            uiLog("[RemoteInput] wake failed: ${ex.message}")
-        }
+        holdPanelForRemoteActivity(causeWakeup = true)
+        uiLog("[RemoteInput] ${e.action} consumed to WAKE the panel (held ${remoteScreenHoldMs()}ms)")
 
         return true
     }
@@ -7282,6 +7420,18 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // isDoubleTap()/handleTouchpadKey(), because for the touchpad the recognition delay IS
         // local and therefore free -- which is the same reason the watch now does its own.
         if (consumeForScreenWake(e)) return
+        // This event is about to act, so re-arm the idle timeout the way a physical key press does.
+        // Done BEFORE dispatch, not after: dispatch can navigate away, start a session, or throw,
+        // and the panel must not be left running out an old timer in any of those cases.
+        // Unconditional rather than gated on the gate's verdict -- a user who is pressing buttons is
+        // present whether or not the current focus state allows the action, and letting the screen
+        // die under a refused press is the same defect from the user's side.
+        //
+        // `causeWakeup` mirrors the panel's ACTUAL state rather than being hardcoded false. Two
+        // paths reach here with a dark panel: a SCROLL_STEP arriving inside the 1 s wake-in-flight
+        // window, and an unreadable display state. Holding a dark panel with a screen-bright lock
+        // and no wakeup flag would block CPU sleep while lighting nothing.
+        holdPanelForRemoteActivity(causeWakeup = panelIsOff())
         val acted = when (e.action) {
             RemoteAction.SCROLL_STEP -> dispatchRemoteScroll(e.delta)
             // SELECT is DPAD_CENTER, the keycode a physical tap actually proxies through as.
@@ -7675,6 +7825,12 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 updateFocusVisual(focusState)
                 return true
             }
+            if (focusState == FocusState.COPILOT_FOCUSED) {
+                focusState = FocusState.TAB_NAV
+                copilotStartStopContainer.background = null
+                updateFocusVisual(focusState)
+                return true
+            }
             if (focusState == FocusState.TODO_FOCUSED) {
                 when (todoFocusLevel) {
                     2 -> { todoFocusLevel = 1; hideMessageDetail() }
@@ -7796,7 +7952,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             FocusState.NIGHTVISION_FOCUSED, FocusState.MAP_FOCUSED, FocusState.MAP_ZOOM_FOCUSED,
             FocusState.TRANSLATE_FOCUSED, FocusState.TELEPROMPTER_FOCUSED,
             FocusState.TODO_FOCUSED, FocusState.REID_FOCUSED, FocusState.REID_FACES_FOCUSED,
-            FocusState.REID_INTEL_MODAL, FocusState.STOP_MODAL
+            FocusState.REID_INTEL_MODAL, FocusState.COPILOT_FOCUSED, FocusState.STOP_MODAL
         )
         if (chatContainer.visibility != View.VISIBLE && !onTelegramTab && !hasOwnHandler) {
             uiLog("NAV: GATE BLOCKED key=$keyCode focus=$focusState chatVis=${chatContainer.visibility} tab=$currentTab/${activeTabs.size}")
@@ -7842,6 +7998,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                             TabId.REID -> {
                                 armDoubleTapWindow()
                                 focusState = FocusState.REID_FOCUSED
+                                updateFocusVisual(focusState)
+                            }
+                            TabId.COPILOT -> {
+                                armDoubleTapWindow()
+                                focusState = FocusState.COPILOT_FOCUSED
                                 updateFocusVisual(focusState)
                             }
                             TabId.TODO -> {
@@ -8177,6 +8338,29 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                             reidFocusedElement = 0
                             updateFocusVisual(focusState)
                         }
+                        return true
+                    }
+                }
+            }
+            FocusState.COPILOT_FOCUSED -> {
+                // Depth 1, single element: CENTER toggles, double-tap leaves. There is
+                // nothing to scroll between, so LEFT/RIGHT are swallowed rather than
+                // falling through to tab switching -- a scroll here must not silently
+                // move the user off the tab while the border says they are on it.
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                        if (isDoubleTap()) {
+                            focusState = FocusState.TAB_NAV
+                            copilotStartStopContainer.background = null
+                            updateFocusVisual(focusState)
+                            lastCenterPressTime = 0L
+                        } else {
+                            toggleCopilot()
+                        }
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_DOWN,
+                    KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_UP -> {
                         return true
                     }
                 }
@@ -9337,6 +9521,31 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         sendBroadcast(Intent(action).apply { setPackage(packageName) })
     }
 
+    /**
+     * Reflects the REAL Copilot state. Like reidStatusReceiver, this is the ONLY writer
+     * of the icon: [toggleCopilot] just sends a request, so the icon flips solely when
+     * the service confirms the phone actually started or stopped Copilot.
+     */
+    private val copilotStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val active = intent?.getBooleanExtra(ListenerService.EXTRA_ASSISTANT_ACTIVE, false) ?: return
+            runOnUiThread {
+                copilotRunning = active
+                copilotStartStopIcon.setImageResource(if (active) R.drawable.ic_stop else R.drawable.ic_play)
+                copilotStatus.text = if (active) "LISTENING" else ""
+                copilotStatus.setTextColor(if (active) Lum.MID else Lum.DIM)
+            }
+        }
+    }
+
+    /**
+     * Requests a Copilot start/stop from the phone, which owns copilotMode. Deliberately
+     * does not touch copilotRunning or the icon -- see [copilotStateReceiver].
+     */
+    private fun toggleCopilot() {
+        sendBroadcast(Intent(ListenerService.ACTION_TOGGLE_ASSISTANT).apply { setPackage(packageName) })
+    }
+
     private fun updateReidFaceBar() {
         reidFaceBar.removeAllViews()
         val faces = reidVerifiedFaces
@@ -9712,6 +9921,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // captureBridge lives in ListenerService now; its onDestroy handles unbind.
         remoteGlyphHideRunnable?.let { mainHandler.removeCallbacks(it) }
         remoteGlyphHideRunnable = null
+        // The panel hold is timed, so this is not a leak so much as a lie: with the UI gone there
+        // is nothing on screen worth keeping lit, and the user should not wait out the remainder of
+        // a screen-timeout they can no longer interact with.
+        releaseRemotePanelHolds()
         if (backendBound) {
             // Detach the sink BEFORE dropping the binding, while the binder is still alive. After
             // unbindService the backend only learns of this via its death recipient.
@@ -9745,7 +9958,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             weatherUpdateReceiver, loneIndicatorReceiver, recordingStateReceiver,
             translationResultReceiver, translationConfigReceiver,
             translationStateReceiver, reidFacesReceiver, reidStatsReceiver, reidBpmReceiver,
-            reidStatusReceiver, reidPersonResponseReceiver, reidBestThumbReceiver, cameraPermRequestReceiver,
+            reidStatusReceiver, copilotStateReceiver, reidPersonResponseReceiver, reidBestThumbReceiver, cameraPermRequestReceiver,
             todoListReceiver, alarmListReceiver, jobListReceiver,
             batteryReceiver, timeTickReceiver, bottomPaddingReceiver, chatFontSizeReceiver,
             mediaStateReceiver, mediaProgressReceiver, a2dpSinkStateReceiver, uiRecordReceiver,

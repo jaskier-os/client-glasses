@@ -139,7 +139,118 @@ class ScreenWakeDebounceInstrumentedTest {
         Thread.sleep(2_500)
     }
 
+    /**
+     * The load-bearing test for the SECOND defect: the panel dying MID-INTERACTION.
+     *
+     * Remote events arrive as `onRemoteInput` callbacks, not as real `InputEvent`s through
+     * `InputDispatcher`, so `PowerManagerService` never counts them as user activity and never
+     * restarts the display idle timer. `PowerManager.userActivity()` would, but it needs
+     * `DEVICE_POWER`, which this app does not hold. The result was a screen that went dark on the
+     * fixed timeout while the user was still actively scrolling the watch bezel, and whose next
+     * event was then spent re-waking it -- what the user described as screen-on "not being
+     * debounced". It was not bouncing; it was expiring on a timer remote input could not reset.
+     *
+     * ## Why this test can actually fail
+     *
+     * The obvious test -- send one event, wait, watch the screen go off -- is WORTHLESS here: with
+     * the fix, the hold equals the system timeout, so fixed and broken produce an identical single
+     * sleep at the same instant. The only observation that separates them is SUSTAINED interaction
+     * across the timeout boundary. Events are therefore injected every [POKE_INTERVAL_MS], which is
+     * far shorter than the timeout, for longer than the timeout, and the panel is asserted still lit
+     * at a moment strictly BEYOND when an unreset timer would have killed it.
+     *
+     * Against the broken code this fails at [assertPanelLit] shortly after the timeout elapses.
+     * Against a naive "pin the screen on forever" non-fix it fails at the release assertion below,
+     * which is why that half is not optional: a hold that never expires is a battery defect on a
+     * head-worn device, not a fix.
+     */
+    @Test
+    fun sustainedRemoteInputKeepsThePanelLitPastTheScreenTimeout() {
+        val activity = currentActivity()
+        val timeoutMs = systemScreenOffTimeoutMs()
+        // The whole method is meaningless if events are not being sent well inside the timeout.
+        assertTrue(
+            "poke interval ($POKE_INTERVAL_MS ms) must be far shorter than the screen timeout " +
+                "($timeoutMs ms), or this test cannot distinguish a working hold from a broken one",
+            POKE_INTERVAL_MS * 2 < timeoutMs,
+        )
+
+        wakePanel()
+        assertTrue("panel did not light, so this test proves nothing", !panelIsOff())
+
+        // Interact continuously for well past the timeout. An unreset idle timer kills the panel
+        // `timeoutMs` after the FIRST event regardless of everything that follows.
+        val started = android.os.SystemClock.elapsedRealtime()
+        val runForMs = timeoutMs * 2
+        var seq = 0
+        while (android.os.SystemClock.elapsedRealtime() - started < runForMs) {
+            val n = seq++
+            mainHandler.post { activity.onRemoteInput(event(RemoteAction.SCROLL_STEP, n)) }
+            drainMainThread()
+            // Check DURING the run, not only at the end: a panel that died at the timeout and was
+            // re-woken by a later poke would be lit again by the time a final-only check ran, and
+            // the test would pass against the exact bug it exists to catch.
+            if (android.os.SystemClock.elapsedRealtime() - started > timeoutMs + SETTLE_MS) {
+                assertPanelLit(
+                    "panel went dark while remote input was still arriving every " +
+                        "$POKE_INTERVAL_MS ms -- the idle timer was not reset by remote events"
+                )
+            }
+            Thread.sleep(POKE_INTERVAL_MS)
+        }
+        assertTrue("at least three pokes must have been sent", seq >= 3)
+
+        // The other half: the hold must EXPIRE. Stop poking and require the panel to go dark on the
+        // ordinary timeout. Without this, pinning the screen on permanently would pass the test
+        // above while draining a head-worn battery.
+        val quietStart = android.os.SystemClock.elapsedRealtime()
+        val offDeadline = quietStart + timeoutMs + RELEASE_SLACK_MS
+        while (android.os.SystemClock.elapsedRealtime() < offDeadline && !panelIsOff()) {
+            Thread.sleep(250)
+        }
+        val offAfterMs = android.os.SystemClock.elapsedRealtime() - quietStart
+        assertTrue(
+            "panel never went dark after remote input stopped (waited ${offAfterMs} ms for a " +
+                "${timeoutMs} ms timeout): the hold is not expiring and will pin the waveguide on",
+            panelIsOff(),
+        )
+        // And it must not have gone dark EARLY either -- that would be the original mid-interaction
+        // death simply moved a few seconds later.
+        assertTrue(
+            "panel went dark after only ${offAfterMs} ms, sooner than the ${timeoutMs} ms system " +
+                "timeout it should have inherited",
+            offAfterMs >= timeoutMs - SETTLE_MS,
+        )
+
+        wakePanel()
+        Thread.sleep(2_500)
+    }
+
     // ---- helpers ----
+
+    /** How often a poke is injected. Must be well inside the system timeout. */
+    private val POKE_INTERVAL_MS = 2_000L
+
+    /** Tolerance for display-state reporting lag and handler scheduling. */
+    private val SETTLE_MS = 2_000L
+
+    /** Extra time allowed for the panel to go dark once interaction stops. */
+    private val RELEASE_SLACK_MS = 10_000L
+
+    private fun assertPanelLit(message: String) = assertTrue(message, !panelIsOff())
+
+    /**
+     * The system timeout the hold is supposed to mirror.
+     *
+     * Read rather than assumed, and never written: `glasses-power-daemon` owns this setting and
+     * rewrites it from its config, so a test that hardcoded 15000 would silently stop testing
+     * anything the day that config changed.
+     */
+    private fun systemScreenOffTimeoutMs(): Long =
+        android.provider.Settings.System.getInt(
+            instrumentation.targetContext.contentResolver,
+            android.provider.Settings.System.SCREEN_OFF_TIMEOUT,
+        ).toLong()
 
     /**
      * The live [MainActivity] instance.
