@@ -465,6 +465,36 @@ Prerequisites, both toggled on the phone: **ADB debugging** and **Enable sideloa
 (`GlassesSettingsFragment`, key `enable_sideloading`). The toggle is what makes the glasses
 filesync accept `/sideload/*` at all, and it also starts the phone's LAN server.
 
+### Two things that make a sideload fail for reasons that look like something else
+
+**An active audio relay saturates the link.** While the phone is recording or streaming audio,
+uploads return `HTTP 502` and `sideload_exec` times out. It presents as "WiFi-Direct is
+dropping", which sends you looking at the radio or the battery; the actual tell is in the phone
+log:
+
+```
+AudioRecorder: Chunk #258011 maxAmp=502
+DlbDap2Process: process() called [196237510] times ...
+```
+
+Stop the relay before deploying, or expect the transfer to fail partway. This is the same
+contention the RFCOMM paging guard already defends against elsewhere.
+
+**A pushed APK is not a deployed APK.** `orch_push` / the LAN upload write into the
+`/data/local/diy-overlay/system/priv-app/<pkg>/` slot. The bind-mount that makes `/system` see
+them happens at post-fs-data, so the running app does not change until the glasses reboot:
+
+```bash
+# after a successful push, confirm what is staged vs what is running
+adb shell ls -la /data/local/diy-overlay/system/priv-app/com.repository.glasses.listener/
+adb shell dumpsys package com.repository.glasses.listener | grep lastUpdateTime
+# same timestamp -> live; staged file newer -> needs `adb reboot`
+```
+
+`deploy-to-glasses.sh` will also report "APK unchanged at overlay slot, skipping push" when a
+remote push already staged the same bytes -- that is correct, not a no-op, and the reboot is
+still owed.
+
 ### Glasses-side architecture
 
 The **filesync APK** is the glasses end. When the listener app receives `enable_sideloading=true`
