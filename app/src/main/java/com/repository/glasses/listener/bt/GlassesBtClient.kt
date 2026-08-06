@@ -84,9 +84,13 @@ class GlassesBtClient(private val relay: MessageRelay) {
         private set
 
     /**
-     * Reassemble chunked JSON. Phone sends: [chunk, isFinal] or [prefix, chunk, isFinal].
-     * Buffers chunks per channel until isFinal="1", then calls [onComplete] with the full string.
+     * Reassemble chunked JSON. Phone sends [chunk, isFinal, streamId, seq], optionally preceded by
+     * a prefix; a pre-rewrite phone sends [chunk, isFinal] or [prefix, chunk, isFinal].
      * [prefixIndex]: if >= 0, reads a prefix field at that arg index before the chunk.
+     *
+     * A dropped stream calls [onComplete] with an EMPTY payload rather than returning silently:
+     * the waiting screen must resolve visibly. Returning nothing would leave a permanent spinner,
+     * which is worse than the corrupt completion this framing replaced.
      */
     private fun handleChunkedJson(
         channel: String,
@@ -94,8 +98,19 @@ class GlassesBtClient(private val relay: MessageRelay) {
         prefixIndex: Int = -1,
         onComplete: (prefix: String?, json: String) -> Unit
     ) {
-        val done = chunkAssembler.accept(channel, args, prefixIndex) ?: return
-        onComplete(done.prefix, done.json)
+        when (val outcome = chunkAssembler.acceptFrame(channel, args, prefixIndex)) {
+            is ChunkAssembler.Outcome.Completed -> onComplete(outcome.prefix, outcome.json)
+            is ChunkAssembler.Outcome.Failed -> {
+                remoteLog?.invoke("Chunk stream dropped on ${outcome.channel}: ${outcome.reason}")
+                // A sweep can report another channel's stream; only this channel's handler may be
+                // resolved from here, or the wrong screen would be told its request finished.
+                if (outcome.channel == channel) {
+                    val prefix = if (prefixIndex >= 0) args.getOrElse(prefixIndex) { "" } else null
+                    onComplete(prefix, "")
+                }
+            }
+            ChunkAssembler.Outcome.None -> Unit
+        }
     }
 
     private fun dispatch(channel: String, args: List<String>) {
@@ -357,10 +372,9 @@ class GlassesBtClient(private val relay: MessageRelay) {
                             // Wire: ["LIST", agMac, hash, jsonChunk, isFinal("0"/"1")]
                             val agMac = args.getOrElse(1) { "" }
                             // The hash sits where a prefix would, so the assembler carries it.
-                            val done = chunkAssembler.accept(BtProtocol.CH_CONTACTS, args, prefixIndex = 2)
-                            if (done != null) {
-                                remoteLog?.invoke("Contacts LIST complete: ${done.json.length} chars")
-                                listener?.onContactsList(agMac, done.prefix ?: "", done.json)
+                            handleChunkedJson(BtProtocol.CH_CONTACTS, args, prefixIndex = 2) { hash, json ->
+                                remoteLog?.invoke("Contacts LIST complete: ${json.length} chars")
+                                listener?.onContactsList(agMac, hash ?: "", json)
                             }
                         }
                         else -> remoteLog?.invoke("Contacts: unknown op '$op'")
