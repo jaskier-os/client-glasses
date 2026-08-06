@@ -792,6 +792,33 @@ class RemoteInputRouterTest {
     }
 
     @Test
+    fun `a restarted source gets in again by opening a higher session`() {
+        // The deadlock this guards against: the source ran its sequence up, restarted, and came
+        // back counting from zero. Reopening the SAME sid keeps the old high-water mark, so every
+        // frame it will ever send lands under it and the link refuses input permanently while
+        // still reporting itself healthy. The source therefore mints a new sid on reopen, and
+        // this pins that the receiver lets that through.
+        watch.open(sid = 1)
+        watch.scroll(sid = 1, steps = 1, seqOverride = 258)
+        flush()
+        sink.clear()
+
+        // Same sid, sequence rewound: still refused, because it cannot be told apart from a
+        // replay of the captured burst.
+        watch.emit(RemoteInputFrame.Lifecycle(1, "watch", 1L, 10L, now, RemoteLifecycle.OPEN))
+        watch.scroll(sid = 1, steps = 1, seqOverride = 1)
+        flush()
+        assertTrue("a rewound sequence on the same sid must stay refused", sink.events.isEmpty())
+
+        // A higher sid is the source proving it is not a replay, and it brings its own floor:
+        // the sequence it opens with, however far below the retired session's mark.
+        val reopen = watch.open(sid = 2)
+        watch.scroll(sid = 2, steps = 1, seqOverride = reopen.seq + 1)
+        flush()
+        assertEquals("the restarted source must be able to act again", 1, sink.events.size)
+    }
+
+    @Test
     fun `sessions cleared on a transport drop remain unreplayable`() {
         watch.open(sid = 1)
         watch.scroll(sid = 1, steps = 1, seqOverride = 500)
