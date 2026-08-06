@@ -53,6 +53,13 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         /** The RC left rail. Spec floor is 3dp so it survives the waveguide's low effective DPI. */
         private const val RC_RAIL_W_DP = 3
 
+        // View tags, so an instrumented test can find these by identity instead of guessing from
+        // geometry. These are programmatic views with no ids; a heuristic search would silently
+        // start matching the wrong view the first time the layout changed.
+        const val TAG_UNREAD_BAR = "rc_unread_bar"
+        const val TAG_SPINNER = "rc_spinner"
+        const val TAG_RAIL = "rc_rail"
+
         private fun Int.dpToPx(): Int =
             (this * Resources.getSystem().displayMetrics.density + 0.5f).toInt()
 
@@ -70,6 +77,9 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         // items.size + HEADER_COUNT.
         onRowsReplaced(ChatRowBuilder.build(RcState.EMPTY, emptyList()))
     }
+
+    /** The rows currently rendered, in order. Read-only; the caller cannot mutate the adapter. */
+    val currentRows: List<ChatRow> get() = selection.rows
 
     private val rows: List<ChatRow> get() = selection.rows
 
@@ -214,7 +224,7 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     private fun createRcSessionHolder(parent: ViewGroup): RcSessionViewHolder {
         val ctx = parent.context
 
-        val rail = View(ctx).apply { setBackgroundColor(Lum.SOFT) }
+        val rail = View(ctx).apply { setBackgroundColor(Lum.SOFT); tag = TAG_RAIL }
 
         val titleView = TextView(ctx).apply {
             typeface = Typeface.MONOSPACE
@@ -227,13 +237,14 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
         // Solid filled bar. Not a dot and not an outline: on a monochrome waveguide a thin outline
         // at this size reads as noise, and the unread state has to survive a glance.
-        val unreadBar = View(ctx).apply { setBackgroundColor(Lum.GLOW) }
+        val unreadBar = View(ctx).apply { setBackgroundColor(Lum.GLOW); tag = TAG_UNREAD_BAR }
 
         // The existing spinner component, not a new arc. GLOW because "this session is working" is
         // the most urgent thing a row can say; the component's DIM default would rank it below the
         // row's own title, which inverts the hierarchy.
         val spinner = SpinnerView(ctx, sizeDp = 14, tint = Lum.GLOW).apply {
             setBackgroundColor(Lum.VOID)
+            tag = TAG_SPINNER
         }
 
         val titleRow = LinearLayout(ctx).apply {
