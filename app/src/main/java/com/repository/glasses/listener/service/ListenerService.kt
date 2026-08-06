@@ -7850,12 +7850,6 @@ class ListenerService : LifecycleService(),
         }
         val solo = screenWasOff && (lastWornState == true)
         btLog("[NSOLO] onNotification screenWasOff=$screenWasOff worn=${lastWornState} -> solo=$solo")
-        // Suppress RC "Done" when user is already looking at chat or chat list
-        if (notifId.startsWith("rcfinish-") && currentTabId in setOf("CHAT", "CHAT_LIST")) {
-            btLog("[Notif] Suppressed rcfinish on tab $currentTabId")
-            btClient.sendNotificationDone(notifId)
-            return
-        }
         // Suppress notification for currently open Telegram chat
         val openChat = currentOpenTgChatTitle
         if (openChat != null && (sender == openChat || chat == openChat)) {
