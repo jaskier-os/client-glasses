@@ -22,6 +22,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.After
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -83,7 +84,17 @@ class RcThreadInstrumentedTest {
     private val ACTION_SPY_PROBE = "$pkg.TEST_SPY_PROBE"
 
     private val HOLD_MS = 2600L
-    private val SESSION = "s-live"
+
+    /**
+     * Unique per run, so the PAIRED PHONE cannot answer this test's own MSGS_REQ.
+     *
+     * A fixed id collided with a real session on the live phone: the phone replied with genuine
+     * rows ("RC messages response: session=... 95 chars") that merged beside the injected ones and
+     * turned [1,2,3] into [0,1,2,3]. That is test contamination, not a product defect -- the merge
+     * was doing exactly what it must. An id no session can own keeps every row in the thread an
+     * injected one, so the merge-by-seq and rendering assertions still mean what they claim.
+     */
+    private val SESSION = "s-test-${java.util.UUID.randomUUID()}"
 
     /** Every outbound RC request the activity broadcast, in order, as "ACTION|arg|arg". */
     private val sent = java.util.Collections.synchronizedList(mutableListOf<String>())
@@ -165,6 +176,68 @@ class RcThreadInstrumentedTest {
         })
         device.waitForIdle()
         SystemClock.sleep(300)
+        landInjectedRows()
+    }
+
+    /**
+     * The caret-stability gate holds any row-set change for HOLD_MS while the list is focused, and
+     * keeps only the NEWEST held snapshot. On a live-paired device the phone's own RC state and
+     * chat-list pushes overwrite the injected snapshot inside that window, so the synthetic row
+     * never lands. Forcing the flush is test isolation, not a product behaviour change: the gate
+     * still governs the live path, this only stops a real frame from racing an injected one.
+     */
+    private fun landInjectedRows() {
+        onUi { listAdapter.flushPendingIfDue(force = true) }
+        device.waitForIdle()
+    }
+
+    /**
+     * Re-opens the thread if a BACK fell through to it.
+     *
+     * BACK is layered: it cancels the send window if one is open, otherwise it leaves the thread.
+     * The send window lives 3 s, and the screenshot + assertions between opening it and pressing
+     * BACK can outlast that, so the same key press means different things depending on timing.
+     * The steps below care about the thread being open, not about which layer ate the key, so this
+     * restores the precondition explicitly instead of letting a later assertion fail for a reason
+     * that has nothing to do with what it claims to test.
+     */
+    private fun ensureThreadOpen() {
+        if (onUi { root().findViewById<View>(R_rcThreadContainer()).visibility } == View.VISIBLE) {
+            return
+        }
+        Log.i(tag, "thread had closed; re-opening before the next step")
+        navigateToChatListTab()
+        // Deliberately NOT openTheRcSession: its seenSeq == -1 assertion is only true of a FIRST
+        // open. Rows are already held by now, so re-opening correctly acknowledges the seq it has
+        // seen, and reusing that assertion here would fail on correct behaviour.
+        val landed = onUi {
+            listAdapter.setFocused(true)
+            listAdapter.selectKey("rc:$SESSION")
+        }
+        assertTrue("the caret must reach rc:$SESSION to re-open the thread", landed)
+        device.waitForIdle()
+        key(KeyEvent.KEYCODE_DPAD_CENTER)
+        SystemClock.sleep(900)
+        drainSent()
+        assertEquals("the thread must re-open",
+            View.VISIBLE, view(R_rcThreadContainer()).visibility)
+    }
+
+    /**
+     * True when the wear sensor says the glasses are on a head.
+     *
+     * `vendor.rkd.glasses.is_take_on` is the property the WearSensor itself reads, so this asks
+     * the same source the product asks rather than a proxy for it.
+     */
+    private fun micIsAvailable(): Boolean {
+        val v = instr.uiAutomation
+            .executeShellCommand("getprop vendor.rkd.glasses.is_take_on")
+            .let { pfd ->
+                java.io.FileInputStream(pfd.fileDescriptor).bufferedReader().use { it.readText() }
+            }
+            .trim()
+        Log.i(tag, "wear sensor is_take_on='$v'")
+        return v == "1"
     }
 
     private fun pushRows(json: String, sessionId: String = SESSION) {
@@ -228,6 +301,28 @@ class RcThreadInstrumentedTest {
         return result as T
     }
 
+    private fun resumedActivityOrNull() = onUi {
+        ActivityLifecycleMonitorRegistry.getInstance()
+            .getActivitiesInStage(Stage.RESUMED).firstOrNull()
+    }
+
+    /**
+     * Blocks off the main thread until MainActivity is RESUMED.
+     *
+     * `am start` on an activity that is ALREADY foreground (a previous instrumented run left it
+     * there) is a no-op, so the lifecycle monitor can still be empty when the test proceeds; the
+     * first [root] then failed with a bare "List is empty" that says nothing about the cause. The
+     * wait must NOT happen inside [onUi] -- sleeping on the main thread is what would prevent the
+     * resume it is waiting for.
+     */
+    private fun awaitResumed() {
+        repeat(24) {
+            if (resumedActivityOrNull() != null) return
+            SystemClock.sleep(250)
+        }
+        throw AssertionError("no RESUMED activity after 6s; MainActivity never came to the front")
+    }
+
     private fun root(): View = ActivityLifecycleMonitorRegistry.getInstance()
         .getActivitiesInStage(Stage.RESUMED).first().window.decorView
 
@@ -282,6 +377,27 @@ class RcThreadInstrumentedTest {
         ctx.registerReceiver(sentSpy, f, Context.RECEIVER_NOT_EXPORTED)
     }
 
+    /**
+     * Keeps the waveguide lit for the whole run, and restores the device setting afterwards.
+     *
+     * This test holds each state for HOLD_MS so a recording is usable, which makes the run longer
+     * than the glasses' screen timeout. When the screen blanks, MainActivity leaves RESUMED and
+     * every view lookup fails on an empty activity list -- a harness artefact that reads exactly
+     * like a product defect. Left as a setting rather than a product flag: the app must NOT keep
+     * the screen on in the field.
+     */
+    @Before
+    fun keepScreenLit() {
+        instr.uiAutomation.executeShellCommand("svc power stayon true")
+        device.wakeUp()
+        SystemClock.sleep(500)
+    }
+
+    @After
+    fun releaseScreen() {
+        runCatching { instr.uiAutomation.executeShellCommand("svc power stayon false") }
+    }
+
     @After
     fun stopSpy() {
         runCatching { ctx.unregisterReceiver(sentSpy) }
@@ -292,6 +408,7 @@ class RcThreadInstrumentedTest {
         instr.uiAutomation.executeShellCommand("am start -n $pkg/.MainActivity")
         SystemClock.sleep(2800)
         device.waitForIdle()
+        awaitResumed()
         locate()
         navigateToChatListTab()
 
@@ -335,6 +452,13 @@ class RcThreadInstrumentedTest {
         SystemClock.sleep(HOLD_MS)
         shoot("3_more_above")
         assertEquals(RcThreadItem.EarlierOnPhone, items().first())
+        // A rows push pins the thread to its LAST row, so the marker at position 0 is off-screen
+        // and therefore not attached. Scroll to it before asserting it renders -- the marker is
+        // meant to be found by scrolling up, so requiring it while pinned to the bottom would
+        // assert the opposite of the intended behaviour.
+        onUi { threadRecycler.scrollToPosition(0) }
+        device.waitForIdle()
+        SystemClock.sleep(400)
         assertNotNull("the marker must actually render",
             onUi { findByTag(threadRecycler, RcThreadAdapter.TAG_EARLIER) })
 
@@ -417,6 +541,22 @@ class RcThreadInstrumentedTest {
             View.VISIBLE, view(R_rcThreadMicGlyph()).visibility)
 
         // 11. Hold-to-speak: capture, live partial, then the 3 s send window.
+        //
+        // HARDWARE PRECONDITION: the glasses must be WORN. The wear gate refuses to open the
+        // microphone off-head ("Audio stream arm (BT connect) -- off-head, refusing to open mic"),
+        // which is correct product behaviour, so every step from here down asserts a capture that
+        // the device is right to deny. Assumed rather than asserted: a red bar on glasses sitting
+        // on a desk would report a defect that does not exist, and silently skipping would hide a
+        // real one. This states the reason out loud and stops.
+        assumeTrue(
+            "the glasses are OFF-HEAD, so the wear gate refuses the microphone by design; " +
+                "steps 11-15 (voice capture, send window, cancel) need them worn",
+            micIsAvailable()
+        )
+        // NUMPAD_3 only starts an RC capture while focus is RC_THREAD_FOCUSED; outside the thread
+        // it falls through to the AI-chat long-press. Asserting the voice bar without first
+        // pinning that precondition blames the microphone for a focus problem.
+        ensureThreadOpen()
         key(KeyEvent.KEYCODE_NUMPAD_3)
         pushPartial("yes deploy it and watch")
         SystemClock.sleep(HOLD_MS)
@@ -433,6 +573,7 @@ class RcThreadInstrumentedTest {
             View.GONE, view(R_rcThreadVoiceBar()).visibility)
 
         // 13. A real transcript opens the 3 s window with the draining bar and the cancel hint.
+        ensureThreadOpen()
         key(KeyEvent.KEYCODE_NUMPAD_3)
         pushFinalTranscript("yes deploy it and watch the logcat")
         SystemClock.sleep(1000)
@@ -444,6 +585,7 @@ class RcThreadInstrumentedTest {
         //      next one. This is the path that would otherwise ship cancelled words to the agent.
         key(KeyEvent.KEYCODE_BACK)          // cancels the window and the capture
         SystemClock.sleep(600)
+        ensureThreadOpen()
         key(KeyEvent.KEYCODE_NUMPAD_3)      // a fresh capture
         pushFinalTranscript("this belonged to the cancelled capture")
         SystemClock.sleep(HOLD_MS)
@@ -454,9 +596,14 @@ class RcThreadInstrumentedTest {
         SystemClock.sleep(600)
 
         // 13c. Re-open the window for the cancel assertions below.
+        ensureThreadOpen()
         key(KeyEvent.KEYCODE_NUMPAD_3)
         pushFinalTranscript("yes deploy it and watch the logcat")
         SystemClock.sleep(1000)
+        // The step-14 assertions are only meaningful while the window is actually open. Without
+        // this, an window that failed to re-open reads as "a single tap discarded the dictation".
+        assertEquals("step 13c failed to re-open the send window, so step 14 proves nothing",
+            View.VISIBLE, view(R_rcThreadVoiceBar()).visibility)
 
         // 14. A DOUBLE tap inside the window cancels it. A single tap must not.
         key(KeyEvent.KEYCODE_NUMPAD_2)
@@ -607,13 +754,19 @@ class RcThreadInstrumentedTest {
             putExtra(EXTRA_CHAT_LIST, json)
         })
         device.waitForIdle()
+        landInjectedRows()
     }
 
     private fun navigateToChatListTab() {
-        repeat(8) {
-            if (onUi { listRecycler.isShown }) return
-            device.pressKeyCode(KeyEvent.KEYCODE_DPAD_RIGHT)
-            SystemClock.sleep(400)
+        // A bare `return` here would leave the WHOLE function, skipping the confirm below that
+        // moves the activity from TAB_NAV into LIST_FOCUSED -- without which a later confirm only
+        // enters the list instead of opening the caret's row, and no MSGS_REQ is ever sent.
+        run {
+            repeat(8) {
+                if (onUi { listRecycler.isShown }) return@run
+                device.pressKeyCode(KeyEvent.KEYCODE_DPAD_RIGHT)
+                SystemClock.sleep(400)
+            }
         }
         device.waitForIdle()
         assertTrue("the chat list tab must be on screen", onUi { listRecycler.isShown })

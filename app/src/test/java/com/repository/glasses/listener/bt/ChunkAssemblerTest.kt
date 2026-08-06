@@ -1,163 +1,21 @@
 package com.repository.glasses.listener.bt
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * Characterisation tests for the chunk reassembly extracted from GlassesBtClient.handleChunkedJson,
- * plus the two new local bounds (age eviction and stream cap). The first group pins today's
- * behaviour: a channel-keyed buffer, the prefix taken from the FINAL chunk, and no bounds at all.
+ * Tests for the chunk reassembly extracted from GlassesBtClient.handleChunkedJson.
+ *
+ * The assembler recognises exactly ONE layout, [prefix?][chunk][isFinal][streamId][seq]. Anything
+ * else is refused as chunk_unframed rather than reassembled on a guess -- the group at the bottom
+ * pins that, because a tolerant reader is how a torn payload reaches a screen looking complete.
+ *
+ * The bounds (age eviction, stream cap, size ceiling) are covered here too: each must produce a
+ * VISIBLE failure, since a silently dropped stream leaves its waiting screen spinning forever.
  */
 class ChunkAssemblerTest {
 
     private fun asm(nowMs: () -> Long = { 0L }) = ChunkAssembler(nowMs)
-
-    /** Completion-or-nothing view, so the legacy characterisation assertions read unchanged. */
-    private fun ChunkAssembler.accept(
-        channel: String,
-        args: List<String>,
-        prefixIndex: Int
-    ): ChunkAssembler.Outcome.Completed? =
-        acceptFrame(channel, args, prefixIndex) as? ChunkAssembler.Outcome.Completed
-
-    @Test
-    fun singleFinalChunkCompletesImmediately() {
-        val a = asm()
-        val r = a.accept("ch.a", listOf("{\"a\":1}", "1"), prefixIndex = -1)
-        assertEquals("{\"a\":1}", r?.json)
-        assertNull(r?.prefix)
-    }
-
-    @Test
-    fun multiChunkConcatenatesAllPiecesInOrder() {
-        val a = asm()
-        assertNull(a.accept("ch.a", listOf("aaa", "0"), prefixIndex = -1))
-        assertNull(a.accept("ch.a", listOf("bbb", "0"), prefixIndex = -1))
-        assertEquals("aaabbbccc", a.accept("ch.a", listOf("ccc", "1"), prefixIndex = -1)!!.json)
-    }
-
-    @Test
-    fun prefixIsCarriedThroughOnCompletion() {
-        val a = asm()
-        a.accept("ch.h", listOf("c1", "aaa", "0"), prefixIndex = 0)
-        val r = a.accept("ch.h", listOf("c1", "bbb", "1"), prefixIndex = 0)
-        assertEquals("c1", r?.prefix)
-        assertEquals("aaabbb", r?.json)
-    }
-
-    @Test
-    fun legacyPathTakesThePrefixFromTheFinalChunk() {
-        // Today's handleChunkedJson recomputes the prefix on every chunk and hands the final
-        // chunk's value to onComplete. Pinned so the extraction cannot silently change it.
-        val a = asm()
-        a.accept("ch.h", listOf("first", "aaa", "0"), prefixIndex = 0)
-        assertEquals("last", a.accept("ch.h", listOf("last", "bbb", "1"), prefixIndex = 0)!!.prefix)
-    }
-
-    @Test
-    fun completionClearsBufferSoNextStreamStartsFresh() {
-        val a = asm()
-        a.accept("ch.a", listOf("aaa", "1"), prefixIndex = -1)
-        assertEquals("zzz", a.accept("ch.a", listOf("zzz", "1"), prefixIndex = -1)!!.json)
-    }
-
-    @Test
-    fun missingArgsAreReadAsEmptyStringsJustLikeGetOrElse() {
-        // handleChunkedJson uses args.getOrElse { "" } on every index, so a short frame appends
-        // nothing and is not final. Pinned so the extraction stays tolerant of the same input.
-        val a = asm()
-        assertNull(a.accept("ch.a", listOf("only"), prefixIndex = -1))
-        assertEquals("onlyrest", a.accept("ch.a", listOf("rest", "1"), prefixIndex = -1)!!.json)
-    }
-
-    @Test
-    fun partialStreamOlderThanSixtySecondsIsEvicted() {
-        var now = 0L
-        val a = asm { now }
-        a.accept("ch.a", listOf("aaa", "0"), prefixIndex = -1)
-        now = 61_000L
-        // A chunk on ANOTHER channel triggers the sweep; the stale one is dropped. Its own final
-        // chunk retires the tombstone without completing a truncated payload; the stream AFTER
-        // that starts clean.
-        a.accept("ch.b", listOf("bbb", "0"), prefixIndex = -1)
-        assertNull(a.accept("ch.a", listOf("zzz", "1"), prefixIndex = -1))
-        assertEquals("next", a.accept("ch.a", listOf("next", "1"), prefixIndex = -1)!!.json)
-    }
-
-    @Test
-    fun concurrentPartialStreamsAreCappedAtSixteenOldestFirst() {
-        var now = 0L
-        val a = asm { now }
-        repeat(17) { i -> now = i.toLong(); a.accept("ch$i", listOf("p$i", "0"), prefixIndex = -1) }
-        // ch0 was the oldest and must have been evicted, so its final chunk cannot complete.
-        assertNull(a.accept("ch0", listOf("zzz", "1"), prefixIndex = -1))
-        // ch16 is still buffered and completes with its whole payload.
-        assertEquals("p16tail", a.accept("ch16", listOf("tail", "1"), prefixIndex = -1)!!.json)
-    }
-
-    @Test
-    fun anEvictedStreamNeverCompletesTruncated() {
-        // The stream's own remaining chunks must be discarded, not silently completed as a tail.
-        var now = 0L
-        val a = asm { now }
-        a.accept("ch.a", listOf("head", "0"), prefixIndex = -1)
-        now = 61_000L
-        a.accept("ch.b", listOf("x", "0"), prefixIndex = -1) // triggers the sweep
-        assertNull(a.accept("ch.a", listOf("middle", "0"), prefixIndex = -1))
-        assertNull(a.accept("ch.a", listOf("tail", "1"), prefixIndex = -1))
-        // The tombstone is retired by that final chunk, so the NEXT stream works normally.
-        assertEquals("fresh", a.accept("ch.a", listOf("fresh", "1"), prefixIndex = -1)!!.json)
-    }
-
-    @Test
-    fun overflowEvictionAlsoRefusesToCompleteTruncated() {
-        var now = 0L
-        val a = asm { now }
-        a.accept("victim", listOf("head", "0"), prefixIndex = -1)
-        repeat(16) { i -> now = (i + 1).toLong(); a.accept("ch$i", listOf("p$i", "0"), prefixIndex = -1) }
-        assertNull(a.accept("victim", listOf("tail", "1"), prefixIndex = -1))
-    }
-
-    @Test
-    fun theCapEvictsOnlyTheOverflowNotTheWholeMap() {
-        var now = 0L
-        val a = asm { now }
-        repeat(17) { i -> now = i.toLong(); a.accept("ch$i", listOf("p$i", "0"), prefixIndex = -1) }
-        // ch1..ch16 must ALL still be buffered; only ch0 (the oldest) went.
-        for (i in 1..16) {
-            assertEquals("p${i}t", a.accept("ch$i", listOf("t", "1"), prefixIndex = -1)!!.json)
-        }
-    }
-
-    @Test
-    fun aStreamPastTheSizeCeilingIsDroppedNotCompleted() {
-        val a = asm()
-        val big = "x".repeat(1_000_000)
-        repeat(4) { assertNull(a.accept("ch.a", listOf(big, "0"), prefixIndex = -1)) }
-        assertNull(a.accept("ch.a", listOf("tail", "1"), prefixIndex = -1))
-        assertEquals("small", a.accept("ch.a", listOf("small", "1"), prefixIndex = -1)!!.json)
-    }
-
-    @Test
-    fun contactsLayoutReadsHashAtIndexTwoAndChunkAtIndexThree() {
-        // CH_CONTACTS wire: ["LIST", agMac, hash, jsonChunk, isFinal]
-        val a = asm()
-        assertNull(a.accept("listener_contacts", listOf("LIST", "AA:BB", "h1", "{\"a\":", "0"), prefixIndex = 2))
-        val r = a.accept("listener_contacts", listOf("LIST", "AA:BB", "h1", "1}", "1"), prefixIndex = 2)
-        assertEquals("h1", r?.prefix)
-        assertEquals("{\"a\":1}", r?.json)
-    }
-
-    @Test
-    fun clearDropsEveryPartialStream() {
-        val a = asm()
-        a.accept("ch.a", listOf("aaa", "0"), prefixIndex = -1)
-        a.clear()
-        assertEquals("zzz", a.accept("ch.a", listOf("zzz", "1"), prefixIndex = -1)!!.json)
-    }
-
-    // --- streamId / seq format (spec 0.6.2 / 0.6.3) ---
 
     private val S = ChunkAssembler.SENTINEL
 
@@ -169,7 +27,7 @@ class ChunkAssemblerTest {
     ) = a.acceptFrame(channel, args, prefixIndex)
 
     @Test
-    fun newFormatStreamCompletesAcrossTwoChunks() {
+    fun aFramedStreamCompletesAcrossTwoChunks() {
         val a = asm()
         assertEquals(
             ChunkAssembler.Outcome.None,
@@ -278,99 +136,6 @@ class ChunkAssemblerTest {
     }
 
     @Test
-    fun legacyTwoArgAndThreeArgFramesTakeTheLegacyPath() {
-        val a = asm()
-        assertEquals(
-            ChunkAssembler.Outcome.Completed(null, "aaa"),
-            outcome(a, "ch.a", listOf("aaa", "1"))
-        )
-        assertEquals(
-            ChunkAssembler.Outcome.Completed("c1", "bbb"),
-            outcome(a, "ch.h", listOf("c1", "bbb", "1"), prefixIndex = 0)
-        )
-    }
-
-    @Test
-    fun aChunkContainingTheLiteralTextCsHashStillTakesTheLegacyPath() {
-        // Only the control character disambiguates; printable "cs#" occurs naturally in JSON.
-        val a = asm()
-        val r = outcome(a, "ch.a", listOf("{\"x\":\"cs#1\"}", "1", "cs#ch.a#1", "0"))
-        assertEquals(ChunkAssembler.Outcome.Completed(null, "{\"x\":\"cs#1\"}"), r)
-    }
-
-    @Test
-    fun rightArityButANonNumericSeqTakesTheLegacyPath() {
-        val a = asm()
-        val r = outcome(a, "ch.a", listOf("aaa", "1", "${S}ch.a#1", "seq"))
-        assertEquals(ChunkAssembler.Outcome.Completed(null, "aaa"), r)
-    }
-
-    @Test
-    fun wrongArityWithASentinelStillTakesTheLegacyPath() {
-        val a = asm()
-        val r = outcome(a, "ch.a", listOf("aaa", "1", "${S}ch.a#1", "0", "extra"))
-        assertEquals(ChunkAssembler.Outcome.Completed(null, "aaa"), r)
-    }
-
-    @Test
-    fun aNewFormatSeqZeroPurgesAStaleLegacyBufferOnThatChannel() {
-        // A torn old-format stream must not concatenate onto a new-format one.
-        val a = asm()
-        outcome(a, "ch.a", listOf("TORN", "0"))
-        outcome(a, "ch.a", listOf("aaa", "0", "${S}ch.a#1", "0"))
-        assertEquals(
-            ChunkAssembler.Outcome.Completed(null, "aaabbb"),
-            outcome(a, "ch.a", listOf("bbb", "1", "${S}ch.a#1", "1"))
-        )
-    }
-
-    @Test
-    fun aMultiChunkFrameWhoseTrailingArgsLackTheSentinelIsReadAsLegacy() {
-        // Discriminating: on the legacy path these two frames concatenate and the prefix comes
-        // from the FINAL chunk. On the new path they would be an orphan (seq "7" first). If the
-        // sentinel condition were dropped from the detector, this assertion fails.
-        val a = asm()
-        assertEquals(
-            ChunkAssembler.Outcome.None,
-            outcome(a, "ch.h", listOf("p1", "aaa", "0", "cs#ch.h#1", "7"), prefixIndex = 0)
-        )
-        assertEquals(
-            ChunkAssembler.Outcome.Completed("p2", "aaabbb"),
-            outcome(a, "ch.h", listOf("p2", "bbb", "1", "cs#ch.h#1", "8"), prefixIndex = 0)
-        )
-    }
-
-    @Test
-    fun aFrameWithOneArgTooManyIsReadAsLegacyEvenWithASentinelAndDigitSeq() {
-        // Discriminating on ARITY. The extra arg is itself a sentinel/digit pair, so a detector
-        // that only inspected the LAST TWO args (dropping the exact-arity condition) would read
-        // this as new-format seq 7 -> an orphan. The exact-arity rule forces the legacy path,
-        // where args[0..1] are the chunk and isFinal and the frames concatenate.
-        val a = asm()
-        assertEquals(
-            ChunkAssembler.Outcome.None,
-            outcome(a, "ch.a", listOf("aaa", "0", "ignored", "${S}ch.a#1", "7"))
-        )
-        assertEquals(
-            ChunkAssembler.Outcome.Completed(null, "aaabbb"),
-            outcome(a, "ch.a", listOf("bbb", "1", "ignored", "${S}ch.a#1", "8"))
-        )
-    }
-
-    @Test
-    fun aNewFormatStreamDoesNotInheritATornLegacyBufferOnTheSameChannel() {
-        // Discriminating for the D-F6 purge: after the purge the torn legacy text is gone, so a
-        // LATER legacy stream on that channel starts clean instead of carrying "TORN".
-        val a = asm()
-        outcome(a, "ch.a", listOf("TORN", "0"))
-        outcome(a, "ch.a", listOf("aaa", "0", "${S}ch.a#1", "0"))
-        assertEquals(
-            ChunkAssembler.Outcome.Completed(null, "later"),
-            outcome(a, "ch.a", listOf("later", "1"))
-        )
-    }
-
-    @Test
     fun aReusedStreamIdStartingAtSeqZeroIsAcceptedNotSwallowed() {
         // The phone can restart and mint the same id again; a tombstone must not deafen it.
         val a = asm()
@@ -397,8 +162,144 @@ class ChunkAssemblerTest {
         assertEquals(listOf("ch.a", "ch.b"), reported)
     }
 
+    // --- stream-open accounting ---
+
+    private fun recorderOn(a: ChunkAssembler): MutableList<String> {
+        val seen = mutableListOf<String>()
+        a.onStreamOpened = { channel -> seen.add(channel) }
+        return seen
+    }
+
     @Test
-    fun clearDropsNewFormatStreamsToo() {
+    fun branchIsReportedOncePerStreamNotOncePerChunk() {
+        // A 100-chunk history send must not emit 100 log lines.
+        val a = asm()
+        val seen = recorderOn(a)
+        repeat(99) { i -> outcome(a, "ch.a", listOf("x", "0", "${S}ch.a#1", "$i")) }
+        outcome(a, "ch.a", listOf("x", "1", "${S}ch.a#1", "99"))
+        assertEquals(listOf("ch.a"), seen)
+    }
+
+    @Test
+    fun concurrentStreamsOnOneChannelAreEachReportedOnce() {
+        val a = asm()
+        val seen = recorderOn(a)
+        outcome(a, "ch.a", listOf("a1", "0", "${S}ch.a#1", "0"))
+        outcome(a, "ch.a", listOf("b1", "0", "${S}ch.a#2", "0"))
+        outcome(a, "ch.a", listOf("a2", "1", "${S}ch.a#1", "1"))
+        outcome(a, "ch.a", listOf("b2", "1", "${S}ch.a#2", "1"))
+        assertEquals(listOf("ch.a", "ch.a"), seen)
+    }
+
+    @Test
+    fun anOrphanedFrameOpensNoStreamAndIsNotReported() {
+        val a = asm()
+        val seen = recorderOn(a)
+        assertEquals(
+            ChunkAssembler.Outcome.Failed("ch.a", "chunk_orphan"),
+            outcome(a, "ch.a", listOf("aaa", "1", "${S}ch.a#1", "7"))
+        )
+        assertEquals(emptyList<String>(), seen)
+    }
+
+    @Test
+    fun aStreamPastTheSizeCeilingIsDroppedNotCompleted() {
+        // A peer that never sends a final chunk must not grow the buffer without limit, and the
+        // over-long stream must not then complete truncated.
+        val a = asm()
+        val big = "x".repeat(ChunkAssembler.MAX_STREAM_CHARS / 2 + 1)
+        assertEquals(
+            ChunkAssembler.Outcome.None,
+            outcome(a, "ch.a", listOf(big, "0", "${S}ch.a#1", "0"))
+        )
+        assertEquals(
+            ChunkAssembler.Outcome.Failed("ch.a", ChunkAssembler.REASON_TOO_LARGE),
+            outcome(a, "ch.a", listOf(big, "0", "${S}ch.a#1", "1"))
+        )
+        // The id is tombstoned, so the stream's own final chunk cannot complete a torn payload.
+        assertEquals(
+            ChunkAssembler.Outcome.None,
+            outcome(a, "ch.a", listOf("tail", "1", "${S}ch.a#1", "2"))
+        )
+    }
+
+    @Test
+    fun theContactsLayoutReadsItsPrefixAtIndexTwo() {
+        // CH_CONTACTS carries [op, mac, hash, chunk, isFinal, streamId, seq]: the one shipping
+        // channel whose prefix is not at index 0, so the prefixIndex arithmetic is pinned here.
+        val a = asm()
+        assertEquals(
+            ChunkAssembler.Outcome.None,
+            outcome(a, "listener_contacts",
+                listOf("LIST", "AA:BB", "h1", "{\"a\":", "0", "${S}c#1", "0"), prefixIndex = 2)
+        )
+        assertEquals(
+            ChunkAssembler.Outcome.Completed("h1", "{\"a\":1}"),
+            outcome(a, "listener_contacts",
+                listOf("LIST", "AA:BB", "h1", "1}", "1", "${S}c#1", "1"), prefixIndex = 2)
+        )
+    }
+
+    // --- refusal: there is no tolerant fallback left ---
+    //
+    // Each of these was previously reassembled by the channel-keyed legacy branch. That branch is
+    // gone, so every one must now FAIL VISIBLY. Silence here would be the worst outcome available:
+    // the waiting screen would spin forever with no line in the log saying why.
+
+    private fun assertRefused(args: List<String>, prefixIndex: Int = -1) {
+        assertEquals(
+            ChunkAssembler.Outcome.Failed("ch.a", ChunkAssembler.REASON_UNFRAMED),
+            outcome(asm(), "ch.a", args, prefixIndex)
+        )
+    }
+
+    @Test
+    fun aTwoArgFrameWithNoStreamIdIsRefused() {
+        assertRefused(listOf("aaa", "1"))
+    }
+
+    @Test
+    fun aPrefixedThreeArgFrameWithNoStreamIdIsRefused() {
+        assertRefused(listOf("c1", "aaa", "1"), prefixIndex = 0)
+    }
+
+    @Test
+    fun theRightArityWithoutTheSentinelIsRefused() {
+        // A chunk whose text merely LOOKS like trailing framing must not be mistaken for it.
+        assertRefused(listOf("aaa", "1", "cs#notasentinel", "0"))
+    }
+
+    @Test
+    fun theRightArityWithANonNumericSeqIsRefused() {
+        assertRefused(listOf("aaa", "1", "${S}ch.a#1", "x"))
+    }
+
+    @Test
+    fun oneArgTooManyIsRefusedEvenWithASentinelAndDigitSeq() {
+        assertRefused(listOf("extra", "aaa", "1", "${S}ch.a#1", "0"))
+    }
+
+    @Test
+    fun aChunkContainingTheLiteralSentinelTextIsStillRefusedWithoutRealFraming() {
+        assertRefused(listOf("payload containing ${S}ch.a#1 inline", "1"))
+    }
+
+    @Test
+    fun aRefusedFrameLeavesNoBufferBehind() {
+        // The refusal must not open a stream that a later framed seq 0 would then collide with.
+        val a = asm()
+        assertEquals(
+            ChunkAssembler.Outcome.Failed("ch.a", ChunkAssembler.REASON_UNFRAMED),
+            outcome(a, "ch.a", listOf("junk", "0"))
+        )
+        assertEquals(
+            ChunkAssembler.Outcome.Completed(null, "clean"),
+            outcome(a, "ch.a", listOf("clean", "1", "${S}ch.a#1", "0"))
+        )
+    }
+
+    @Test
+    fun clearDropsEveryInFlightStream() {
         val a = asm()
         outcome(a, "ch.a", listOf("aaa", "0", "${S}ch.a#1", "0"))
         a.clear()

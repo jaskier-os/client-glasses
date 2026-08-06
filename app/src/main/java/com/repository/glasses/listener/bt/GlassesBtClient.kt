@@ -85,7 +85,10 @@ class GlassesBtClient(private val relay: MessageRelay) {
     var listener: Listener? = null
 
     /** Chunk reassembly, bounded by age and by concurrent-stream count. */
-    private val chunkAssembler = ChunkAssembler()
+    private val chunkAssembler = ChunkAssembler().apply {
+        // One line per STREAM, not per chunk: a 100-chunk history send logs once.
+        onStreamOpened = { channel -> remoteLog?.invoke("Chunk stream opened on $channel") }
+    }
 
     @Volatile
     var isConnected = false
@@ -97,8 +100,7 @@ class GlassesBtClient(private val relay: MessageRelay) {
 
     /**
      * Reassemble chunked JSON. Phone sends [chunk, isFinal, streamId, seq], optionally preceded by
-     * a prefix; a pre-rewrite phone sends [chunk, isFinal] or [prefix, chunk, isFinal].
-     * [prefixIndex]: if >= 0, reads a prefix field at that arg index before the chunk.
+     * a prefix. [prefixIndex]: if >= 0, reads a prefix field at that arg index before the chunk.
      *
      * A dropped stream calls [onComplete] with an EMPTY payload rather than returning silently:
      * the waiting screen must resolve visibly. Returning nothing would leave a permanent spinner,

@@ -3,13 +3,12 @@ package com.repository.glasses.listener.bt
 /**
  * Chunk reassembly for the RFCOMM wrapper channels. Pure and Android-free so it is JVM-testable.
  *
- * Two layouts are understood:
- *   new    [prefix?][chunk][isFinal][streamId][seq]  -- keyed by streamId, detects lost chunks
- *   legacy [prefix?][chunk][isFinal]                 -- keyed by channel, cannot detect a gap
+ * One layout is understood:
+ *   [prefix?][chunk][isFinal][streamId][seq]  -- keyed by streamId, detects lost chunks
  *
- * The legacy path is TRANSITIONAL, present only to protect the one deploy window in which the
- * phone runs this build and the glasses do not (or vice versa). It is deleted in task 37 of
- * docs/plans/2026-08-06-glasses-rc-mirror-plan.md, together with its tests. Do not extend it.
+ * A frame that does not match it is REFUSED as [Outcome.Failed], never reassembled on a guess. The
+ * transitional channel-keyed layout that preceded this one is gone: it could not detect a gap, so
+ * two overlapping sends on one channel completed as a single corrupt payload.
  *
  * Streams are bounded by silence (STALE_MS), by concurrent count (MAX_STREAMS) and by accumulated
  * size (MAX_STREAM_CHARS). Every drop is REPORTED as [Outcome.Failed] rather than logged, because
@@ -19,6 +18,13 @@ package com.repository.glasses.listener.bt
  * on a single reader thread today, and this class must not rely on that staying true.
  */
 class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) {
+
+    /**
+     * Called exactly once per stream, when its buffer is opened. Reported per STREAM, not per
+     * chunk, so a 100-chunk send logs one line. Kept after the legacy branch was deleted because
+     * it is the cheapest field signal that chunked traffic is flowing at all.
+     */
+    var onStreamOpened: ((channel: String) -> Unit)? = null
 
     sealed class Outcome {
         data class Completed(val prefix: String?, val json: String) : Outcome()
@@ -34,16 +40,13 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
         var nextSeq: Int
     )
 
-    /** New-format streams, keyed by streamId. */
+    /** In-flight streams, keyed by streamId. */
     private val streams = LinkedHashMap<String, Partial>()
 
-    /** Legacy channel-keyed streams. Transitional; removed with the legacy branch in task 37. */
-    private val legacy = LinkedHashMap<String, Partial>()
-
     /**
-     * Keys (streamId, or channel on the legacy path) whose stream was dropped while the peer was
-     * still sending. Without this, the next chunk would start a fresh buffer and the stream's own
-     * final chunk would complete a TRUNCATED payload, which is worse than not completing at all.
+     * Stream ids dropped while the peer was still sending. Without this, the next chunk would start
+     * a fresh buffer and the stream's own final chunk would complete a TRUNCATED payload, which is
+     * worse than not completing at all.
      */
     private val dropped = LinkedHashMap<String, Long>()
 
@@ -61,9 +64,11 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
         sweep(now)
 
         val chunkIdx = if (prefixIndex >= 0) prefixIndex + 1 else 0
+        // A frame that fails the detector is refused, not guessed at. Reassembling an unrecognised
+        // layout is how a torn payload reaches a screen looking complete.
         val outcome =
-            if (isNewFormat(args, chunkIdx)) acceptNew(channel, args, chunkIdx, prefixIndex, now)
-            else acceptLegacy(channel, args, chunkIdx, prefixIndex, now)
+            if (isFramed(args, chunkIdx)) accept(channel, args, chunkIdx, prefixIndex, now)
+            else Outcome.Failed(channel, REASON_UNFRAMED)
 
         // A sweep or overflow failure for ANOTHER stream must not be lost behind this frame's own
         // result, so it is queued rather than returned. The caller drains it.
@@ -87,17 +92,16 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
     }
 
     /**
-     * New-format iff all three hold: exactly two args beyond isFinal, a sentinel-prefixed streamId,
-     * and a decimal seq. Legacy frames have arity exactly chunkIdx + 2, so the arity test alone
-     * already separates the two worlds; the other two are belts.
+     * Framed iff all three hold: exactly two args beyond isFinal, a sentinel-prefixed streamId, and
+     * a decimal seq. Anything else is not a chunk frame this build produced.
      */
-    private fun isNewFormat(args: List<String>, chunkIdx: Int): Boolean =
+    private fun isFramed(args: List<String>, chunkIdx: Int): Boolean =
         args.size == chunkIdx + 4 &&
             args[args.size - 2].startsWith(SENTINEL) &&
             args[args.size - 1].isNotEmpty() &&
             args[args.size - 1].all { it in '0'..'9' }
 
-    private fun acceptNew(
+    private fun accept(
         channel: String,
         args: List<String>,
         chunkIdx: Int,
@@ -127,8 +131,7 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
                 markDropped(streamId, now)
                 return Outcome.Failed(channel, REASON_ORPHAN)
             }
-            // A new stream retires any torn legacy remnant on this channel, so the two cannot merge.
-            legacy.remove(channel)
+            onStreamOpened?.invoke(channel)
             Partial(channel, prefix, StringBuilder(), now, 0).also { streams[streamId] = it }
         }
 
@@ -156,57 +159,21 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
         return Outcome.Completed(partial.prefix, partial.sb.toString())
     }
 
-    private fun acceptLegacy(
-        channel: String,
-        args: List<String>,
-        chunkIdx: Int,
-        prefixIndex: Int,
-        now: Long
-    ): Outcome {
-        // Index reads mirror the original handleChunkedJson exactly: getOrElse "" on every position.
-        val prefix = if (prefixIndex >= 0) args.getOrElse(prefixIndex) { "" } else null
-        val chunk = args.getOrElse(chunkIdx) { "" }
-        val isFinal = args.getOrElse(chunkIdx + 1) { "" } == "1"
-
-        if (dropped.containsKey(channel)) {
-            if (isFinal) dropped.remove(channel) else dropped[channel] = now
-            return Outcome.None
-        }
-
-        val partial = legacy.getOrPut(channel) { Partial(channel, prefix, StringBuilder(), now, 0) }
-        partial.sb.append(chunk)
-        partial.touchedAt = now
-
-        if (partial.sb.length > MAX_STREAM_CHARS) {
-            legacy.remove(channel)
-            if (!isFinal) markDropped(channel, now)
-            return Outcome.Failed(channel, REASON_TOO_LARGE)
-        }
-        evictOverflow(legacy, keep = channel, now = now)
-
-        if (!isFinal) return Outcome.None
-        legacy.remove(channel)
-        // The legacy path reads the prefix from THIS chunk, matching the original behaviour.
-        return Outcome.Completed(prefix, partial.sb.toString())
-    }
-
     @Synchronized
     fun clear() {
         streams.clear()
-        legacy.clear()
         dropped.clear()
     }
 
     /** Drops streams silent for STALE_MS. Every drop is queued as a failure, none are lost. */
     private fun sweep(now: Long) {
         val cutoff = now - STALE_MS
-        listOf(streams, legacy).forEach { map ->
-            map.entries.filter { it.value.touchedAt <= cutoff }.toList().forEach { (key, partial) ->
-                map.remove(key)
+        streams.entries.filter { it.value.touchedAt <= cutoff }.toList()
+            .forEach { (key, partial) ->
+                streams.remove(key)
                 markDropped(key, now)
                 raise(partial.channel, REASON_STALE)
             }
-        }
         // Tombstones expire on the same clock, so a key is never deaf forever.
         dropped.entries.filter { it.value <= cutoff }.map { it.key }.forEach { dropped.remove(it) }
     }
@@ -245,6 +212,7 @@ class ChunkAssembler(private val nowMs: () -> Long = System::currentTimeMillis) 
         const val MAX_STREAM_CHARS = 4_000_000
 
         const val REASON_ORPHAN = "chunk_orphan"
+        const val REASON_UNFRAMED = "chunk_unframed"
         const val REASON_GAP = "chunk_gap"
         const val REASON_STALE = "chunk_stale"
         const val REASON_OVERFLOW = "chunk_overflow"
