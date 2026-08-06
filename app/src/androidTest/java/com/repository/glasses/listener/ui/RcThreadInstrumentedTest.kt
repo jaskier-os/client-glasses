@@ -1,6 +1,9 @@
 package com.repository.glasses.listener.ui
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
@@ -17,7 +20,9 @@ import androidx.test.uiautomator.UiDevice
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.After
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -64,8 +69,51 @@ class RcThreadInstrumentedTest {
     private val EXTRA_USER_TEXT_REQUEST_ID = "user_text_request_id"
     private val EXTRA_CHAT_LIST = "chat_list"
 
+    // The OUTBOUND requests, i.e. what actually reaches the wire as CH_RC_MESSAGES_REQ /
+    // CH_RC_SEND_REQ / CH_RC_ANSWER_REQ. Asserting the rendered UI alone cannot tell a frame that
+    // was sent from one that was not, and the empty-sessionId unsubscribe on BACK has no UI at all.
+    private val ACTION_RC_MESSAGES_REQ = "$pkg.RC_MESSAGES_REQ"
+    private val ACTION_RC_SEND_MSG = "$pkg.RC_SEND_MSG"
+    private val ACTION_RC_ANSWER = "$pkg.RC_ANSWER"
+    private val EXTRA_RC_SEEN_SEQ = "rc_seen_seq"
+    private val EXTRA_RC_TEXT = "rc_text"
+    private val EXTRA_RC_REQUEST_ID = "rc_request_id"
+
     private val HOLD_MS = 2600L
     private val SESSION = "s-live"
+
+    /** Every outbound RC request the activity broadcast, in order, as "ACTION|arg|arg". */
+    private val sent = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+    private val sentSpy = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, i: Intent?) {
+            val a = i?.action ?: return
+            sent.add(
+                when (a) {
+                    ACTION_RC_MESSAGES_REQ ->
+                        "MSGS_REQ|${i.getStringExtra(EXTRA_RC_SESSION_ID)}" +
+                            "|${i.getLongExtra(EXTRA_RC_SEEN_SEQ, Long.MIN_VALUE)}"
+                    ACTION_RC_SEND_MSG ->
+                        "SEND|${i.getStringExtra(EXTRA_RC_SESSION_ID)}" +
+                            "|${i.getStringExtra(EXTRA_RC_TEXT)}"
+                    ACTION_RC_ANSWER ->
+                        "ANSWER|${i.getStringExtra(EXTRA_RC_SESSION_ID)}" +
+                            "|${i.getStringExtra(EXTRA_RC_REQUEST_ID)}" +
+                            "|${i.getStringExtra(EXTRA_RC_TEXT)}"
+                    else -> a
+                }
+            )
+        }
+    }
+
+    /** Drains the recorded frames, so each assertion speaks about its own step only. */
+    private fun drainSent(): List<String> {
+        synchronized(sent) {
+            val out = sent.toList()
+            sent.clear()
+            return out
+        }
+    }
 
     private fun artifactDir(): File =
         File(ctx.getExternalFilesDir(null), "rc-thread").apply { if (!exists()) mkdirs() }
@@ -199,6 +247,25 @@ class RcThreadInstrumentedTest {
 
     // -- the test --
 
+    /**
+     * Listens for the activity's outbound RC requests alongside the real ListenerService receiver.
+     * A broadcast reaches every registered receiver, so spying costs the production path nothing.
+     */
+    @Before
+    fun startSpy() {
+        val f = IntentFilter().apply {
+            addAction(ACTION_RC_MESSAGES_REQ)
+            addAction(ACTION_RC_SEND_MSG)
+            addAction(ACTION_RC_ANSWER)
+        }
+        ctx.registerReceiver(sentSpy, f, Context.RECEIVER_NOT_EXPORTED)
+    }
+
+    @After
+    fun stopSpy() {
+        runCatching { ctx.unregisterReceiver(sentSpy) }
+    }
+
     @Test
     fun rcThreadFlow() {
         instr.uiAutomation.executeShellCommand("am start -n $pkg/.MainActivity")
@@ -313,9 +380,15 @@ class RcThreadInstrumentedTest {
 
         // 10. DPAD_CENTER confirms the highlighted option. The prompt stops blocking once the
         //     agent moves on, which is what a later row proves.
+        drainSent()
         key(KeyEvent.KEYCODE_DPAD_CENTER)
         SystemClock.sleep(900)
         shoot("10_prompt_confirmed")
+        // The answer must reach the WIRE with the prompt's own request id. A rendered cursor move
+        // proves nothing about what the phone was told.
+        assertEquals("confirming an option emits exactly one CH_RC_ANSWER_REQ",
+            listOf("ANSWER|$SESSION|req-1|Yes"),
+            drainSent().filter { it.startsWith("ANSWER|") })
         pushRows(rowsFrame("""{"q":7,"r":"assistant","x":"Deploying."}""", lastSeq = 7))
         SystemClock.sleep(HOLD_MS)
         assertTrue("a resolved prompt drops its options", promptOptionTexts().isEmpty())
@@ -376,6 +449,9 @@ class RcThreadInstrumentedTest {
         assertEquals(View.GONE, view(R_rcThreadVoiceBar()).visibility)
         assertFalse("a cancelled send must never append a row",
             threadRows().any { it.text.contains("logcat") })
+        // The load-bearing half: a cancel must stop the frame, not merely hide the bar.
+        assertTrue("a cancelled dictation must never reach the wire",
+            drainSent().none { it.startsWith("SEND|") })
 
         // 15. The window commits on expiry, and NO optimistic local user row appears -- the user
         //     row arrives only from the phone.
@@ -386,11 +462,15 @@ class RcThreadInstrumentedTest {
         assertEquals(View.GONE, view(R_rcThreadVoiceBar()).visibility)
         assertFalse("no optimistic local user row may render",
             threadRows().any { it.text == "deploy it" })
+        assertEquals("the expired window emits exactly one CH_RC_SEND_REQ",
+            listOf("SEND|$SESSION|deploy it"), drainSent().filter { it.startsWith("SEND|") })
 
         // 16. While the send is in flight a further hold is refused, and the phone's reply clears it.
         key(KeyEvent.KEYCODE_NUMPAD_3)
         assertEquals("a second hold must not start while a send is in flight",
             View.GONE, view(R_rcThreadVoiceBar()).visibility)
+        assertTrue("a second hold in flight must emit no second frame",
+            drainSent().none { it.startsWith("SEND|") })
         pushSendResult("sent")
         SystemClock.sleep(HOLD_MS)
         shoot("16_send_acked")
@@ -437,12 +517,17 @@ class RcThreadInstrumentedTest {
         SystemClock.sleep(HOLD_MS)
         shoot("19_thread_before_back")
         assertEquals(View.VISIBLE, view(R_rcThreadContainer()).visibility)
+        drainSent()
         key(KeyEvent.KEYCODE_BACK)
         SystemClock.sleep(HOLD_MS)
         shoot("20_back_to_list")
         assertEquals(View.GONE, view(R_rcThreadContainer()).visibility)
         assertEquals(View.VISIBLE, onUi { listRecycler.visibility })
         assertTrue("the thread is discarded on the way out", threadRows().isEmpty())
+        // D6: leaving must UNSUBSCRIBE, or the phone keeps pushing rows for a thread nobody is
+        // looking at forever. This has no visible effect on the glasses, so only the frame proves it.
+        assertEquals("BACK must tell the phone to stop pushing rows, via an empty session id",
+            listOf("MSGS_REQ||-1"), drainSent().filter { it.startsWith("MSGS_REQ|") })
 
         Log.i(tag, "rcThreadFlow: done -> ${artifactDir().absolutePath}")
     }
@@ -465,9 +550,15 @@ class RcThreadInstrumentedTest {
         }
         assertTrue("the caret must reach rc:$SESSION before it can be confirmed", landed)
         device.waitForIdle()
+        drainSent()
         // The confirm runs after the double-tap window, exactly as a real single tap does.
         key(KeyEvent.KEYCODE_DPAD_CENTER)
         SystemClock.sleep(900)
+        // Opening asks for the rows, and THAT request is the read acknowledgement. Nothing is held
+        // yet, so seenSeq is -1; a wrong value here would clear an unread bar the user never saw.
+        assertEquals("opening a thread must request its rows with seenSeq -1",
+            listOf("MSGS_REQ|$SESSION|-1"),
+            drainSent().filter { it.startsWith("MSGS_REQ|") })
         assertEquals("the thread must open", View.VISIBLE, view(R_rcThreadContainer()).visibility)
     }
 
