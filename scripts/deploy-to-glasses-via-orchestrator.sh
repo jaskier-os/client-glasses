@@ -10,12 +10,12 @@ set -euo pipefail
 #
 # Usage:
 #   bash deploy-to-glasses-via-orchestrator.sh [ORCH_URL]
-#   ORCH_URL=https://65.108.225.44:10001 ORCH_API_KEY=<key> bash deploy-to-glasses-via-orchestrator.sh
+#   ORCH_URL=https://65.108.225.44:8443 ORCH_API_KEY=<key> bash deploy-to-glasses-via-orchestrator.sh
 #
 # Required env:
 #   ORCH_API_KEY  -- API key for the orchestrator (x-api-key header)
 # Args or env:
-#   ORCH_URL      -- orchestrator base URL (e.g. https://65.108.225.44:10001)
+#   ORCH_URL      -- orchestrator base URL (e.g. https://65.108.225.44:8443)
 
 # --- Config ---
 ORCH_URL="${1:-${ORCH_URL:-}}"
@@ -26,7 +26,7 @@ usage() {
     echo "   or: ORCH_URL=<url> ORCH_API_KEY=<key> bash $(basename "$0")"
     echo
     echo "Deploys the glasses APKs through the orchestrator -> phone -> glasses"
-    echo "(WiFi-Direct). ORCH_URL e.g. https://65.108.225.44:10001."
+    echo "(WiFi-Direct). ORCH_URL e.g. https://65.108.225.44:8443."
     echo "ORCH_API_KEY must be set in the environment."
 }
 
@@ -203,7 +203,7 @@ ws.on('message', (raw) => {
         if (m.requestId === reqId) {
             received = true;
             clearTimeout(timer);
-            process.stdout.write(JSON.stringify(m.data || {}));
+            process.stdout.write(JSON.stringify(m.payload?.data ?? m.data ?? {}));
             ws.close();
         }
     } catch (_) {}
@@ -236,12 +236,13 @@ ws.on('close', () => {
 # ---------------------------------------------------------------------------
 # orch_open
 # Open the glasses WiFi-Direct sideload session via orchestrator -> phone.
-# Retries with backoff up to ~90s (orchestrator path is slower than LAN).
+# Retries with backoff up to ~180s: the group forms over BT before the phone can
+# answer, which outlasts the LAN path.
 # ---------------------------------------------------------------------------
 orch_open() {
-    echo "--- Opening sideload session via orchestrator (this can take up to ~90s) ---"
+    echo "--- Opening sideload session via orchestrator (this can take a couple of minutes) ---"
     local deadline body ok err
-    deadline=$(( $(date +%s) + 90 ))
+    deadline=$(( $(date +%s) + 180 ))
     while :; do
         if body="$(orch_cmd "sideload_open" '{}' 60)"; then
             ok="$(printf '%s' "$body" | jq -r '.ok // false' 2>/dev/null)"
@@ -256,7 +257,7 @@ orch_open() {
             echo "  open request failed; retrying..."
         fi
         if [ "$(date +%s)" -ge "$deadline" ]; then
-            echo "ERROR: sideload session did not come up within 90s. Aborting." >&2
+            echo "ERROR: sideload session did not come up within 180s. Aborting." >&2
             exit 1
         fi
         sleep 5
@@ -293,6 +294,9 @@ orch_upload() {
         return 1
     fi
 
+    # fileId and fileName stay at the top level: the orchestrator reads fileId
+    # there to swap in the staged-file downloadUrl, and the phone accepts both
+    # from the command itself.
     body="$(orch_cmd "sideload_upload" \
         "$(jq -n --arg fid "$file_id" --arg fn "$remote_name" '{fileId:$fid, fileName:$fn}')" \
         300)"
@@ -315,8 +319,10 @@ orch_exec() {
     local cmd="$1"
     local body rc_field rc
 
+    # The phone reads the command out of params, not off the top of the payload,
+    # so a bare {cmd:...} arrives as "missing cmd".
     body="$(orch_cmd "sideload_exec" \
-        "$(jq -n --arg cmd "$cmd" '{cmd:$cmd}')" \
+        "$(jq -n --arg cmd "$cmd" '{params:{cmd:$cmd}}')" \
         300)"
     if [ $? -ne 0 ]; then
         echo "orch_exec: transport failure for command: $cmd" >&2
