@@ -141,6 +141,27 @@ class SttPcmCollectorTest {
     }
 
     @Test
+    fun losingTheMicMidUtteranceDiscardsWhatWasAccumulated() {
+        // The mic went away with speech half-captured. That fragment can never be
+        // completed, and keeping it would splice the previous session's words
+        // onto the front of the NEXT thing the wearer says -- which reads as a
+        // plausible sentence, so nobody would spot it as corruption.
+        val seg = object : SttPcmCollector.Segmenter {
+            var resets = 0
+            override fun accept(pcm: ShortArray, offset: Int, length: Int): ShortArray? = null
+            override fun reset() { resets++ }
+        }
+        val c = SttPcmCollector(seg, RecordingSink())
+        c.onPcmFrame(shortArrayOf(1, 2, 3), 0, 3, 0L)
+        c.onStreamStop()
+        assertEquals(
+            "the mic stopping mid-utterance must discard the partial capture",
+            1, seg.resets
+        )
+        c.stop()
+    }
+
+    @Test
     fun zeroLengthFramesAreIgnored() {
         val sink = RecordingSink()
         val c = SttPcmCollector(EveryNFrames(1), sink)
