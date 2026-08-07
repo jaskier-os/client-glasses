@@ -558,6 +558,28 @@ class GlassesBtClient(private val relay: MessageRelay) {
         return relay.publish(BtProtocol.CH_WAKE_EVENT, confidence.toString(), epochNanos.toString())
     }
 
+    /**
+     * Tell the phone which recogniser owns the coming session. Must go out
+     * BEFORE any audio: the phone acts on it by NOT opening its own transcriber,
+     * so an announcement that arrives late means the utterance is recognised and
+     * delivered twice.
+     */
+    fun sendSttMode(mode: String, sessionTag: String): Boolean =
+        relay.publish(BtProtocol.CH_STT_MODE, *SttModeWire.encode(mode, sessionTag).toTypedArray())
+
+    /**
+     * A final from the on-glasses recogniser.
+     *
+     * [text] is published even when empty: an empty final with status "ok" is the
+     * wearer cancelling, and dropping it hangs a notification reply in SENDING
+     * forever.
+     */
+    fun sendLocalTranscript(tag: String, status: String, text: String): Boolean =
+        relay.publish(
+            BtProtocol.CH_LOCAL_TRANSCRIPT,
+            *LocalTranscriptWire.encode(tag, status, text).toTypedArray()
+        )
+
     /** Send large data to phone in 2K chunks: [command, chunk, isFinal("0"/"1")] */
     fun sendChunked(command: String, data: String, onProgress: ((Int) -> Unit)? = null) = GT.section("bt.send_chunked.$command") {
         GT.counter("bt.chunk_bytes", data.length.toLong())

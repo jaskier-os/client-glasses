@@ -285,6 +285,45 @@ class CaptureBridge(private val context: Context) {
             logMsg("detectFaces failed: ${e.message}"); null
         }
     }
+    /**
+     * Transcribe ONE utterance with the on-glasses recogniser.
+     *
+     * BLOCKS for ~1-3.4 s (21 s behind a cold model load), so it must be called
+     * from a worker -- never the main thread, and never the mic thread.
+     * SttDispatcher owns that, and owns the timeout: Binder has no client-side
+     * deadline of its own, so a wedged capture would otherwise hang the utterance
+     * forever.
+     *
+     * @return the transcript, "" for an explicit empty final (the wearer
+     *   cancelling), or null when local recognition is unavailable and the caller
+     *   must fall back to the remote path. A dead capture process arrives here as
+     *   null too, which is exactly the right answer -- the listener still holds
+     *   the PCM.
+     */
+    fun transcribeUtterance(pcm: ByteArray, lang: String, utteranceId: Long): String? =
+        GT.section("cap.bridge.transcribe_utterance") {
+            try { api?.transcribeUtterance(pcm, lang, utteranceId) } catch (e: Exception) {
+                logMsg("transcribeUtterance failed: ${e.message}"); null
+            }
+        }
+
+    /** True when a transcribeUtterance call would attempt local inference. Cheap. */
+    fun isSttAvailable(): Boolean =
+        try { api?.isSttAvailable ?: false } catch (_: Exception) { false }
+
+    /**
+     * Warm the recogniser. Cold load is ~21 s, so without this the first
+     * utterance after a cold start always falls back to remote. oneway.
+     */
+    fun prepareStt() = GT.section("cap.bridge.prepare_stt") {
+        try { api?.prepareStt() } catch (e: Exception) { logMsg("prepareStt failed: ${e.message}") }
+    }
+
+    /** Drop the ~203 MB model. oneway; a transcribe in flight completes first. */
+    fun releaseStt(reason: String) = GT.section("cap.bridge.release_stt") {
+        try { api?.releaseStt(reason) } catch (e: Exception) { logMsg("releaseStt failed: ${e.message}") }
+    }
+
     /** Start the silent rPPG stream; samples arrive via Listener.onRppgSamples. */
     fun startRppg() = GT.section("cap.bridge.start_rppg") {
         try { api?.startRppg() } catch (e: Exception) { logMsg("Capture: startRppg failed: ${e.message}") }

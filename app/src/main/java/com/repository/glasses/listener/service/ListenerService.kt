@@ -55,6 +55,11 @@ import com.repository.glasses.listener.rokid.AssistantSuppressor
 import com.repository.glasses.listener.audio.TtsPlayer
 import com.repository.glasses.listener.bt.GlassesBtClient
 import com.repository.glasses.listener.config.GlassesConfig
+import com.repository.glasses.listener.stt.LocalSttSession
+import com.repository.glasses.listener.stt.SttDispatcher
+import com.repository.glasses.listener.stt.SttPcmCollector
+import com.repository.glasses.listener.stt.SttRouter
+import com.repository.glasses.listener.stt.SttVadSegmenter
 import com.repository.glasses.listener.capture.AudioRecorder
 import com.repository.glasses.listener.capture.BeamformController
 import com.repository.glasses.listener.capture.LocalOpusWriter
@@ -1341,10 +1346,23 @@ class ListenerService : LifecycleService(),
         // stays stuck true and the phone's tg-voice session lingers until its no-speech
         // watchdog fires. Mirrors tgVoiceStopReceiver.
         if (folded && telegramVoiceActive) {
+            // Release the mic-bus subscription with the capture that owned it.
+            endLocalSttSession()
             telegramVoiceActive = false
             updateDuckState()
             stopGlassesAudioStream("tg-fold")
             btClient.sendTgVoiceStop()
+        }
+        // Unfolding is the earliest reliable signal that speech may be coming.
+        // The model takes ~21 s to load, so warming it here is what makes the
+        // FIRST utterance eligible for local recognition at all -- without it
+        // every first utterance after a cold start falls back to remote.
+        // Refused by capture while video owns the NPU, and dropped again after
+        // 90 s idle, so an unfold that leads to nothing costs nothing lasting.
+        if (!folded && SttRouter.isRussian(GlassesConfig.sttLanguage)) {
+            try { captureBridge.prepareStt() } catch (e: Exception) {
+                btErr("prepareStt failed: ${e.message}")
+            }
         }
         reconcileWakeWord(reason)
         postReconcileLocalOpusWriter(reason)
@@ -5191,6 +5209,12 @@ class ListenerService : LifecycleService(),
             mediaPlayingSnapshot = mediaSessionMonitor.isPlaying
             btLog("ACTIVATE: mediaPlaying=$mediaPlayingSnapshot duck=$mediaPlayingSnapshot")
 
+            // Decided AND announced before any audio flows, so the phone has
+            // already chosen whether to open its own transcriber by the time the
+            // first mic frame exists. A late announcement means the utterance is
+            // recognised twice and delivered twice.
+            beginLocalSttSession(SttRouter.TAG_ASSISTANT)
+
             transitionState(State.LISTENING, "phone activate")
             btClient.sendStatus("LISTENING")
 
@@ -5213,7 +5237,75 @@ class ListenerService : LifecycleService(),
         }
     }
 
+    /**
+     * The on-glasses recogniser for one session: decides local vs remote, tells
+     * the phone, and -- only when local -- attaches to the microphone bus.
+     *
+     * Built lazily and kept for the process lifetime; the SESSION is what starts
+     * and stops. The router latches its decision per session so it cannot flip
+     * mid-utterance and leave the phone half-configured.
+     */
+    private val localStt: LocalSttSession by lazy {
+        LocalSttSession(
+            router = SttRouter(object : SttRouter.State {
+                override val sttLanguage: String get() = GlassesConfig.sttLanguage
+                override val sttAvailable: Boolean get() = captureBridge.isSttAvailable()
+                // Video owns the NPU; recognising during a recording would queue
+                // behind it for an unknown time.
+                override val videoActive: Boolean get() = captureBridge.isRecordingActive()
+                override val denoiseActive: Boolean get() = false
+            }),
+            segmenter = object : SttPcmCollector.Segmenter {
+                private val vad = SttVadSegmenter()
+                override fun accept(pcm: ShortArray, offset: Int, length: Int): ShortArray? =
+                    vad.accept(pcm.copyOfRange(offset, offset + length))?.pcm
+                override fun reset() = vad.reset()
+            },
+            dispatcher = SttDispatcher(
+                object : SttDispatcher.Bridge {
+                    override fun transcribeUtterance(
+                        pcm: ByteArray, lang: String, utteranceId: Long,
+                    ): String? = captureBridge.transcribeUtterance(pcm, lang, utteranceId)
+                },
+                GlassesConfig.sttLanguage,
+            ),
+            transport = object : LocalSttSession.Transport {
+                override fun sendSttMode(mode: String, sessionTag: String) {
+                    btClient.sendSttMode(mode, sessionTag)
+                }
+                override fun sendLocalTranscript(tag: String, status: String, text: String) {
+                    btClient.sendLocalTranscript(tag, status, text)
+                }
+            },
+        )
+    }
+
+    /**
+     * Open a recognition session. Never throws: local STT is optional, and a
+     * failure here must leave the remote path working rather than break the
+     * session the wearer just started.
+     */
+    private fun beginLocalSttSession(tag: String) {
+        try {
+            val local = localStt.begin(tag)
+            btLog("STT session tag=$tag local=$local lang=${GlassesConfig.sttLanguage}")
+        } catch (e: Exception) {
+            btErr("STT session start failed (staying remote): ${e.message}")
+        }
+    }
+
+    /** Close it, releasing the microphone subscription. Never throws. */
+    private fun endLocalSttSession() {
+        try { localStt.end() } catch (e: Exception) {
+            btErr("STT session end failed: ${e.message}")
+        }
+    }
+
     private fun transitionToIdle() {
+        // Unsubscribe from the mic bus. MicBus is a process singleton, so a
+        // session left open keeps receiving audio across a restart and
+        // transcribes into a session that no longer exists.
+        endLocalSttSession()
         transitionState(State.IDLE, "transition to idle")
         exitLiveUtteranceMode("conversation ended")
         currentRequestId = null
@@ -8021,6 +8113,8 @@ class ListenerService : LifecycleService(),
             // owned by MainActivity; it broadcasts ACTION_NOTIF_REPLY_SEND when the
             // window elapses, or ACTION_NOTIF_REPLY_CANCEL on a double-tap.
             val finalText = text
+            // Release the mic-bus subscription with the capture that owned it.
+            endLocalSttSession()
             telegramVoiceActive = false
             stopGlassesAudioStream("notif-reply-final")
             updateDuckState()
@@ -8462,6 +8556,8 @@ class ListenerService : LifecycleService(),
             btLog("TG send message from UI: chatId=$chatId topicId=$topicId text=${text.take(40)}")
             // Ensure voice session is ended (covers all send paths)
             if (telegramVoiceActive) {
+                // Release the mic-bus subscription with the capture that owned it.
+                endLocalSttSession()
                 telegramVoiceActive = false
                 updateDuckState()
                 btClient.sendTgVoiceStop()
@@ -8515,6 +8611,9 @@ class ListenerService : LifecycleService(),
                 return
             }
             btLog("TG voice start from UI: chatId=$chatId")
+            // Announced before the audio gate opens, so the phone knows whether
+            // to run its own transcriber for this session.
+            beginLocalSttSession(SttRouter.TAG_TG_VOICE)
             mediaPlayingSnapshot = mediaSessionMonitor.isPlaying
             telegramVoiceActive = true
             updateDuckState()
@@ -8532,6 +8631,8 @@ class ListenerService : LifecycleService(),
     private val tgVoiceStopReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             btLog("TG voice stop from UI")
+            // Release the mic-bus subscription with the capture that owned it.
+            endLocalSttSession()
             telegramVoiceActive = false
             updateDuckState()
             // Balance the signalAudioStart above: close the live-stream gate (the
@@ -8605,6 +8706,8 @@ class ListenerService : LifecycleService(),
                 return
             }
             btLog("RC voice start: session=$sessionId")
+            // RC dictation reuses the tg_voice tag and delivery path verbatim.
+            beginLocalSttSession(SttRouter.TAG_TG_VOICE)
             mediaPlayingSnapshot = mediaSessionMonitor.isPlaying
             telegramVoiceActive = true
             updateDuckState()
@@ -8619,6 +8722,8 @@ class ListenerService : LifecycleService(),
     private val rcVoiceStopReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             btLog("RC voice stop")
+            // Release the mic-bus subscription with the capture that owned it.
+            endLocalSttSession()
             telegramVoiceActive = false
             updateDuckState()
             stopGlassesAudioStream("rc-voice-stop")
@@ -8702,6 +8807,9 @@ class ListenerService : LifecycleService(),
         override fun onReceive(context: Context, intent: Intent) {
             val notifId = intent.getStringExtra(EXTRA_NOTIF_ID) ?: return
             btLog("[NREPLY] svc Reply START: $notifId state=$state micStreaming=$micStreaming phoneAudioConnected=$phoneAudioConnected")
+            // A notification reply shares the tg_voice tag and the same delivery
+            // path; announce the mode before the audio gate opens.
+            beginLocalSttSession(SttRouter.TAG_TG_VOICE)
             notifReplyId = notifId
             // A hold-to-reply runs 5-21s, outliving the timed FULL_WAKE_LOCK that
             // wakeScreenForNotification() acquired (14s hard cap for repliables).
@@ -8766,6 +8874,8 @@ class ListenerService : LifecycleService(),
             // Stop streaming our mic -- the utterance is captured. Keep the screen
             // lock held and notifReplyId SET until the result lands so the teardown
             // (lock re-arm, queue advance) runs exactly once in finalizeReplyResult.
+            // Release the mic-bus subscription with the capture that owned it.
+            endLocalSttSession()
             telegramVoiceActive = false
             stopGlassesAudioStream("notif-reply-send")
             updateDuckState()
@@ -8822,6 +8932,8 @@ class ListenerService : LifecycleService(),
             val notifId = intent.getStringExtra(EXTRA_NOTIF_ID) ?: notifReplyId ?: return
             btLog("[Notif] Reply cancel: $notifId")
             btClient.sendNotifReplyCancel(notifId)
+            // Release the mic-bus subscription with the capture that owned it.
+            endLocalSttSession()
             telegramVoiceActive = false
             stopGlassesAudioStream("notif-reply-cancel")
             updateDuckState()
