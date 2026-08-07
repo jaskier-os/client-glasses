@@ -1347,7 +1347,7 @@ class ListenerService : LifecycleService(),
         // watchdog fires. Mirrors tgVoiceStopReceiver.
         if (folded && telegramVoiceActive) {
             // Release the mic-bus subscription with the capture that owned it.
-            endLocalSttSession()
+            endLocalSttSession(SttRouter.TAG_TG_VOICE)
             telegramVoiceActive = false
             updateDuckState()
             stopGlassesAudioStream("tg-fold")
@@ -5294,18 +5294,30 @@ class ListenerService : LifecycleService(),
         }
     }
 
-    /** Close it, releasing the microphone subscription. Never throws. */
-    private fun endLocalSttSession() {
-        try { localStt.end() } catch (e: Exception) {
+    /**
+     * Close the session, releasing the microphone subscription -- but only if it
+     * is the one [tag] started.
+     *
+     * Scoped by tag because transitionToIdle is reached from watchdogs, TTS
+     * finishing, screen-off and dismiss. Closing unconditionally there would tear
+     * down a live Telegram or notification-reply capture owned by a different
+     * feature, and that utterance would then yield no final at all -- not even a
+     * failure -- leaving the phone waiting for a transcript that never comes.
+     *
+     * Never throws: local STT is optional and must not break the session.
+     */
+    private fun endLocalSttSession(tag: String) {
+        try { localStt.endIfOwnedBy(tag) } catch (e: Exception) {
             btErr("STT session end failed: ${e.message}")
         }
     }
 
     private fun transitionToIdle() {
-        // Unsubscribe from the mic bus. MicBus is a process singleton, so a
-        // session left open keeps receiving audio across a restart and
-        // transcribes into a session that no longer exists.
-        endLocalSttSession()
+        // The genuine end of ANY session, whichever feature owns it: IDLE means
+        // nothing is capturing. MicBus is a process singleton, so a session left
+        // open keeps receiving audio across a restart and transcribes into a
+        // session that no longer exists.
+        localStt.currentTag()?.let { endLocalSttSession(it) }
         transitionState(State.IDLE, "transition to idle")
         exitLiveUtteranceMode("conversation ended")
         currentRequestId = null
@@ -8114,7 +8126,7 @@ class ListenerService : LifecycleService(),
             // window elapses, or ACTION_NOTIF_REPLY_CANCEL on a double-tap.
             val finalText = text
             // Release the mic-bus subscription with the capture that owned it.
-            endLocalSttSession()
+            endLocalSttSession(SttRouter.TAG_TG_VOICE)
             telegramVoiceActive = false
             stopGlassesAudioStream("notif-reply-final")
             updateDuckState()
@@ -8162,6 +8174,11 @@ class ListenerService : LifecycleService(),
         }
         // Transition out of LISTENING as soon as user text arrives (recording is done on phone side)
         if (state == State.LISTENING) {
+            // The wearer's turn is over, so release the microphone subscription
+            // now rather than at IDLE. Left open through RESPONDING it would hear
+            // the TTS reply, endpoint it as speech, and ship the assistant's own
+            // words back as a second transcript.
+            endLocalSttSession(SttRouter.TAG_ASSISTANT)
             transitionState(State.RESPONDING, "user text received")
             broadcastState(state.name)
         }
@@ -8557,7 +8574,7 @@ class ListenerService : LifecycleService(),
             // Ensure voice session is ended (covers all send paths)
             if (telegramVoiceActive) {
                 // Release the mic-bus subscription with the capture that owned it.
-                endLocalSttSession()
+                endLocalSttSession(SttRouter.TAG_TG_VOICE)
                 telegramVoiceActive = false
                 updateDuckState()
                 btClient.sendTgVoiceStop()
@@ -8632,7 +8649,7 @@ class ListenerService : LifecycleService(),
         override fun onReceive(context: Context, intent: Intent) {
             btLog("TG voice stop from UI")
             // Release the mic-bus subscription with the capture that owned it.
-            endLocalSttSession()
+            endLocalSttSession(SttRouter.TAG_TG_VOICE)
             telegramVoiceActive = false
             updateDuckState()
             // Balance the signalAudioStart above: close the live-stream gate (the
@@ -8723,7 +8740,7 @@ class ListenerService : LifecycleService(),
         override fun onReceive(context: Context, intent: Intent) {
             btLog("RC voice stop")
             // Release the mic-bus subscription with the capture that owned it.
-            endLocalSttSession()
+            endLocalSttSession(SttRouter.TAG_TG_VOICE)
             telegramVoiceActive = false
             updateDuckState()
             stopGlassesAudioStream("rc-voice-stop")
@@ -8875,7 +8892,7 @@ class ListenerService : LifecycleService(),
             // lock held and notifReplyId SET until the result lands so the teardown
             // (lock re-arm, queue advance) runs exactly once in finalizeReplyResult.
             // Release the mic-bus subscription with the capture that owned it.
-            endLocalSttSession()
+            endLocalSttSession(SttRouter.TAG_TG_VOICE)
             telegramVoiceActive = false
             stopGlassesAudioStream("notif-reply-send")
             updateDuckState()
@@ -8933,7 +8950,7 @@ class ListenerService : LifecycleService(),
             btLog("[Notif] Reply cancel: $notifId")
             btClient.sendNotifReplyCancel(notifId)
             // Release the mic-bus subscription with the capture that owned it.
-            endLocalSttSession()
+            endLocalSttSession(SttRouter.TAG_TG_VOICE)
             telegramVoiceActive = false
             stopGlassesAudioStream("notif-reply-cancel")
             updateDuckState()

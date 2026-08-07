@@ -162,6 +162,75 @@ class LocalSttSessionTest {
     }
 
     @Test
+    fun beginningTwiceDoesNotLeakTheFirstSubscription() {
+        // No start path guards against re-entry: a hold-tap while already
+        // listening, or a repeated reply START, both reach begin() twice. The
+        // first collector would otherwise stay subscribed to MicBus forever,
+        // endpoint independently, and fire a second stale final into the live
+        // session -- plus leak its worker thread.
+        val t = FakeTransport()
+        val s = LocalSttSession(
+            SttRouter(FakeState()), ImmediateSegmenter(), dispatcher("привет"), t
+        ).also { session = it }
+        s.begin(SttRouter.TAG_ASSISTANT)
+        s.begin(SttRouter.TAG_ASSISTANT)
+        assertEquals(
+            "a re-entered session must not leave the previous collector subscribed",
+            1, MicBus.subscriberCount()
+        )
+    }
+
+    @Test
+    fun theModeIsAnnouncedBeforeTheMicrophoneIsEverTouched() {
+        // Ordering, not just occurrence. The phone acts on the announcement by
+        // NOT opening its own transcriber; if audio can flow first, the phone has
+        // already started and the utterance is recognised and delivered twice.
+        val seen = ArrayList<Int>()
+        val t = object : LocalSttSession.Transport {
+            override fun sendSttMode(mode: String, sessionTag: String) {
+                seen += MicBus.subscriberCount()
+            }
+            override fun sendLocalTranscript(tag: String, status: String, text: String) {}
+        }
+        val s = LocalSttSession(
+            SttRouter(FakeState()), ImmediateSegmenter(), dispatcher("x"), t
+        ).also { session = it }
+        s.begin(SttRouter.TAG_ASSISTANT)
+        assertEquals(
+            "the mode must be announced BEFORE subscribing to the mic",
+            listOf(0), seen
+        )
+    }
+
+    @Test
+    fun aSessionStartedByOneFeatureIsNotClosedByAnother() {
+        // transitionToIdle is reached from watchdogs, TTS finishing, screen-off
+        // and dismiss. Closing unconditionally there would tear down a live
+        // Telegram capture, whose utterance would then produce NO final at all --
+        // not even a failure -- leaving the phone waiting forever.
+        val t = FakeTransport()
+        val s = LocalSttSession(
+            SttRouter(FakeState()), ImmediateSegmenter(), dispatcher("x"), t
+        ).also { session = it }
+        s.begin(SttRouter.TAG_TG_VOICE)
+        assertFalse(
+            "the assistant must not close a telegram capture",
+            s.endIfOwnedBy(SttRouter.TAG_ASSISTANT)
+        )
+        assertEquals("the live capture must still hold the mic", 1, MicBus.subscriberCount())
+        assertTrue("its own owner closes it", s.endIfOwnedBy(SttRouter.TAG_TG_VOICE))
+        assertEquals(0, MicBus.subscriberCount())
+    }
+
+    @Test
+    fun closingASessionThatWasNeverOpenedIsHarmless() {
+        val s = LocalSttSession(
+            SttRouter(FakeState()), ImmediateSegmenter(), dispatcher("x"), FakeTransport()
+        )
+        assertFalse(s.endIfOwnedBy(SttRouter.TAG_ASSISTANT))
+    }
+
+    @Test
     fun endingASessionTwiceIsHarmless() {
         val t = FakeTransport()
         val s = LocalSttSession(

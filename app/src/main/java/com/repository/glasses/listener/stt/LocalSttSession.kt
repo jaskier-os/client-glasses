@@ -44,6 +44,16 @@ class LocalSttSession(
 
     private companion object { const val TAG = "LocalSttSession" }
 
+    /**
+     * A logging failure must never escape a LIFECYCLE path. These calls sit
+     * between subscribing to the mic and closing that subscription, so a throw
+     * here would leak the subscription or skip the teardown -- the exact defects
+     * this class exists to prevent. (Caught in test, twice.)
+     */
+    private fun logi(msg: String) {
+        try { Log.i(TAG, msg) } catch (_: Throwable) {}
+    }
+
     private val utteranceIds = AtomicLong(0L)
 
     @Volatile private var collector: SttPcmCollector? = null
@@ -56,6 +66,15 @@ class LocalSttSession(
      * @return true when this session is being recognised on the glasses.
      */
     fun begin(sessionTag: String): Boolean {
+        // A session already running is CLOSED first. No start path guards against
+        // re-entry -- a hold-tap while already listening, or a repeated reply
+        // START, both reach here -- and without this the old collector stays
+        // subscribed to MicBus forever, VADs independently, and fires a second,
+        // stale final into the live session. Its worker thread leaks too.
+        if (collector != null) {
+            logi("begin($sessionTag) with a session already open; closing the old one")
+            end()
+        }
         val mode = router.beginSession(sessionTag)
         val local = mode == SttRouter.Mode.LOCAL
         // Announced BEFORE subscribing to the mic, so the phone has already
@@ -92,6 +111,30 @@ class LocalSttSession(
         router.endSession()
     }
 
+    /**
+     * Close the session ONLY if it is the one [expectedTag] started.
+     *
+     * transitionToIdle is reached from watchdogs, TTS finishing, screen-off and
+     * dismiss, and an unconditional close there would tear down a live Telegram
+     * or notification-reply capture that a different feature owns. The utterance
+     * would then produce no final at all -- not even a failure -- and the phone
+     * would wait for a transcript that never comes.
+     *
+     * @return true when a session was actually closed.
+     */
+    fun endIfOwnedBy(expectedTag: String): Boolean {
+        val current = tag ?: return false
+        if (current != expectedTag) {
+            logi("end($expectedTag) ignored: session '$current' belongs to another feature")
+            return false
+        }
+        end()
+        return true
+    }
+
+    /** The tag of the running session, or null when none is open. */
+    fun currentTag(): String? = tag
+
     /** Runs on the collector's worker thread, never the mic thread. */
     private fun onUtteranceReady(pcm: ShortArray) {
         val sessionTag = tag ?: return
@@ -117,7 +160,7 @@ class LocalSttSession(
                     sessionTag, LocalTranscriptWire.STATUS_FAIL, ""
                 )
                 try {
-                    Log.i(TAG, "utt=$id local recognition failed; phone will transcribe")
+                    logi("utt=$id local recognition failed; phone will transcribe")
                 } catch (_: Throwable) {
                 }
             }
