@@ -382,6 +382,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private lateinit var rcThreadCountdownFill: View
     private lateinit var rcThreadCountdownRow: LinearLayout
     private lateinit var rcThreadCountdownSecs: TextView
+    private lateinit var rcThreadVoiceMicGlyph: TextView
+    private lateinit var rcThreadCancelHint: TextView
 
     /** Merges CH_RC_MESSAGES_RESP frames. Empty until a session is opened. */
     private val rcThread = RcThreadModel()
@@ -3791,6 +3793,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             rcThreadCountdownFill = findViewById(R.id.rcThreadCountdownFill)
             rcThreadCountdownRow = findViewById(R.id.rcThreadCountdownRow)
             rcThreadCountdownSecs = findViewById(R.id.rcThreadCountdownSecs)
+            rcThreadVoiceMicGlyph = findViewById(R.id.rcThreadVoiceMicGlyph)
+            rcThreadCancelHint = findViewById(R.id.rcThreadCancelHint)
+            // The RC thread chrome carries no android:textSize; an XML size is frozen at inflate
+            // and would ignore every later change to the wearer's setting. Sized here instead.
+            applyRcThreadFontSizes()
             statusArea = findViewById(R.id.statusArea)
             statusBar = findViewById(R.id.statusBar)
             remoteInputGlyph = findViewById(R.id.remoteInputGlyph)
@@ -7099,6 +7106,33 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         )
     }
 
+    /**
+     * Sizes every text view in the RC thread's chrome from the wearer's chat font setting.
+     *
+     * The literals are the sizes the approved sketch was drawn at; [ChatFontScale] turns each into
+     * the size to render, preserving their ratios so the header still outranks the workDir line and
+     * the countdown still outranks the cancel hint at every setting.
+     *
+     * Called once at inflate and again whenever the setting changes, so an open thread resizes in
+     * place rather than waiting to be closed and reopened.
+     */
+    private fun applyRcThreadFontSizes() {
+        fun TextView.scaled(designSp: Float) =
+            setTextSize(
+                android.util.TypedValue.COMPLEX_UNIT_SP,
+                com.repository.glasses.listener.ui.ChatFontScale.sp(designSp)
+            )
+
+        rcThreadTitle.scaled(14f)
+        rcThreadFolder.scaled(11f)
+        rcThreadMicGlyph.scaled(12f)
+        rcThreadFooterHint.scaled(11f)
+        rcThreadVoiceText.scaled(14f)
+        rcThreadVoiceMicGlyph.scaled(12f)
+        rcThreadCancelHint.scaled(10f)
+        rcThreadCountdownSecs.scaled(13f)
+    }
+
     /** Header, spinner and footer. The mic affordance is absent whenever voice is refused. */
     private fun renderRcThreadChrome() {
         val session = rcOpenSession ?: return
@@ -9864,7 +9898,19 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             if (size in 8f..24f) {
                 com.repository.glasses.listener.config.GlassesConfig.chatFontSize = size
             }
-            runOnUiThread { chatAdapter.notifyDataSetChanged() }
+            runOnUiThread {
+                chatAdapter.notifyDataSetChanged()
+                // The RC mirror reads the same setting, so it has to be invalidated on the same
+                // event. The adapters re-apply their sizes on bind; the thread's chrome is not an
+                // adapter, so it is re-applied directly.
+                //
+                // The chat list goes through its content payload rather than a blanket invalidate:
+                // the RC rows carry a caret border animator and live spinners that
+                // notifyDataSetChanged would restart on every step of the wearer's font slider.
+                chatListAdapter.rebindAllContent()
+                rcThreadAdapter.notifyDataSetChanged()
+                applyRcThreadFontSizes()
+            }
         }
     }
 
