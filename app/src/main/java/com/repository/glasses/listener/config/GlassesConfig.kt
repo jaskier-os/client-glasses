@@ -28,6 +28,12 @@ object GlassesConfig {
     private const val KEY_ASSISTANT_INTERLOCUTOR_SOURCE = "assistant_interlocutor_source"
     private const val KEY_ASSISTANT_MODEL = "assistant_model"
 
+    // Speech-recognition language, mirrored from the phone's KEY_STT_LANGUAGE.
+    // Persisted because the glasses must know it with the phone AWAY: without a
+    // cached value it would revert to the default on every restart and Russian
+    // speech would silently go to the remote transcriber forever.
+    private const val KEY_STT_LANGUAGE = "stt_language"
+
     @Volatile var model: String = "sonnet"
     @Volatile var deviceId: String = "glasses-01"
     @Volatile var notificationDurationMs: Long = 5000L
@@ -48,6 +54,13 @@ object GlassesConfig {
     // channel will open WiFi Direct. Defaults OFF; only flipped on by the phone for a
     // deploy session.
     @Volatile var sideloadingEnabled: Boolean = false
+
+    /**
+     * Speech-recognition language pushed by the phone as "sttLanguage". Default
+     * mirrors the phone's own default so a never-paired device behaves the same
+     * on both sides. Only "ru" selects the on-glasses recogniser; see SttRouter.
+     */
+    @Volatile var sttLanguage: String = SttLanguageSetting.DEFAULT
 
     fun applySettings(ctx: Context, json: String) {
         try {
@@ -94,6 +107,10 @@ object GlassesConfig {
             // framework (former CxrApi setVoiceControl / setLongPressFun calls)
             // once the replacement HAL/framework binding is decided. For now we
             // just persist them so the phone-side setting survives a restart.
+            // Parsed OUTSIDE this try in a moment would be wrong: it must see the
+            // same payload. It refuses on absent/blank/unparseable rather than
+            // resetting, so an unrelated settings push cannot disable local STT.
+            sttLanguage = SttLanguageSetting.parse(json, sttLanguage)
             if (obj.has("settings_voice_control")) voiceControl = obj.optString("settings_voice_control", voiceControl)
             if (obj.has("settings_long_press_fun")) longPressFun = obj.optString("settings_long_press_fun", longPressFun)
         } catch (_: Exception) {}
@@ -135,6 +152,7 @@ object GlassesConfig {
         sideloadingEnabled = sp.getBoolean("enable_sideloading", sideloadingEnabled)
         voiceControl = sp.getString("voiceControl", voiceControl) ?: voiceControl
         longPressFun = sp.getString("longPressFun", longPressFun) ?: longPressFun
+        sttLanguage = sp.getString(KEY_STT_LANGUAGE, sttLanguage) ?: sttLanguage
     }
 
     private fun save(ctx: Context) {
@@ -154,6 +172,7 @@ object GlassesConfig {
                 .putBoolean("enable_sideloading", sideloadingEnabled)
                 .putString("voiceControl", voiceControl)
                 .putString("longPressFun", longPressFun)
+                .putString(KEY_STT_LANGUAGE, sttLanguage)
                 .apply()
         } catch (_: Exception) {}
     }
