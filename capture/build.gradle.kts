@@ -14,6 +14,12 @@ android {
         versionCode = 5
         versionName = "1.4"
 
+        // Instrumented tests must be able to run INSIDE the capture process: it is
+        // the only process whose linker namespace can reach the CDSP, so anything
+        // touching the NPU (ORT session smoke tests, model cold-load timing) has to
+        // be an androidTest here rather than in the listener.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -100,4 +106,7 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite-gpu-api:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-gpu-delegate-plugin:0.4.4")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test:rules:1.5.0")
 }

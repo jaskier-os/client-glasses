@@ -34,3 +34,16 @@ target_link_libraries(scrfd_qnn
     ${android-lib}
     ${jnigraphics-lib}
     dl)
+
+# ----- GigaAM RNNT encoder (Hexagon V73 NPU) -----
+# Log-mel front end + the GigaAM v3_e2e_rnnt conformer encoder (w8a16) through the
+# raw QNN C API -- same dlopen-at-runtime pattern as qnn_denoise / scrfd_qnn. Lives
+# in the capture process for the same reason they do: this install can dlopen
+# libcdsprpc.so to reach the CDSP, while the privileged listener cannot. No
+# jnigraphics here -- the input is PCM, not a bitmap.
+add_library(gigaam_enc SHARED gigaam_enc.cpp)
+target_include_directories(gigaam_enc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/qnn-include)
+target_link_libraries(gigaam_enc
+    ${log-lib}
+    ${android-lib}
+    dl)
