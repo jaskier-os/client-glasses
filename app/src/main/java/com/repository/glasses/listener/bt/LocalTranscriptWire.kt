@@ -14,6 +14,13 @@ package com.repository.glasses.listener.bt
  */
 object LocalTranscriptWire {
 
+    /** AI assistant (hold gesture) and the wake-word follow-on utterance. */
+    const val TAG_ASSISTANT = "assistant"
+
+    /** Telegram voice, notification reply and RC voice all share this tag; the
+     *  glasses focusState disambiguates them, exactly as on the remote path. */
+    const val TAG_TG_VOICE = "tg_voice"
+
     /** ["ok"|"fail"] -- did local recognition produce a final at all. */
     const val STATUS_OK = "ok"
     const val STATUS_FAIL = "fail"
