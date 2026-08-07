@@ -103,6 +103,15 @@ class CaptureService : Service() {
      */
     private val stt: GigaAmStt by lazy { GigaAmStt(applicationContext) }
 
+    /**
+     * STT gets its OWN thread, not the shared workerPool: a prepareStt cold load
+     * runs for 21 s, and everything queued behind it on the shared single-thread
+     * pool (photo sha256 + sync notifies) would stall for that whole time.
+     */
+    private val sttPool = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "CaptureSvc-stt")
+    }
+
     private val binder = object : ICapture.Stub() {
         override fun registerCallback(cb: ICaptureCallback) { callbacks.register(cb) }
         override fun unregisterCallback(cb: ICaptureCallback) { callbacks.unregister(cb) }
@@ -354,7 +363,7 @@ class CaptureService : Service() {
             // load runs on the worker. Refused during recording for the same
             // reason as transcribeUtterance.
             if (isRecordingForCapture()) return
-            workerPool.execute {
+            sttPool.execute {
                 try { stt.ensureLoaded() } catch (t: Throwable) {
                     Log.w(TAG, "prepareStt failed: ${t.message}")
                 }
@@ -362,7 +371,7 @@ class CaptureService : Service() {
         }
 
         override fun releaseStt(reason: String?) {
-            workerPool.execute {
+            sttPool.execute {
                 try { stt.release(reason ?: "listener request") } catch (t: Throwable) {
                     Log.w(TAG, "releaseStt failed: ${t.message}")
                 }
@@ -771,6 +780,11 @@ class CaptureService : Service() {
         val tOnCreate = android.os.SystemClock.elapsedRealtime()
         super.onCreate()
 
+        // Enforce the recogniser's residency policy. Without this tick the 203 MB
+        // model stays resident until an explicit releaseStt or process death,
+        // which on a 1.7 GB device is what gets this process lmkd-killed.
+        stt.startIdleReaper(sttPool)
+
         val channel = NotificationChannel(CHANNEL_ID, "Capture", NotificationManager.IMPORTANCE_MIN)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         val notification: Notification = Notification.Builder(this, CHANNEL_ID)
@@ -1076,10 +1090,17 @@ class CaptureService : Service() {
     override fun onDestroy() {
         Log.i(TAG, "onDestroy entry recording=${video.isRecording()}")
         val tDestroy = android.os.SystemClock.elapsedRealtime()
-        // Free the ~203 MB recogniser first: the native engine is freed without
-        // nulling on the C++ side, so releasing it before the rest of teardown
-        // keeps that ordering explicit rather than depending on process death.
-        try { stt.release("service destroy") } catch (t: Throwable) {
+        // Free the ~203 MB recogniser, but NEVER block onDestroy on it: this runs
+        // on the main thread, and a transcribe in flight holds the model lock for
+        // up to 3.4 s (21 s behind a cold load). Blocking there would ANR the
+        // capture process and take the camera down with it. If an utterance is
+        // mid-flight we simply skip -- process death reclaims the memory anyway.
+        try {
+            if (!stt.releaseIfIdle("service destroy")) {
+                Log.i(TAG, "stt busy at destroy; leaving it to process teardown")
+            }
+            sttPool.shutdownNow()
+        } catch (t: Throwable) {
             Log.w(TAG, "stt release on destroy failed: ${t.message}")
         }
         // Wait for video.stop to drain Camera2/MediaCodec FDs synchronously --

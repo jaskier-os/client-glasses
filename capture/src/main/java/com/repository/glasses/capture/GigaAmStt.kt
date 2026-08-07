@@ -8,6 +8,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
+import kotlin.concurrent.withLock
 
 /**
  * Owns the on-glasses Russian recogniser: availability, residency, and the
@@ -68,7 +69,13 @@ class GigaAmStt(private val context: Context) {
             tag != null && tag.lowercase(Locale.ROOT).substringBefore('-') == LANG_RU
     }
 
-    private val lock = Any()
+    /**
+     * Guards load / transcribe / release. A ReentrantLock rather than a
+     * `synchronized` block because callers need tryLock: a 21 s cold load or a
+     * 3.4 s transcribe holds this, and both the Binder threads and the main
+     * thread must be able to decline rather than block on it.
+     */
+    private val lock = java.util.concurrent.locks.ReentrantLock()
 
     /** Set while an utterance is being transcribed, so a release waits for it. */
     @Volatile private var transcribing = false
@@ -94,34 +101,51 @@ class GigaAmStt(private val context: Context) {
     }
 
     /**
-     * Cheap availability check: does NOT load the model.
+     * Identity of the blob whose hash we last verified: size and mtime. Hashing
+     * 231 MB takes seconds, and isAvailable() is called from a synchronous Binder
+     * thread on every session, so the result is cached against this and only
+     * recomputed when the file underneath actually changes.
+     */
+    @Volatile private var verifiedStamp: Pair<Long, Long>? = null
+    @Volatile private var verifiedResult = false
+
+    /**
+     * Availability check. Does NOT load the model, and does not re-hash a blob it
+     * has already verified.
      *
-     * The hash is only computed when the size already matches, so the common
-     * "blob absent" and "blob half-delivered" cases cost a stat, not a 231 MB
-     * read. A mismatch NEVER triggers a regeneration: an on-device prepare takes
-     * minutes here and cannot succeed at all when the SoC is what mismatched.
+     * Order matters and is cheapest-first: absent, then wrong size, then (only if
+     * both pass and the file is not already verified) the 231 MB hash. A mismatch
+     * NEVER triggers a regeneration -- an on-device prepare takes minutes here and
+     * cannot succeed at all when the SoC is what mismatched.
      */
     fun isAvailable(): Boolean {
         val m = manifest ?: return false
         val f = ctxFile() ?: return false
         if (!f.isFile) return false
-        if (f.length() != m.ctxSizeBytes) {
-            Log.w(TAG, "context binary size ${f.length()} != manifest ${m.ctxSizeBytes}")
+        val size = f.length()
+        if (size != m.ctxSizeBytes) {
+            Log.w(TAG, "context binary size $size != manifest ${m.ctxSizeBytes}")
             return false
         }
+        val stamp = size to f.lastModified()
+        verifiedStamp?.let { if (it == stamp) return verifiedResult }
         val sha = try {
             Sha256.ofFile(f)
         } catch (e: Exception) {
             Log.w(TAG, "context binary unreadable: ${e.message}")
             return false
         }
-        return m.matches(
+        val ok = m.matches(
             exists = true,
-            sizeBytes = f.length(),
+            sizeBytes = size,
             sha256 = sha,
             deviceSocId = SOC_ID,
             runtimeQnnVersion = QNN_VERSION,
         )
+        verifiedResult = ok
+        verifiedStamp = stamp
+        if (!ok) Log.w(TAG, "context binary does not match the manifest; local STT off")
+        return ok
     }
 
     /**
@@ -129,7 +153,7 @@ class GigaAmStt(private val context: Context) {
      * Idempotent. Returns false when the model is unavailable or the load failed,
      * in which case the caller routes remotely.
      */
-    fun ensureLoaded(): Boolean = synchronized(lock) {
+    fun ensureLoaded(): Boolean = lock.withLock {
         if (GigaAmNative.isLoaded() && decoder != null) return true
         if (!isAvailable()) return false
         val f = ctxFile() ?: return false
@@ -156,10 +180,34 @@ class GigaAmStt(private val context: Context) {
     }
 
     /**
-     * Release the model. A transcribe already in flight completes first: the
-     * whole method is under the same monitor the transcribe holds.
+     * Release the model. A transcribe already in flight completes first: this
+     * takes the same lock the transcribe holds.
+     *
+     * BLOCKS for as long as that transcribe runs (up to 3.4 s, or 21 s behind a
+     * cold load), so it must never be called from the main thread. Use
+     * [releaseIfIdle] there.
      */
-    fun release(reason: String) = synchronized(lock) { releaseLocked(reason) }
+    fun release(reason: String) = lock.withLock { releaseLocked(reason) }
+
+    /**
+     * Release only if the recogniser is not busy; otherwise do nothing and say so.
+     *
+     * This is the variant safe to call from the main thread (service teardown,
+     * memory pressure). Blocking there on an in-flight 21 s cold load would ANR
+     * the capture process and take the camera down with it -- for a feature that
+     * is optional and whose memory the kernel will reclaim on process death
+     * anyway.
+     *
+     * @return true when the model was released or was already gone.
+     */
+    fun releaseIfIdle(reason: String): Boolean {
+        if (!lock.tryLock()) {
+            Log.i(TAG, "release '$reason' skipped: transcribe in flight")
+            return false
+        }
+        try { releaseLocked(reason) } finally { lock.unlock() }
+        return true
+    }
 
     private fun releaseLocked(reason: String) {
         if (!GigaAmNative.isLoaded() && decoder == null) return
@@ -174,9 +222,39 @@ class GigaAmStt(private val context: Context) {
         GigaAmNative.isLoaded() && !transcribing && lastUseMs != 0L &&
             nowMs - lastUseMs >= IDLE_UNLOAD_MS
 
-    /** Drop the model if it has gone idle. Called from the capture worker tick. */
+    /**
+     * Drop the model if it has gone idle. Driven by [startIdleReaper].
+     *
+     * The idle test is RE-CHECKED under the lock: testing it outside and then
+     * blocking on the lock would let a transcribe start in between, and we would
+     * unload a model that is about to be used -- turning a 1.1 s utterance into a
+     * 21 s cold load.
+     */
     fun unloadIfIdle() {
-        if (isIdlePastUnloadWindow()) release("idle ${IDLE_UNLOAD_MS}ms")
+        if (!isIdlePastUnloadWindow()) return
+        if (!lock.tryLock()) return
+        try {
+            if (isIdlePastUnloadWindow()) releaseLocked("idle ${IDLE_UNLOAD_MS}ms")
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    /**
+     * Start the periodic idle check that actually enforces the residency policy.
+     *
+     * Without this the 203 MB stays resident until an explicit releaseStt or
+     * process death, which on a 1.7 GB device is what gets the capture process
+     * lmkd-killed. The tick is deliberately coarse (a third of the window): it is
+     * a memory-reclaim timer, not a deadline.
+     */
+    fun startIdleReaper(scheduler: java.util.concurrent.ScheduledExecutorService) {
+        val periodMs = IDLE_UNLOAD_MS / 3
+        scheduler.scheduleWithFixedDelay({
+            try { unloadIfIdle() } catch (t: Throwable) {
+                Log.w(TAG, "idle reaper: ${t.message}")
+            }
+        }, periodMs, periodMs, java.util.concurrent.TimeUnit.MILLISECONDS)
     }
 
     /**
@@ -198,10 +276,23 @@ class GigaAmStt(private val context: Context) {
             Log.w(TAG, "utt=$utteranceId payload ${pcm16leMono16k.size}B over limit")
             return null
         }
+        // Availability is checked BEFORE the empty-payload shortcut: a device with
+        // no model must answer "unavailable", not "the model heard nothing".
+        // Answering "" there would be read as a deliberate cancel.
+        if (!isAvailable()) return null
         val windows = UtteranceChunker.windows(pcm16leMono16k.size)
         if (windows.isEmpty()) return ""
 
-        synchronized(lock) {
+        // Busy-reject rather than queue. Each utterance holds the NPU for
+        // 1-3.4 s (21 s on a cold load), and transcribeUtterance runs on a
+        // Binder thread from a finite pool: queueing callers would pin threads
+        // and, worse, deliver a transcript long after the session it belonged to
+        // ended. The contract already allows null for "NPU busy".
+        if (!lock.tryLock()) {
+            Log.i(TAG, "utt=$utteranceId refused: recogniser busy")
+            return null
+        }
+        try {
             if (!ensureLoaded()) return null
             val dec = decoder ?: return null
             transcribing = true
@@ -230,6 +321,8 @@ class GigaAmStt(private val context: Context) {
                 transcribing = false
                 lastUseMs = SystemClock.elapsedRealtime()
             }
+        } finally {
+            lock.unlock()
         }
     }
 
@@ -248,7 +341,15 @@ class GigaAmStt(private val context: Context) {
         val expect = RnntDecoder.ENC_DIM * RnntDecoder.ENC_FRAMES
         if (enc.size < expect + 3) return null
         val encodedLen = enc[expect].toInt()
-        if (encodedLen <= 0) return ""
+        // A non-positive encodedLen is a native ANOMALY, not "the model heard
+        // nothing": the encoder always emits frames for a non-empty window.
+        // Returning "" would bank an empty final, which the phone reads as a
+        // deliberate CANCEL -- silently swallowing what the user said. Failing to
+        // null sends the utterance to the remote transcriber instead.
+        if (encodedLen <= 0) {
+            Log.w(TAG, "encoder returned encodedLen=$encodedLen; treating as failure")
+            return null
+        }
         return dec.decode(enc, encodedLen)
     }
 
