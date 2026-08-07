@@ -81,7 +81,9 @@ class RcThreadModel {
         sessionId = null
         _rows.clear()
         moreAbove = false
-        answeredSeq = -1L
+        // answeredSeq is deliberately NOT reset here. With no rows there is nothing it can match,
+        // and the only way back to a thread is through open(), which resets it. Clearing it here
+        // too would be unreachable code that reads as a second, load-bearing guard.
     }
 
     /** This device just answered the prompt at [seq]; it stops blocking without awaiting a row. */
@@ -153,14 +155,25 @@ class RcThreadModel {
     }
 
     /**
-     * The prompt the session is waiting on, or null when it is not waiting.
+     * The prompt this device can still ANSWER, or null. Drives the option list and the confirm.
      *
      * A prompt blocks only while it is the LAST row: any later row proves the agent moved on, so
-     * the prompt was resolved (on the phone, or by this device). While one is present the
-     * microphone is refused -- a prompt is answered by picking an option, never by dictation.
+     * the prompt was resolved (on the phone, or by this device). It also stops being answerable the
+     * moment this device answers it, which is what [answeredSeq] records.
      */
     fun blockingPrompt(): RcThreadRow? = _rows.lastOrNull()
         ?.takeIf { it.role == ROLE_PROMPT && it.seq != answeredSeq }
+
+    /**
+     * True while a prompt is UNRESOLVED, including one this device has already answered. Drives the
+     * microphone, which stays refused across the whole round trip.
+     *
+     * Deliberately separate from [blockingPrompt]: answering does not unblock the session, only the
+     * agent moving on does. Collapsing the two would re-open the mic the instant a confirm is
+     * written -- letting the wearer dictate into a session the agent has not resumed -- and a prompt
+     * is answered by picking an option, never by dictation.
+     */
+    fun promptAwaitingReply(): Boolean = _rows.lastOrNull()?.role == ROLE_PROMPT
 
     private fun parseRow(obj: JSONObject): RcThreadRow? {
         // A missing "q" and a negative "q" are the same defect -- an unorderable row -- and one

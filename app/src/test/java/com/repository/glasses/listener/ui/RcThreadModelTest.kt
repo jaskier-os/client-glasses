@@ -219,6 +219,44 @@ class RcThreadModelTest {
     }
 
     @Test
+    fun anUnansweredPromptStillOffersItsOptionsThroughItems() {
+        val m = openModel()
+        m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\",\"No\"],\"i\":\"r1\"")))
+        val shown = (m.items().single() as RcThreadItem.Row).row
+        assertEquals("stripping must be scoped to the ANSWERED prompt, not every prompt",
+            listOf("Yes", "No"), shown.options)
+    }
+
+    @Test
+    fun leavingTheThreadForgetsWhatWasAnswered() {
+        val m = openModel()
+        m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\"],\"i\":\"r1\"")))
+        m.markAnswered(1L)
+        m.close()
+        m.open("s-1")
+        m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\"],\"i\":\"r1\"")))
+        assertNotNull("a marker surviving close would mute the next thread's prompt",
+            m.blockingPrompt())
+    }
+
+    /**
+     * Answering does not unblock the session -- only the phone's reply does. The microphone must
+     * stay refused across that round trip, or the wearer dictates into a session the agent has not
+     * resumed.
+     */
+    @Test
+    fun aPromptStillAwaitsAReplyAfterThisDeviceAnswersIt() {
+        val m = openModel()
+        m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\"],\"i\":\"r1\"")))
+        assertTrue(m.promptAwaitingReply())
+        m.markAnswered(1L)
+        assertNull("it is no longer answerable", m.blockingPrompt())
+        assertTrue("but it is still unresolved", m.promptAwaitingReply())
+        m.accept("s-1", frame(row(2, "assistant", "Running it.")))
+        assertFalse("the agent moving on is what resolves it", m.promptAwaitingReply())
+    }
+
+    @Test
     fun markingAnotherRowAnsweredLeavesThePromptBlocking() {
         val m = openModel()
         m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\"],\"i\":\"r1\"")))

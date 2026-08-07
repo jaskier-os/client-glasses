@@ -7090,7 +7090,9 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             wsConnected = btConnected && chatListAdapter.rcWsConnected,
             turning = session.turning,
             ended = session.ended,
-            blockingPrompt = rcThread.blockingPrompt() != null,
+            // Awaiting-reply, not still-answerable: answering does not unblock the session, so the
+            // mic stays refused across the round trip rather than re-opening on the confirm.
+            blockingPrompt = rcThread.promptAwaitingReply(),
             capturing = rcCapture.active,
             sendPending = rcSendWindow.pending,
             sendInFlight = rcSendInFlight,
@@ -7397,7 +7399,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // Repaint so the options disappear the moment the answer is sent: an option still on screen
         // after a confirm reads as a keypress that did nothing.
         renderRcThreadRows()
-        renderRcThreadChrome()
         uiLog("RC: answered prompt ${prompt.requestId} with $option")
     }
 
