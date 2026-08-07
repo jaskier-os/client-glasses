@@ -532,6 +532,16 @@ class RcThreadInstrumentedTest {
         assertEquals("confirming an option emits exactly one CH_RC_ANSWER_REQ",
             listOf("ANSWER|$SESSION|req-1|Yes"),
             drainSent().filter { it.startsWith("ANSWER|") })
+        // The confirm is unacknowledged and the next row is a round trip away. A second tap in that
+        // gap must write NOTHING: the phone would refuse the duplicate, but a frame that should
+        // never have been written is not made correct by being discarded at the far end.
+        assertTrue("a resolved prompt drops its options the instant it is answered",
+            promptOptionTexts().isEmpty())
+        key(KeyEvent.KEYCODE_DPAD_CENTER)
+        SystemClock.sleep(900)
+        shoot("10b_double_tap_sends_nothing")
+        assertEquals("a second confirm before the reply must not emit a second answer",
+            emptyList<String>(), drainSent().filter { it.startsWith("ANSWER|") })
         pushRows(rowsFrame("""{"q":7,"r":"assistant","x":"Deploying."}""", lastSeq = 7))
         SystemClock.sleep(HOLD_MS)
         assertTrue("a resolved prompt drops its options", promptOptionTexts().isEmpty())

@@ -2,6 +2,7 @@ package com.repository.glasses.listener.ui
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -188,6 +189,61 @@ class RcThreadModelTest {
         m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\"],\"i\":\"r1\"")))
         m.accept("s-1", frame(row(2, "assistant", "Running it.")))
         assertNull("a later row proves the prompt was resolved", m.blockingPrompt())
+    }
+
+    /**
+     * A confirm is an unacknowledged one-way frame: nothing comes back to say the phone took it,
+     * and the proof it landed is the NEXT row, which is a whole round trip away. Between the two a
+     * second DPAD_CENTER would emit a second answer for the same prompt. The phone's registry
+     * refuses the duplicate, but a frame that should never have been written is not made correct by
+     * being discarded at the far end.
+     */
+    @Test
+    fun aLocallyAnsweredPromptStopsBlockingImmediately() {
+        val m = openModel()
+        m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\",\"No\"],\"i\":\"r1\"")))
+        assertNotNull(m.blockingPrompt())
+        m.markAnswered(1L)
+        assertNull("a second confirm must find nothing left to answer", m.blockingPrompt())
+    }
+
+    @Test
+    fun anAnsweredPromptKeepsItsTextButLosesItsOptions() {
+        val m = openModel()
+        m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\",\"No\"],\"i\":\"r1\"")))
+        m.markAnswered(1L)
+        val shown = (m.items().single() as RcThreadItem.Row).row
+        assertEquals("the question stays as history", "Allow Bash?", shown.text)
+        assertTrue("an option after a confirm reads as a keypress that did nothing",
+            shown.options.isEmpty())
+    }
+
+    @Test
+    fun markingAnotherRowAnsweredLeavesThePromptBlocking() {
+        val m = openModel()
+        m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\"],\"i\":\"r1\"")))
+        m.markAnswered(99L)
+        assertNotNull("only the prompt actually answered is retired", m.blockingPrompt())
+    }
+
+    @Test
+    fun aNewPromptAfterAnAnsweredOneBlocksAgain() {
+        val m = openModel()
+        m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\"],\"i\":\"r1\"")))
+        m.markAnswered(1L)
+        m.accept("s-1", frame(row(2, "prompt", "Allow Write?", ",\"o\":[\"Yes\"],\"i\":\"r2\"")))
+        assertEquals("a fresh prompt is a fresh question", "Allow Write?", m.blockingPrompt()?.text)
+    }
+
+    @Test
+    fun reopeningTheThreadForgetsWhatWasAnswered() {
+        val m = openModel()
+        m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\"],\"i\":\"r1\"")))
+        m.markAnswered(1L)
+        m.open("s-1")
+        m.accept("s-1", frame(row(1, "prompt", "Allow Bash?", ",\"o\":[\"Yes\"],\"i\":\"r1\"")))
+        assertNotNull("seq is re-minted per open, so a stale answer must not mute a real prompt",
+            m.blockingPrompt())
     }
 
     @Test

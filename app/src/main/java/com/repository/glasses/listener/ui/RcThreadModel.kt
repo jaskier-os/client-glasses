@@ -55,11 +55,25 @@ class RcThreadModel {
     var moreAbove: Boolean = false
         private set
 
+    /**
+     * The seq of a prompt THIS device already answered, or -1 when none.
+     *
+     * A confirm is an unacknowledged one-way frame, and the only proof it landed is the next row --
+     * a whole round trip away. Without this, a second DPAD_CENTER inside that gap writes a second
+     * answer for the same prompt. The phone's registry refuses the duplicate, but a frame that
+     * should never have been written is not made correct by being discarded at the far end.
+     *
+     * Keyed on seq rather than request id because seq is what the renderer keys on, and it is
+     * re-minted per [open], so a stale value cannot mute a genuinely new prompt.
+     */
+    private var answeredSeq: Long = -1L
+
     /** Enters [id]'s thread from scratch. A re-open re-requests the tail, so rows must not persist. */
     fun open(id: String) {
         sessionId = id
         _rows.clear()
         moreAbove = false
+        answeredSeq = -1L
     }
 
     /** Leaves the thread. Later frames for the session are refused rather than buffered. */
@@ -67,6 +81,12 @@ class RcThreadModel {
         sessionId = null
         _rows.clear()
         moreAbove = false
+        answeredSeq = -1L
+    }
+
+    /** This device just answered the prompt at [seq]; it stops blocking without awaiting a row. */
+    fun markAnswered(seq: Long) {
+        answeredSeq = seq
     }
 
     /**
@@ -121,7 +141,14 @@ class RcThreadModel {
     fun items(): List<RcThreadItem> {
         val out = ArrayList<RcThreadItem>(_rows.size + 1)
         if (moreAbove) out.add(RcThreadItem.EarlierOnPhone)
-        _rows.forEach { out.add(RcThreadItem.Row(it)) }
+        _rows.forEach { row ->
+            // An answered prompt keeps its text as history but loses its options: an option still
+            // on screen after a confirm reads as a keypress that did nothing.
+            val shown = if (row.seq == answeredSeq && row.options.isNotEmpty()) {
+                row.copy(options = emptyList())
+            } else row
+            out.add(RcThreadItem.Row(shown))
+        }
         return out
     }
 
@@ -132,7 +159,8 @@ class RcThreadModel {
      * the prompt was resolved (on the phone, or by this device). While one is present the
      * microphone is refused -- a prompt is answered by picking an option, never by dictation.
      */
-    fun blockingPrompt(): RcThreadRow? = _rows.lastOrNull()?.takeIf { it.role == ROLE_PROMPT }
+    fun blockingPrompt(): RcThreadRow? = _rows.lastOrNull()
+        ?.takeIf { it.role == ROLE_PROMPT && it.seq != answeredSeq }
 
     private fun parseRow(obj: JSONObject): RcThreadRow? {
         // A missing "q" and a negative "q" are the same defect -- an unorderable row -- and one

@@ -7384,12 +7384,20 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             dbg("answer on phone")
             return
         }
+        // Retire the prompt BEFORE writing the frame. The confirm is unacknowledged and the only
+        // proof it landed is the next row, a whole round trip away; retiring afterwards leaves a
+        // window in which a second tap emits a second answer for the same prompt.
+        rcThread.markAnswered(prompt.seq)
         sendBroadcast(Intent(ListenerService.ACTION_RC_ANSWER).apply {
             setPackage(packageName)
             putExtra(ListenerService.EXTRA_RC_SESSION_ID, session.id)
             putExtra(ListenerService.EXTRA_RC_REQUEST_ID, prompt.requestId)
             putExtra(ListenerService.EXTRA_RC_TEXT, option)
         })
+        // Repaint so the options disappear the moment the answer is sent: an option still on screen
+        // after a confirm reads as a keypress that did nothing.
+        renderRcThreadRows()
+        renderRcThreadChrome()
         uiLog("RC: answered prompt ${prompt.requestId} with $option")
     }
 
