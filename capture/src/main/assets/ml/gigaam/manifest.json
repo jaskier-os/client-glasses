@@ -1,0 +1,7 @@
+{
+  "modelVersion": "v3_e2e_rnnt",
+  "ctxSha256": "15a4a9ac92ae981e024d891e64aeb83df5936865a513d653a6e0b84b89d96ee5",
+  "ctxSizeBytes": 231710720,
+  "qnnVersion": "2.47",
+  "socId": 579
+}

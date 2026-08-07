@@ -95,6 +95,14 @@ class CaptureService : Service() {
 
     private val callbacks = RemoteCallbackList<ICaptureCallback>()
 
+    /**
+     * The on-glasses Russian recogniser. Lives here rather than in the listener
+     * because only this process's linker namespace reaches the CDSP. Constructed
+     * eagerly but loads NOTHING until prepareStt or the first utterance -- the
+     * model is ~203 MB on a 1.7 GB device.
+     */
+    private val stt: GigaAmStt by lazy { GigaAmStt(applicationContext) }
+
     private val binder = object : ICapture.Stub() {
         override fun registerCallback(cb: ICaptureCallback) { callbacks.register(cb) }
         override fun unregisterCallback(cb: ICaptureCallback) { callbacks.unregister(cb) }
@@ -318,6 +326,46 @@ class CaptureService : Service() {
             } catch (e: Throwable) {
                 Log.w(TAG, "detectFaces failed: ${e.message}")
                 intArrayOf(0)
+            }
+        }
+
+        override fun transcribeUtterance(
+            pcm16leMono16k: ByteArray?, lang: String?, utteranceId: Long,
+        ): String? {
+            // Refused while the camera is recording: video already owns the NPU,
+            // and returning null here routes the utterance remotely rather than
+            // queueing it behind a recording of unknown length.
+            if (isRecordingForCapture()) {
+                Log.i(TAG, "AIDL transcribeUtterance utt=$utteranceId refused: recording")
+                return null
+            }
+            return stt.transcribe(pcm16leMono16k, lang, utteranceId)
+        }
+
+        override fun isSttAvailable(): Boolean = try {
+            stt.isAvailable()
+        } catch (t: Throwable) {
+            Log.w(TAG, "isSttAvailable failed: ${t.message}")
+            false
+        }
+
+        override fun prepareStt() {
+            // oneway, so this returns immediately to the listener; the 21 s cold
+            // load runs on the worker. Refused during recording for the same
+            // reason as transcribeUtterance.
+            if (isRecordingForCapture()) return
+            workerPool.execute {
+                try { stt.ensureLoaded() } catch (t: Throwable) {
+                    Log.w(TAG, "prepareStt failed: ${t.message}")
+                }
+            }
+        }
+
+        override fun releaseStt(reason: String?) {
+            workerPool.execute {
+                try { stt.release(reason ?: "listener request") } catch (t: Throwable) {
+                    Log.w(TAG, "releaseStt failed: ${t.message}")
+                }
             }
         }
 
@@ -1028,6 +1076,12 @@ class CaptureService : Service() {
     override fun onDestroy() {
         Log.i(TAG, "onDestroy entry recording=${video.isRecording()}")
         val tDestroy = android.os.SystemClock.elapsedRealtime()
+        // Free the ~203 MB recogniser first: the native engine is freed without
+        // nulling on the C++ side, so releasing it before the rest of teardown
+        // keeps that ordering explicit rather than depending on process death.
+        try { stt.release("service destroy") } catch (t: Throwable) {
+            Log.w(TAG, "stt release on destroy failed: ${t.message}")
+        }
         // Wait for video.stop to drain Camera2/MediaCodec FDs synchronously --
         // stop() posts to a HandlerThread and returns immediately; without the
         // latch, onDestroy can return before the encoder/camera are released

@@ -106,6 +106,11 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite-gpu-api:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-gpu-delegate-plugin:0.4.4")
     testImplementation("junit:junit:4.13.2")
+    // A real org.json on the unit-test classpath. android.jar ships JSONObject as
+    // a stub whose every method throws, so the model manifest parser -- which
+    // decides whether the on-glasses recogniser runs at all -- would otherwise be
+    // untestable off-device.
+    testImplementation("org.json:json:20231013")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test:runner:1.5.2")
     androidTestImplementation("androidx.test:rules:1.5.0")
