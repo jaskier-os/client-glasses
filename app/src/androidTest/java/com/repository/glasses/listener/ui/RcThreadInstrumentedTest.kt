@@ -192,35 +192,33 @@ class RcThreadInstrumentedTest {
     }
 
     /**
-     * Re-opens the thread if a BACK fell through to it.
+     * The thread must be open for any of the voice steps to mean anything.
      *
-     * BACK is layered: it cancels the send window if one is open, otherwise it leaves the thread.
-     * The send window lives 3 s, and the screenshot + assertions between opening it and pressing
-     * BACK can outlast that, so the same key press means different things depending on timing.
-     * The steps below care about the thread being open, not about which layer ate the key, so this
-     * restores the precondition explicitly instead of letting a later assertion fail for a reason
-     * that has nothing to do with what it claims to test.
+     * BACK is layered: it cancels a capture or a pending send when one is live, and only otherwise
+     * leaves the thread. Every BACK in the voice steps below is pressed while one of those two IS
+     * live, so none of them may reach the thread -- and a BACK that did would be a defect, not a
+     * precondition to quietly repair. Asserting says which of the two happened; re-opening the
+     * thread instead would hide it.
      */
-    private fun ensureThreadOpen() {
-        if (onUi { root().findViewById<View>(R_rcThreadContainer()).visibility } == View.VISIBLE) {
-            return
-        }
-        Log.i(tag, "thread had closed; re-opening before the next step")
-        navigateToChatListTab()
-        // Deliberately NOT openTheRcSession: its seenSeq == -1 assertion is only true of a FIRST
-        // open. Rows are already held by now, so re-opening correctly acknowledges the seq it has
-        // seen, and reusing that assertion here would fail on correct behaviour.
-        val landed = onUi {
-            listAdapter.setFocused(true)
-            listAdapter.selectKey("rc:$SESSION")
-        }
-        assertTrue("the caret must reach rc:$SESSION to re-open the thread", landed)
-        device.waitForIdle()
-        key(KeyEvent.KEYCODE_DPAD_CENTER)
-        SystemClock.sleep(900)
-        drainSent()
-        assertEquals("the thread must re-open",
-            View.VISIBLE, view(R_rcThreadContainer()).visibility)
+    private fun assertThreadOpen(why: String) {
+        assertEquals(why, View.VISIBLE, view(R_rcThreadContainer()).visibility)
+    }
+
+    /**
+     * Refuses to let a send-window assertion be answered by the clock.
+     *
+     * An expired window tears the voice bar and the countdown down on its own, so "GONE" after
+     * 3 s is true whatever the key press under test did. Every assertion about a window must
+     * therefore prove it was still open when it was made -- the exact reading that let the old
+     * step 13b pass while it was SENDING the words it claimed to have dropped.
+     */
+    private fun assertRemainingWindow(armedAtMs: Long, what: String) {
+        val elapsed = SystemClock.uptimeMillis() - armedAtMs
+        assertTrue(
+            "$what ran ${elapsed}ms after the window armed, past its ${RcSendWindow.WINDOW_MS}ms " +
+                "life: the window expired on its own, so this proves nothing about the key press",
+            elapsed < RcSendWindow.WINDOW_MS - 250
+        )
     }
 
     /**
@@ -556,7 +554,7 @@ class RcThreadInstrumentedTest {
         // NUMPAD_3 only starts an RC capture while focus is RC_THREAD_FOCUSED; outside the thread
         // it falls through to the AI-chat long-press. Asserting the voice bar without first
         // pinning that precondition blames the microphone for a focus problem.
-        ensureThreadOpen()
+        assertThreadOpen("nothing above steps 11-15 may leave the thread")
         key(KeyEvent.KEYCODE_NUMPAD_3)
         pushPartial("yes deploy it and watch")
         SystemClock.sleep(HOLD_MS)
@@ -572,49 +570,105 @@ class RcThreadInstrumentedTest {
         assertEquals("whitespace is not a message",
             View.GONE, view(R_rcThreadVoiceBar()).visibility)
 
-        // 13. A real transcript opens the 3 s window with the draining bar and the cancel hint.
-        ensureThreadOpen()
+        // 13. A real transcript opens the 3 s window with the draining bar and the cancel hint,
+        //     and BACK undoes it WITHOUT leaving the thread.
+        assertThreadOpen("step 12 must not have left the thread")
+        drainSent()
         key(KeyEvent.KEYCODE_NUMPAD_3)
         pushFinalTranscript("yes deploy it and watch the logcat")
-        SystemClock.sleep(1000)
-        shoot("13_send_window")
+        SystemClock.sleep(700)
+        // Asserted BEFORE the screenshot: PNG compression costs time the 3 s window is spending,
+        // and the BACK below must land while the send is still pending to mean what it claims.
         assertEquals(View.VISIBLE, view(R_rcThreadCountdownRow()).visibility)
         assertEquals(View.VISIBLE, view(R_rcThreadCountdownFill()).visibility)
+        shoot("13_send_window")
+        key(KeyEvent.KEYCODE_BACK)
+        SystemClock.sleep(500)
+        assertThreadOpen("BACK that undoes a pending send must not also leave the thread")
+        assertEquals("BACK must tear the voice bar down with the window",
+            View.GONE, view(R_rcThreadVoiceBar()).visibility)
 
         // 13b. A transcript belonging to a capture the user ABANDONED must not be adopted by the
         //      next one. This is the path that would otherwise ship cancelled words to the agent.
-        key(KeyEvent.KEYCODE_BACK)          // cancels the window and the capture
-        SystemClock.sleep(600)
-        ensureThreadOpen()
-        key(KeyEvent.KEYCODE_NUMPAD_3)      // a fresh capture
+        //
+        //      The capture must be ABANDONED WHILE RUNNING for this to test anything: RcCapture
+        //      .cancel() early-returns on an inactive capture, so a BACK pressed when no capture
+        //      is live owes no discard at all and the "stale" transcript below would then be
+        //      adopted entirely legitimately. Hence NUMPAD_3 -> BACK with NO transcript between.
+        key(KeyEvent.KEYCODE_NUMPAD_3)
+        SystemClock.sleep(400)
+        assertEquals("13b needs a capture that is actually RUNNING before it can be abandoned",
+            View.VISIBLE, view(R_rcThreadVoiceBar()).visibility)
+        key(KeyEvent.KEYCODE_BACK)          // abandons a LIVE capture -- this is what owes a discard
+        SystemClock.sleep(400)
+        assertThreadOpen("BACK that cancels a live capture must not also leave the thread")
+        assertEquals("the abandoned capture must tear its bar down",
+            View.GONE, view(R_rcThreadVoiceBar()).visibility)
+
+        // The next capture. The phone now delivers the ABANDONED one's transcript into it.
+        key(KeyEvent.KEYCODE_NUMPAD_3)
+        SystemClock.sleep(400)
+        assertEquals("the fresh capture must be running for the adoption to be possible at all",
+            View.VISIBLE, view(R_rcThreadVoiceBar()).visibility)
+        drainSent()
         pushFinalTranscript("this belonged to the cancelled capture")
-        SystemClock.sleep(HOLD_MS)
-        shoot("13b_stale_transcript_dropped")
+        // Deliberately WELL under RcSendWindow.WINDOW_MS (3000). An adopted transcript would have
+        // a countdown VISIBLE right now; waiting longer would let the window expire and pass this
+        // assertion for the opposite reason -- because the words were SENT.
+        SystemClock.sleep(500)
+        // Asserted BEFORE the screenshot, for the same reason step 13 is: a PNG compress costs
+        // over a second, which is a third of the window this assertion must land inside.
         assertEquals("the abandoned utterance must not arm the new capture's window",
             View.GONE, view(R_rcThreadCountdownRow()).visibility)
-        key(KeyEvent.KEYCODE_BACK)
-        SystemClock.sleep(600)
-
-        // 13c. Re-open the window for the cancel assertions below.
-        ensureThreadOpen()
-        key(KeyEvent.KEYCODE_NUMPAD_3)
-        pushFinalTranscript("yes deploy it and watch the logcat")
-        SystemClock.sleep(1000)
-        // The step-14 assertions are only meaningful while the window is actually open. Without
-        // this, an window that failed to re-open reads as "a single tap discarded the dictation".
-        assertEquals("step 13c failed to re-open the send window, so step 14 proves nothing",
+        shoot("13b_stale_transcript_dropped")
+        // A dropped transcript is not consumed: the fresh capture is still listening for its own.
+        assertEquals("dropping the stale transcript must not tear down the running capture",
             View.VISIBLE, view(R_rcThreadVoiceBar()).visibility)
+        // The assertion that actually protects the user: the cancelled words never left the device.
+        // Waited past a full window first, so a late commit could not hide behind the clock.
+        SystemClock.sleep(RcSendWindow.WINDOW_MS + 600)
+        val afterStale = drainSent()
+        assertSpyIsListening()
+        assertTrue("words from an abandoned capture must never reach the wire: $afterStale",
+            afterStale.none { it.startsWith("SEND|") })
+
+        // 13c. The discard must not DEAFEN the running capture: its own transcript still arms the
+        //      window. Same capture as above -- no new hold, the debt is already paid off.
+        pushFinalTranscript("yes deploy it and watch the logcat")
+        val armedAt = SystemClock.uptimeMillis()
+        SystemClock.sleep(400)
+        assertEquals("the capture that survived the discard must still accept its own transcript",
+            View.VISIBLE, view(R_rcThreadVoiceBar()).visibility)
+        assertEquals("and open the send window, so step 14 has something to cancel",
+            View.VISIBLE, view(R_rcThreadCountdownRow()).visibility)
 
         // 14. A DOUBLE tap inside the window cancels it. A single tap must not.
-        key(KeyEvent.KEYCODE_NUMPAD_2)
+        //
+        // Every assertion here must land INSIDE the 3 s window: an expired window tears the voice
+        // bar down by itself, which would make "GONE" true whatever the double tap did. That is
+        // exactly how step 13b used to pass while shipping the words it claimed to drop, so the
+        // margin is asserted rather than assumed.
+        device.pressKeyCode(KeyEvent.KEYCODE_NUMPAD_2)
+        // Longer than DOUBLE_TAP_MAX_MS, so this tap's chain has lapsed and the tap below cannot
+        // pair with it. Without that, "a single tap did nothing" and "the pair was too slow to
+        // count" are the same observation.
+        SystemClock.sleep(RcSendWindow.DOUBLE_TAP_MAX_MS + 150)
+        device.waitForIdle()
+        assertRemainingWindow(armedAt, "the single-tap assertion")
         assertEquals("a single tap must not discard a dictation",
             View.VISIBLE, view(R_rcThreadVoiceBar()).visibility)
+        // A real pair: two presses inside DOUBLE_TAP_MIN_MS..MAX_MS of each other.
         device.pressKeyCode(KeyEvent.KEYCODE_NUMPAD_2)
-        SystemClock.sleep(200)
+        SystemClock.sleep(150)
+        device.pressKeyCode(KeyEvent.KEYCODE_NUMPAD_2)
+        SystemClock.sleep(250)
         device.waitForIdle()
+        assertRemainingWindow(armedAt, "the double-tap cancel assertion")
+        assertEquals("a double tap must cancel the send while the window is still open",
+            View.GONE, view(R_rcThreadVoiceBar()).visibility)
         SystemClock.sleep(HOLD_MS)
         shoot("14_send_cancelled")
-        assertEquals(View.GONE, view(R_rcThreadVoiceBar()).visibility)
+        assertEquals("and it must stay cancelled", View.GONE, view(R_rcThreadVoiceBar()).visibility)
         assertFalse("a cancelled send must never append a row",
             threadRows().any { it.text.contains("logcat") })
         // The load-bearing half: a cancel must stop the frame, not merely hide the bar.
