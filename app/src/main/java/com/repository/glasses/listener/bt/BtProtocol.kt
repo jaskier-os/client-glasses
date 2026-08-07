@@ -271,4 +271,39 @@ object BtProtocol {
     // Emitted from the SAME transitions that attach and detach the AIDL sink, so the two cannot
     // disagree. A sink state that lies is worse than none.
     const val CH_REMOTE_INPUT_SINK = "listener_remote_input_sink"
+
+    // Glasses -> phone: a transcript produced by the ON-GLASSES recogniser.
+    // Args: [sessionTag, status, text]
+    //   sessionTag: "assistant" (AI hold / wake-word follow-on) or "tg_voice"
+    //               (Telegram voice, notification reply and RC voice all share it;
+    //               the glasses focusState disambiguates, exactly as today).
+    //   status:     "ok"   -- local recognition produced a final, `text` is it.
+    //               "fail" -- local STT could not do it (model absent, NPU busy,
+    //                         Binder timeout, capture dead). The phone falls back
+    //                         to batch-transcribing the PCM it buffered.
+    //   text:       the final transcript. EMPTY IS MEANINGFUL: "" with status=ok
+    //               is an explicit empty final, i.e. the wearer cancelled, and the
+    //               phone must emit the empty user text and clear its pending
+    //               notification reply. Encoders must keep "" in its argument
+    //               slot; collapsing it to a missing arg hangs a notification
+    //               reply in SENDING forever. See LocalTranscriptWire.
+    // Finals only -- local mode emits no partials, so no ACTION_PARTIAL_TEXT.
+    // Receivers MUST check args.size >= 3 and wrap the parse in try/catch:
+    // onMessage runs on a Binder thread and an uncaught throw kills the service.
+    const val CH_LOCAL_TRANSCRIPT = "listener_local_transcript"
+
+    // Glasses -> phone, sent BEFORE the session opens: which recogniser will
+    // handle it. Args: [mode, sessionTag], mode = "local" | "remote".
+    // On "local" the phone opens no transcriber WebSocket, does not feed its VAD
+    // and does not arm the no-speech watchdog -- but it KEEPS buffering the PCM,
+    // because that buffer is what the "fail" fallback transcribes.
+    // Anything not exactly "local" means remote: failing the other way would
+    // leave nobody transcribing at all.
+    const val CH_STT_MODE = "listener_stt_mode"
+
+    // Glasses -> phone, on connect and on change: whether local recognition is
+    // possible at all on this device. Args: [available ("1"|"0"), modelVersion].
+    // Independent of any session, so the phone can surface the state rather than
+    // inferring it from a mode announcement that may never come.
+    const val CH_STT_CAPABILITY = "listener_stt_capability"
 }
