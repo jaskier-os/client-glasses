@@ -44,6 +44,13 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
     class Holder(
         val container: ViewGroup,
         val text: TextView,
+        /**
+         * The size this row is drawn at in the approved sketch. Re-applied through
+         * [ChatFontScale] on every bind rather than fixed at creation: a holder outlives a setting
+         * change, and `notifyDataSetChanged` re-binds without re-creating holders, so a size set
+         * at creation would strand every existing row at the old size.
+         */
+        val designSp: Float,
         /** Prompt rows only: the vertical option list the DPAD walks. */
         val options: LinearLayout? = null,
     ) : RecyclerView.ViewHolder(container)
@@ -94,14 +101,17 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
 
         val container: ViewGroup
         var options: LinearLayout? = null
+        // The size each row type is drawn at in the sketch. Recorded, not applied: the actual
+        // setTextSize happens at bind so a live setting change reaches existing holders.
+        val designSp: Float
 
         when (viewType) {
             TYPE_USER -> {
+                designSp = 14f
                 // The wearer's own words, right-aligned in a trace-filled bubble (sketch frame 2).
                 text.apply {
                     tag = TAG_USER_BUBBLE
                     setTextColor(Lum.BRIGHT)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                     setPadding(10.dpToPx(), 7.dpToPx(), 10.dpToPx(), 7.dpToPx())
                     background = GradientDrawable().apply {
                         setColor(Lum.TRACE)
@@ -117,10 +127,10 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
                 }
             }
             TYPE_TOOLS -> {
+                designSp = 12f
                 text.apply {
                     tag = TAG_TOOL_COLLAPSE
                     setTextColor(Lum.DIM)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                     setPadding(2.dpToPx(), 3.dpToPx(), 2.dpToPx(), 3.dpToPx())
                 }
                 container = FrameLayout(ctx).apply {
@@ -129,9 +139,9 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
                 }
             }
             TYPE_PROMPT -> {
+                designSp = 13f
                 text.apply {
                     setTextColor(Lum.GLOW)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 }
                 options = LinearLayout(ctx).apply {
                     orientation = LinearLayout.VERTICAL
@@ -158,11 +168,11 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
                 }
             }
             TYPE_EARLIER -> {
+                designSp = 11f
                 text.apply {
                     tag = TAG_EARLIER
                     setText("... earlier messages on phone")
                     setTextColor(Lum.GHOST)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                     setPadding(2.dpToPx(), 0, 2.dpToPx(), 0)
                 }
                 container = FrameLayout(ctx).apply {
@@ -171,9 +181,9 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
                 }
             }
             else -> {
+                designSp = 14f
                 text.apply {
                     setTextColor(Lum.MID)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                     setPadding(2.dpToPx(), 0, 2.dpToPx(), 0)
                 }
                 container = FrameLayout(ctx).apply {
@@ -187,10 +197,14 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { bottomMargin = 11.dpToPx() }
-        return Holder(container, text, options)
+        return Holder(container, text, designSp, options)
     }
 
     override fun onBindViewHolder(holder: Holder, position: Int) {
+        // Sized here, not at creation: this is the only step `notifyDataSetChanged` re-runs, so
+        // it is the only place a live font-setting change can reach an existing row.
+        holder.text.setTextSize(TypedValue.COMPLEX_UNIT_SP, ChatFontScale.sp(holder.designSp))
+
         val item = items[position]
         if (item is RcThreadItem.EarlierOnPhone) return
         val row = (item as RcThreadItem.Row).row
@@ -230,7 +244,7 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
                 // The caret is a brightness step, not a colour: the waveguide is monochrome.
                 text = if (selected) "> $option" else "  $option"
                 setTextColor(if (selected) Lum.GLOW else Lum.DIM)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, ChatFontScale.sp(13f))
                 setBackgroundColor(if (selected) Lum.TRACE else Lum.VOID)
                 setPadding(4.dpToPx(), 4.dpToPx(), 4.dpToPx(), 4.dpToPx())
             }, LinearLayout.LayoutParams(

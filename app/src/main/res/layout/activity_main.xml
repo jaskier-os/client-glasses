@@ -208,11 +208,8 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:textColor="#00FF00"
-                        android:textSize="14sp"
                         android:fontFamily="monospace"
                         android:background="#000000"
-                        android:maxLines="1"
-                        android:ellipsize="end"
                         android:focusable="false"
                         android:defaultFocusHighlightEnabled="false" />
 
@@ -234,11 +231,8 @@
                             android:layout_weight="1"
                             android:layout_height="wrap_content"
                             android:textColor="#007700"
-                            android:textSize="11sp"
                             android:fontFamily="monospace"
                             android:background="#000000"
-                            android:maxLines="1"
-                            android:ellipsize="start"
                             android:focusable="false"
                             android:defaultFocusHighlightEnabled="false" />
 
@@ -287,7 +281,6 @@
                             android:layout_height="wrap_content"
                             android:text="[mic]"
                             android:textColor="#008800"
-                            android:textSize="12sp"
                             android:fontFamily="monospace"
                             android:background="#000000"
                             android:focusable="false"
@@ -299,13 +292,10 @@
                             android:layout_weight="1"
                             android:layout_height="wrap_content"
                             android:textColor="#007700"
-                            android:textSize="11sp"
                             android:fontFamily="monospace"
                             android:background="#000000"
                             android:paddingStart="7dp"
                             android:paddingEnd="0dp"
-                            android:maxLines="1"
-                            android:ellipsize="end"
                             android:focusable="false"
                             android:defaultFocusHighlightEnabled="false" />
 
@@ -337,11 +327,8 @@
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
                                 android:textColor="#00FF00"
-                                android:textSize="14sp"
                                 android:fontFamily="monospace"
                                 android:background="#000000"
-                                android:maxLines="3"
-                                android:ellipsize="end"
                                 android:focusable="false"
                                 android:defaultFocusHighlightEnabled="false" />
 
@@ -361,11 +348,11 @@
                             android:defaultFocusHighlightEnabled="false">
 
                             <TextView
+                                android:id="@+id/rcThreadVoiceMicGlyph"
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
                                 android:text="[mic]"
                                 android:textColor="#00FF00"
-                                android:textSize="12sp"
                                 android:fontFamily="monospace"
                                 android:background="#000000"
                                 android:paddingEnd="5dp"
@@ -416,7 +403,6 @@
                                 android:layout_height="wrap_content"
                                 android:text="DOUBLE-TAP TO CANCEL"
                                 android:textColor="#008800"
-                                android:textSize="10sp"
                                 android:fontFamily="monospace"
                                 android:letterSpacing="0.18"
                                 android:background="#000000"
@@ -428,7 +414,6 @@
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
                                 android:textColor="#00FF00"
-                                android:textSize="13sp"
                                 android:fontFamily="monospace"
                                 android:background="#000000"
                                 android:focusable="false"

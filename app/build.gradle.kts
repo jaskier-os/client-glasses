@@ -143,6 +143,27 @@ android {
     }
 }
 
+/**
+ * Several JVM tests (`RcFontPropagationTest`, `RcTextWrapTest`) assert on the SOURCE and on
+ * `res/layout/activity_main.xml` rather than on a rendered view, because the failures they guard
+ * are ones of omission -- a view added later that nobody routed through `ChatFontScale`, or one
+ * that quietly got its `maxLines` back.
+ *
+ * Gradle cannot see that: the layout and the .kt files are not inputs of `testDebugUnitTest`, only
+ * the compiled classes are. Editing a layout therefore leaves the task UP-TO-DATE and the suite
+ * reports a stale PASS -- which is exactly how a mutation test comes back green against a broken
+ * tree. Declaring them as explicit inputs makes the task re-run when the thing being asserted on
+ * actually changes.
+ */
+tasks.withType<Test>().configureEach {
+    inputs.dir(layout.projectDirectory.dir("src/main/res/layout"))
+        .withPropertyName("scannedLayouts")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.dir(layout.projectDirectory.dir("src/main/java"))
+        .withPropertyName("scannedSources")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
 dependencies {
     implementation(project(":glasses-tracing"))
 

@@ -65,6 +65,10 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
         private fun Float.dpToPx(): Float =
             this * Resources.getSystem().displayMetrics.density
+
+        /** @param designSp the size as drawn in the approved sketch, before the wearer's setting. */
+        private fun TextView.applyScaledSize(designSp: Float) =
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, ChatFontScale.sp(designSp))
     }
 
     private var conversations: List<ChatSummaryItem> = emptyList()
@@ -188,7 +192,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     private fun createHeaderHolder(parent: ViewGroup, text: String): NewChatViewHolder {
         val label = TextView(parent.context).apply {
             typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setTextColor(Lum.DIM)
             this.text = text
             setBackgroundColor(Lum.VOID)
@@ -241,12 +244,15 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
         val rail = View(ctx).apply { setBackgroundColor(Lum.SOFT); tag = TAG_RAIL }
 
+        // Wraps rather than truncating. A session name is distinguished by its tail far more often
+        // than by its head ("glasses font cap" vs "glasses font wrap"), so an ellipsis costs the
+        // wearer the one part of the string that identifies the row, while a second line costs
+        // only screen the RC section has to spare. Both this and the workDir line below grow the
+        // holder; the rail and the caret border are drawn on containers that are WRAP_CONTENT all
+        // the way up, so they grow with it instead of boxing the first line.
         val titleView = TextView(ctx).apply {
             typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setTextColor(Lum.BRIGHT)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
             setBackgroundColor(Lum.VOID)
         }
 
@@ -285,10 +291,7 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
         val folderView = TextView(ctx).apply {
             typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             setTextColor(Lum.DIM)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.START
             setBackgroundColor(Lum.VOID)
         }
 
@@ -341,7 +344,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     private fun createChatHolder(parent: ViewGroup): ChatItemViewHolder {
         val titleView = TextView(parent.context).apply {
             typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setTextColor(Lum.MID)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
@@ -359,7 +361,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
         val subtitleView = TextView(parent.context).apply {
             typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             setTextColor(Lum.DIM)
             maxLines = 1
             setBackgroundColor(Lum.VOID)
@@ -437,6 +438,23 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     ) {
         val row = rows.getOrNull(position) ?: return
         val isSelected = focused && row.key == selectedKey
+
+        // Text sizes are applied on every bind, never at holder creation. `notifyDataSetChanged`
+        // re-binds without re-creating holders, so this is the only step a live change to the
+        // wearer's font setting can reach -- and it has to reach the RC rows and the conversation
+        // rows alike, or the pinned RC block ends up at a different scale from the list it sits in.
+        when (holder) {
+            is NewChatViewHolder -> holder.label.applyScaledSize(13f)
+            is RcSessionViewHolder -> {
+                holder.titleView.applyScaledSize(13f)
+                holder.folderView.applyScaledSize(11f)
+            }
+            is ChatItemViewHolder -> {
+                holder.titleView.applyScaledSize(13f)
+                holder.subtitleView.applyScaledSize(11f)
+            }
+        }
+
         // Every cast below is a SAFE cast on the ROW, not on the holder. A holder whose type no
         // longer matches its row means a bind raced a list swap; skipping the content update is
         // recoverable, a ClassCastException is not.
@@ -714,6 +732,25 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
             val now = selectedPosition
             if (now >= 0) notifyItemChanged(now, PAYLOAD_SELECTION)
         }
+    }
+
+    /**
+     * Re-bind every row's CONTENT without disturbing its selection state.
+     *
+     * Used when something outside the row data changes how a row must be drawn -- today that is
+     * the wearer's chat font size, which every holder re-applies in [bind]. The rows themselves are
+     * unchanged, so there is nothing for the diff to notice; the rebind has to be asked for
+     * explicitly.
+     *
+     * Deliberately NOT `notifyDataSetChanged`. This adapter's contract (see the class header) is
+     * that set changes are diffed, because a blanket invalidate cancels the caret's border
+     * ValueAnimator and restarts every spinner on screen. Resizing text is a content change like
+     * any other and goes through the same [PAYLOAD_CONTENT] path, so the caret keeps its border and
+     * the RC spinners keep spinning while the wearer drags the font slider.
+     */
+    fun rebindAllContent() {
+        if (rows.isEmpty()) return
+        notifyItemRangeChanged(0, rows.size, PAYLOAD_CONTENT)
     }
 
     private class RowDiff(
