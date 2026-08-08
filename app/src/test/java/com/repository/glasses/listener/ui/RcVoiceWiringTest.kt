@@ -24,6 +24,17 @@ class RcVoiceWiringTest {
         return f.readText()
     }
 
+    /**
+     * Does [src] actually CALL [needle], as opposed to merely mentioning it?
+     *
+     * Commented-out code still satisfies `contains`, so a mutation that comments a call out
+     * survives a `contains` assertion -- which is how the onDestroy test came to pass against a
+     * mutation that re-created the original leak. Comment lines are excluded here.
+     */
+    private fun calls(src: String, needle: String): Boolean = src.lineSequence()
+        .filter { it.contains(needle) }
+        .any { it.trimStart().let { l -> !l.startsWith("//") && !l.startsWith("*") } }
+
     /** The body of a function, bounded so a rename cannot silently widen it. */
     private fun body(src: String, signature: String, maxLen: Int = 4000): String {
         val after = src.substringAfter(signature, "")
@@ -37,8 +48,18 @@ class RcVoiceWiringTest {
         // one after it, and a later chained cut can then land at index 0 and return "".
         val end = listOf("\n    private fun ", "\n    override fun ", "\n    fun ", "\n    val ")
             .mapNotNull { d -> after.indexOf(d).takeIf { it >= 0 } }
-            .minOrNull() ?: after.length
-        val fn = after.substring(0, end)
+            .minOrNull()
+        // FAIL rather than fall back to the file tail. The last function in the file has no
+        // following declaration, so a silent fallback hands back everything after it -- a window
+        // wide enough that `contains(name)` matches something unrelated and the test passes
+        // vacuously. (That is exactly what happened to onDestroy: a mutation commenting out its
+        // rcCancelCapture call, which re-creates the original leak, went undetected.)
+        assertTrue(
+            "no declaration follows '$signature', so its body cannot be bounded; add an explicit " +
+                "end marker rather than letting the window run to the end of the file",
+            end != null
+        )
+        val fn = after.substring(0, end!!)
         assertTrue("body of '$signature' looks wrong (${fn.length} chars)", fn.length in 1..maxLen)
         return fn
     }
@@ -96,12 +117,12 @@ class RcVoiceWiringTest {
         assertTrue(
             "onStop does not end a running dictation; the phone-side voice session would stay " +
                 "open with the UI gone: $fn",
-            fn.contains("rcVoice.busy") && fn.contains("rcCancelCapture(")
+            calls(fn, "rcVoice.busy") && calls(fn, "rcCancelCapture(")
         )
         assertTrue(
             "onStop must not tear down across a configuration change; the Activity is coming " +
                 "straight back: $fn",
-            fn.contains("isChangingConfigurations")
+            calls(fn, "isChangingConfigurations")
         )
     }
 
@@ -111,7 +132,17 @@ class RcVoiceWiringTest {
      */
     @Test
     fun onDestroyCancelsTheDictationAndItsPostedWork() {
-        val fn = body(read("MainActivity.kt"), "override fun onDestroy()", maxLen = 8000)
+        // onDestroy is the LAST function in the file, so it has no following declaration to bound
+        // it. Cut at its own super call instead: without an explicit end the window would run to
+        // the end of the file and every assertion below would pass vacuously.
+        val fn = read("MainActivity.kt")
+            .substringAfter("override fun onDestroy()", "")
+            .substringBefore("super.onDestroy()", "")
+        assertTrue(
+            "could not bound onDestroy(); it has been renamed or its super call removed, and " +
+                "this test would otherwise pass vacuously against the rest of the file",
+            fn.isNotBlank() && fn.length < 8000
+        )
         for (required in listOf(
             "rcCancelCapture(",
             "rcCaptureWatchdog",
@@ -122,7 +153,7 @@ class RcVoiceWiringTest {
             // hideAudioVisualizer unregisters, and it is not in the bulk unregister list.
             "hideAudioVisualizer()",
         )) {
-            assertTrue("onDestroy does not clean up '$required': $fn", fn.contains(required))
+            assertTrue("onDestroy does not clean up '$required': $fn", calls(fn, required))
         }
     }
 
@@ -139,12 +170,12 @@ class RcVoiceWiringTest {
         assertTrue(
             "the watchdog has no owner check; it would tear down a notification reply's live " +
                 "capture: $fn",
-            fn.contains("FocusState.NOTIFICATION_REPLY")
+            calls(fn, "FocusState.NOTIFICATION_REPLY")
         )
         assertTrue(
             "the watchdog must use forgetCaptureWithoutStopping() on the foreign-owner path, " +
                 "not a plain cancel (which broadcasts a stop): $fn",
-            fn.contains("forgetCaptureWithoutStopping()")
+            calls(fn, "forgetCaptureWithoutStopping()")
         )
     }
 
@@ -178,7 +209,7 @@ class RcVoiceWiringTest {
         assertTrue(
             "the hide branch must clear the ownership flag, or the next AI-chat LISTENING would " +
                 "still be torn down by a stale RC claim: $hideBranch",
-            hideBranch.contains("rcOwnsListeningChrome = false")
+            calls(hideBranch, "rcOwnsListeningChrome = false")
         )
     }
 
@@ -204,11 +235,11 @@ class RcVoiceWiringTest {
             assertTrue(
                 "$sig does not take the listening chrome down; the status line, visualizer, " +
                     "hint and mic meter would stay lit with no capture behind them",
-                fn.contains("rcShowListeningChrome(false)")
+                calls(fn, "rcShowListeningChrome(false)")
             )
             assertTrue(
                 "$sig does not hide the voice bar",
-                fn.contains("rcThreadVoiceBar.visibility = View.GONE") ||
+                calls(fn, "rcThreadVoiceBar.visibility = View.GONE") ||
                     // rcOnFinalTranscript hides it only on the blank-transcript branch; the
                     // non-blank branch legitimately keeps the bar up for the send window.
                     sig.contains("rcOnFinalTranscript")
@@ -230,12 +261,12 @@ class RcVoiceWiringTest {
         assertTrue("could not locate the stolen-microphone branch: $fn", branch.isNotBlank())
         assertTrue(
             "the stolen-microphone branch does not take the chrome down: $branch",
-            branch.contains("rcShowListeningChrome(false)")
+            calls(branch, "rcShowListeningChrome(false)")
         )
         assertTrue(
             "the stolen-microphone branch does not re-render, so the footer stays hidden from " +
                 "the previous pass and the wearer gets no affordance at all: $branch",
-            branch.contains("renderRcThreadChrome()")
+            calls(branch, "renderRcThreadChrome()")
         )
     }
 
@@ -251,7 +282,7 @@ class RcVoiceWiringTest {
             "closeRcThread does not clear rcSendInFlight; nothing else can, because the result " +
                 "frame is dropped once rcOpenSession is null, so the voice gate latches Busy " +
                 "forever: $fn",
-            fn.contains("rcSendInFlight = false")
+            calls(fn, "rcSendInFlight = false")
         )
     }
 
@@ -309,7 +340,7 @@ class RcVoiceWiringTest {
             "LISTENING auto-focuses the chat with no exemption for a thread's own dictation; " +
                 "the RC transcript would be discarded and the voice bar would hang until the " +
                 "watchdog fired: $guard",
-            guard.contains("FocusState.RC_THREAD_FOCUSED") && guard.contains("rcVoice.busy")
+            calls(guard, "FocusState.RC_THREAD_FOCUSED") && calls(guard, "rcVoice.busy")
         )
     }
 
@@ -321,11 +352,11 @@ class RcVoiceWiringTest {
         assertTrue(
             "SendCountdownBar has no onDetachedFromWindow; a running ValueAnimator is held by " +
                 "the global AnimationHandler and would tick against a dead hierarchy",
-            bar.contains("override fun onDetachedFromWindow()")
+            calls(bar, "override fun onDetachedFromWindow()")
         )
         val fn = bar.substringAfter("override fun onDetachedFromWindow()", "")
             .substringBefore("\n    }")
-        assertTrue("onDetachedFromWindow does not stop the animator: $fn", fn.contains("stop()"))
+        assertTrue("onDetachedFromWindow does not stop the animator: $fn", calls(fn, "stop()"))
     }
 
     /**
@@ -337,11 +368,11 @@ class RcVoiceWiringTest {
         val fn = body(read("MainActivity.kt"), "private fun rcStartSendCountdown()")
         assertTrue(
             "the send must be posted on the handler, independent of the animation: $fn",
-            fn.contains("mainHandler.postDelayed") && fn.contains("rcCommitSend()")
+            calls(fn, "mainHandler.postDelayed") && calls(fn, "rcCommitSend()")
         )
         assertTrue(
             "the bar must be driven by SendCountdownBar.start(), not a re-implemented animator: $fn",
-            fn.contains("rcSendCountdown?.start(") && !fn.contains("ValueAnimator")
+            calls(fn, "rcSendCountdown?.start(") && !calls(fn, "ValueAnimator")
         )
     }
 }
