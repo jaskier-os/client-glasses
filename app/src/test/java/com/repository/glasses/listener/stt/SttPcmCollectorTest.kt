@@ -53,6 +53,47 @@ class SttPcmCollectorTest {
         override fun reset() { acc.clear(); frames = 0 }
     }
 
+    /** Spin until [cond] holds; the collector hands frames to a worker thread. */
+    private fun waitUntil(timeoutMs: Long = 2000, cond: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!cond() && System.currentTimeMillis() < deadline) Thread.sleep(5)
+    }
+
+    /** Records the length of every slice it is handed. */
+    private class SizeSpy : SttPcmCollector.Segmenter {
+        val sizes = ArrayList<Int>()
+        override fun accept(pcm: ShortArray, offset: Int, length: Int): ShortArray? {
+            sizes += length
+            return null
+        }
+        override fun reset() { sizes.clear() }
+    }
+
+    @Test
+    fun aMicFrameIsSplitIntoSegmenterSizedBlocks() {
+        // MicBus hands over ~1 s at a time (16000 samples). The segmenter counts
+        // its settle, calibration, silence and min-speech windows in BLOCKs, so a
+        // whole second arriving as ONE block collapsed all four counts to zero: it
+        // never calibrated, never endpointed, and no utterance was ever produced.
+        // The real VAD is exercised by SttVadSegmenterTest at its own block size;
+        // what matters here is that the collector never hands it more than a block.
+        val spy = SizeSpy()
+        val c = SttPcmCollector(spy, RecordingSink())
+        try {
+            c.onPcmFrame(ShortArray(16000), 0, 16000, 0L)
+            waitUntil { spy.sizes.sum() == 16000 }
+        } finally {
+            c.stop()
+        }
+        val block = SttVadSegmenter.BLOCK
+        assertTrue(
+            "no slice may exceed the segmenter's block size, got ${spy.sizes.maxOrNull()}",
+            spy.sizes.all { it <= block }
+        )
+        assertEquals("every sample must be delivered exactly once", 16000, spy.sizes.sum())
+        assertTrue("a 1 s frame must span many blocks", spy.sizes.size >= 16000 / block)
+    }
+
     @Test
     fun theRetainedAudioIsACopyNotTheProducersArray() {
         val sink = RecordingSink()

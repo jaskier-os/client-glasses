@@ -130,6 +130,28 @@ class SttPcmCollector(
         worker.interrupt()
     }
 
+    /**
+     * Feed [frame] to the segmenter in [SttVadSegmenter.BLOCK]-sized pieces.
+     *
+     * At most one utterance can close within a single mic frame in practice (a
+     * frame is ~1 s and an utterance needs [SttVadSegmenter.SILENCE_S] of quiet to
+     * end), but if a later block also closed one the earlier result would be lost,
+     * so the first non-null wins and the remainder of the frame is still fed --
+     * dropping it would punch a hole in the next utterance's audio.
+     */
+    private fun acceptInBlocks(frame: ShortArray): ShortArray? {
+        val block = SttVadSegmenter.BLOCK
+        var out: ShortArray? = null
+        var off = 0
+        while (off < frame.size) {
+            val len = minOf(block, frame.size - off)
+            val done = segmenter.accept(frame, off, len)
+            if (done != null && out == null) out = done
+            off += len
+        }
+        return out
+    }
+
     private fun workerLoop() {
         while (running.get()) {
             val frame = try {
@@ -138,7 +160,14 @@ class SttPcmCollector(
                 return
             }
             try {
-                val utterance = segmenter.accept(frame, 0, frame.size)
+                // MicBus delivers ~1 s chunks (16000 samples); the segmenter counts
+                // its settle, calibration, silence and min-speech windows in BLOCKs
+                // of 1024. Handing it a whole second collapsed every one of those
+                // counts to zero, so it never calibrated and never fired -- and the
+                // noise floor, averaged over a full second of gained audio, came out
+                // at 0.13 (threshold 0.39) which speech would never cross. Re-chunk
+                // to the size the segmenter is written for.
+                val utterance = acceptInBlocks(frame)
                 if (utterance != null && running.get()) {
                     utterancesOut++
                     SttTrace.i(
