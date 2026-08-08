@@ -214,6 +214,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     // Doubletap NUMPAD_2 (touchpad-release) in TAB_NAV: turn screen off.
     private var lastNumpad2Ms: Long = 0L
 
+
     // ---- Touchpad ABS_X -> tab pill drag + snap-on-release -----------------
     // The rokid-touchpad-daemon emits BTN_TOUCH + ABS_X (0..100) on its
     // uinput device every 10 ms. In TAB_NAV state we let the user *drag*
@@ -370,7 +371,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private lateinit var rcThreadRecycler: RecyclerView
     private lateinit var rcThreadAdapter: RcThreadAdapter
     private lateinit var rcThreadFooter: LinearLayout
-    private lateinit var rcThreadTapGlyph: ImageView
     private lateinit var rcThreadMicGlyph: ImageView
     private lateinit var rcThreadFooterHint: TextView
     private lateinit var rcThreadVoiceBar: LinearLayout
@@ -383,7 +383,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private lateinit var rcThreadCountdownFill: View
     private lateinit var rcThreadCountdownRow: LinearLayout
     private lateinit var rcThreadCountdownSecs: TextView
-    private lateinit var rcThreadVoiceMicGlyph: TextView
+    private lateinit var rcThreadVoiceMicGlyph: ImageView
     private lateinit var rcThreadCancelHint: TextView
 
     /** Merges CH_RC_MESSAGES_RESP frames. Empty until a session is opened. */
@@ -3785,7 +3785,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             rcThreadSpinnerSlot = findViewById(R.id.rcThreadSpinnerSlot)
             rcThreadRecycler = findViewById(R.id.rcThreadRecycler)
             rcThreadFooter = findViewById(R.id.rcThreadFooter)
-            rcThreadTapGlyph = findViewById(R.id.rcThreadTapGlyph)
             rcThreadMicGlyph = findViewById(R.id.rcThreadMicGlyph)
             rcThreadFooterHint = findViewById(R.id.rcThreadFooterHint)
             rcThreadVoiceBar = findViewById(R.id.rcThreadVoiceBar)
@@ -7129,14 +7128,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         rcThreadFolder.scaled(11f)
         rcThreadFooterHint.scaled(11f)
         rcThreadVoiceText.scaled(14f)
-        rcThreadVoiceMicGlyph.scaled(12f)
         rcThreadCancelHint.scaled(10f)
 
         // The footer glyphs are icons now, so they take a dp box rather than a text size. Scale
         // them off the same setting anyway: left fixed, they shrink into insignificance beside
         // 18sp text on the largest setting.
         val glyphPx = (com.repository.glasses.listener.ui.ChatFontScale.sp(12f) * resources.displayMetrics.density).toInt()
-        for (v in listOf(rcThreadTapGlyph, rcThreadMicGlyph)) {
+        for (v in listOf(rcThreadMicGlyph, rcThreadVoiceMicGlyph)) {
             v.layoutParams = v.layoutParams.apply { width = glyphPx; height = glyphPx }
         }
         rcThreadCountdownSecs.scaled(13f)
@@ -7166,7 +7164,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // Allowed: icons plus the instruction, worded exactly as a Telegram chat words it.
         // Refused: the icons go and the reason takes the same line. Always exactly one message.
         val ready = verdict.allowed
-        rcThreadTapGlyph.visibility = if (ready) View.VISIBLE else View.GONE
         rcThreadMicGlyph.visibility = if (ready) View.VISIBLE else View.GONE
         rcThreadFooterHint.text = verdict.hudText
         rcThreadFooterHint.visibility = View.VISIBLE
@@ -7213,21 +7210,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         })
         rcArmCaptureWatchdog()
         uiLog("RC: capture started for ${session.id}")
-    }
-
-    /**
-     * Stop dictating and wait for the transcript, mirroring [telegramStopVoice].
-     *
-     * The capture stays "active" until text arrives or the watchdog fires: the wearer has finished
-     * speaking but the utterance is still in flight, and treating that as idle would let the next
-     * tap start a second capture on top of the first.
-     */
-    private fun rcStopCapture() {
-        if (!rcCapture.active) return
-        rcShowVoiceMeter(false)
-        sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_STOP).apply { setPackage(packageName) })
-        renderRcThreadChrome()
-        uiLog("RC: capture stopped by tap, waiting for transcript")
     }
 
     /**
@@ -8736,18 +8718,35 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                     // arrived. ENTER/DPAD_CENTER stay for the remote-input path.
                     KeyEvent.KEYCODE_NUMPAD_2,
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                        if (rcCapture.active) {
-                            uiLog("RC: tap -> stop dictation")
-                            rcStopCapture()
-                        } else {
-                            val verdict = rcVoiceVerdict()
-                            if (verdict.allowed) {
-                                uiLog("RC: tap -> start dictation")
-                                rcStartCapture()
-                            } else {
-                                // Never silently swallowed: the wearer believes they dictated.
-                                uiLog("RC: tap refused (${verdict.hudText})")
-                                renderRcThreadChrome()
+                        when {
+                            // The 3 s countdown after a final transcript is the ONLY place a tap
+                            // does anything: a double tap withdraws the sentence, a single one is
+                            // ignored so a brush of the temple cannot discard it. Left alone, it
+                            // sends -- same contract as the notification reply.
+                            rcSendWindow.pending -> {
+                                if (rcSendWindow.tapCancel(SystemClock.uptimeMillis())) {
+                                    uiLog("RC: double-tap in send window -> cancel")
+                                    rcClearSendWindow()
+                                    renderRcThreadChrome()
+                                } else {
+                                    uiLog("RC: single tap in send window ignored")
+                                }
+                            }
+                            // While dictating the wearer simply stops talking: the phone's VAD ends
+                            // the utterance and delivers the final, exactly as for a Telegram voice
+                            // message or an AI prompt. Nothing to do here.
+                            rcCapture.active ->
+                                uiLog("RC: tap while dictating ignored; VAD ends the utterance")
+                            else -> {
+                                val verdict = rcVoiceVerdict()
+                                if (verdict.allowed) {
+                                    uiLog("RC: tap -> start dictation")
+                                    rcStartCapture()
+                                } else {
+                                    // Never silently swallowed: the wearer believes they dictated.
+                                    uiLog("RC: tap refused (${verdict.hudText})")
+                                    renderRcThreadChrome()
+                                }
                             }
                         }
                         return true

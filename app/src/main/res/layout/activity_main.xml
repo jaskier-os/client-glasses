@@ -269,26 +269,11 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:orientation="horizontal"
-                        android:gravity="center_vertical"
+                        android:gravity="center"
                         android:background="#000000"
                         android:paddingTop="8dp"
                         android:focusable="false"
                         android:defaultFocusHighlightEnabled="false">
-
-                        <!--
-                          Tap + mic, in the order the gesture happens: press the pad, then speak.
-                          Two icons say it without a sentence; the hint beside them is only used
-                          when dictation is REFUSED and a reason is owed.
-                        -->
-                        <ImageView
-                            android:id="@+id/rcThreadTapGlyph"
-                            android:layout_width="12dp"
-                            android:layout_height="12dp"
-                            android:src="@drawable/ic_tap"
-                            android:background="#000000"
-                            android:contentDescription="Tap to dictate"
-                            android:focusable="false"
-                            android:defaultFocusHighlightEnabled="false" />
 
                         <ImageView
                             android:id="@+id/rcThreadMicGlyph"
@@ -303,8 +288,7 @@
 
                         <TextView
                             android:id="@+id/rcThreadFooterHint"
-                            android:layout_width="0dp"
-                            android:layout_weight="1"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:textColor="#007700"
                             android:fontFamily="monospace"
@@ -362,13 +346,12 @@
                             android:focusable="false"
                             android:defaultFocusHighlightEnabled="false">
 
-                            <TextView
+                            <ImageView
                                 android:id="@+id/rcThreadVoiceMicGlyph"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="[mic]"
-                                android:textColor="#00FF00"
-                                android:fontFamily="monospace"
+                                android:layout_width="12dp"
+                                android:layout_height="12dp"
+                                android:src="@drawable/ic_mic"
+                                android:contentDescription="recording"
                                 android:background="#000000"
                                 android:paddingEnd="5dp"
                                 android:paddingStart="0dp"
