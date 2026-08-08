@@ -397,10 +397,13 @@ class RcVoiceWiringTest {
     @Test
     fun theChatCountdownAnimatesThePhonesWindowNotTheRcOne() {
         val main = read("MainActivity.kt")
+        // The bar is driven off the phone's window, either as the full duration or as the
+        // remainder of it -- never the RC window and never the bar's own default.
+        val sync = body(main, "private fun syncChatCountdownBar()")
         assertTrue(
-            "the chat bar must be started with CHAT_WINDOW_MS (the phone's confirm window), not " +
-                "the RC window or the bar's own default",
-            calls(main, "chatSendCountdown?.start(DictationUx.CHAT_WINDOW_MS)")
+            "the chat bar must be timed from CHAT_WINDOW_MS (the phone's confirm window), not " +
+                "the RC window or the bar's own default: $sync",
+            calls(sync, "DictationUx.CHAT_WINDOW_MS") && !calls(sync, "DictationUx.WINDOW_MS")
         )
         val ux = read("ui/DictationUx.kt")
         assertTrue("DictationUx has no CHAT_WINDOW_MS", calls(ux, "CHAT_WINDOW_MS"))
@@ -587,15 +590,18 @@ class RcVoiceWiringTest {
         )
         // ...and the bar must FOLLOW the wearer, not be stranded on the tab that was up when the
         // window opened.
-        // Bounded to the head of switchToTab, right after currentTabId is assigned: the function
-        // is 13k characters and searching all of it would prove nothing about ordering.
-        val switch = main.substringAfter("private fun switchToTab(index: Int", "")
-            .substringBefore("// Unfocus telegram chat list when switching tabs", "")
-        assertTrue("could not bound switchToTab", switch.isNotBlank() && switch.length < 2500)
+        // The sync must run AFTER the containers settle. Bounded to the window between the
+        // rcThreadContainer assignment and the next unrelated container, so an earlier call --
+        // which reads a stale visibility -- does not satisfy it.
+        val settle = main.substringAfter(
+            "rcThreadContainer.visibility = if (rcThreadOpen) View.VISIBLE else View.GONE", ""
+        ).substringBefore("reidContainer.visibility", "")
+        assertTrue("could not locate the tab visibility block", settle.isNotBlank())
         assertTrue(
-            "switching tabs does not re-evaluate the bar, so it stays drawn over the new tab " +
-                "for the rest of the window: $switch",
-            calls(switch, "syncChatCountdownBar()")
+            "the bar is not re-evaluated after the tab's containers settle; syncing before them " +
+                "reads a stale rcThreadContainer visibility, and on the paths where closeRcThread " +
+                "is skipped nothing syncs again -- an armed window then draws no bar at all: $settle",
+            calls(settle, "syncChatCountdownBar()")
         )
     }
 
@@ -617,8 +623,11 @@ class RcVoiceWiringTest {
                 "the chat's pending state is read off the countdown ANIMATION ('${line.trim()}'); " +
                     "with animator duration scale off it ends immediately and a double tap would " +
                     "leave the chat instead of withdrawing the message",
-                // The only legitimate read is the bar's own idempotence check inside the sync.
-                line.contains("!= View.VISIBLE")
+                // The only legitimate reads are the sync's own idempotence checks -- "is the
+                // bar already up, so do not restart it" -- which decide RENDERING, not whether a
+                // tap withdraws. Anything feeding the key handler must use chatSendPending.
+                line.contains("!= View.VISIBLE") ||
+                    line.contains("== View.VISIBLE) return")
             )
         }
         assertTrue(
@@ -631,6 +640,36 @@ class RcVoiceWiringTest {
             "the pending flag is armed with nothing to clear it; a dropped follow-up broadcast " +
                 "would latch tap-to-dictate off forever: $arm",
             calls(arm, "postDelayed") && calls(arm, "CHAT_WINDOW_MS")
+        )
+    }
+
+    /**
+     * A bar shown part-way through the window must animate what is LEFT.
+     *
+     * The window can arm while the wearer is on another tab; coming back to the chat then starts
+     * the bar late. start() always animates a fresh full duration, so without a remainder the bar
+     * would show a full track for time that had already gone and keep draining past the moment the
+     * phone actually sent -- with "DOUBLE-TAP TO CANCEL" up while a tap no longer withdraws.
+     */
+    @Test
+    fun aBarShownMidWindowAnimatesTheRemainder() {
+        val fn = body(read("MainActivity.kt"), "private fun syncChatCountdownBar()")
+        assertTrue(
+            "the window's arming time is not recorded, so a bar shown late cannot know the " +
+                "remainder: $fn",
+            calls(fn, "chatSendArmedAtMs")
+        )
+        assertTrue(
+            "the bar is started with the full window rather than the remainder: $fn",
+            calls(fn, "chatSendCountdown?.start(remaining)")
+        )
+        assertTrue(
+            "an already-elapsed window must not draw a bar at all: $fn",
+            calls(fn, "if (remaining <= 0L) return")
+        )
+        assertTrue(
+            "a sync while the bar is already up must not restart it from full: $fn",
+            calls(fn, "if (chatSendCountdown?.visibility == View.VISIBLE) return")
         )
     }
 

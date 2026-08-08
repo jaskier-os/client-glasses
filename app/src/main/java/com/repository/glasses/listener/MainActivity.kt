@@ -557,6 +557,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      */
     private var chatSendPending = false
     private var chatSendPendingRunnable: Runnable? = null
+
+    /**
+     * When the chat's pre-send window opened, so a bar shown LATER (the wearer was on another tab
+     * when it armed, and has just come back) can animate the REMAINDER rather than a fresh full
+     * duration -- which would show a full track after the message had already gone.
+     */
+    private var chatSendArmedAtMs = 0L
     private lateinit var disconnectedOverlay: TextView
     // NotificationOverlay moved to ListenerService (WindowManager-based, activity-independent)
     private lateinit var timeText: TextView
@@ -5490,10 +5497,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         uiLog("NAV: switchToTab idx=$safeIndex tabId=$newTabId prev=$prevTab($prevTabId) tabs=${activeTabs.size} animate=$animate focus=$focusState")
         currentTabId = newTabId
         updateChatKeepScreenOnFlag()
-        // The chat's countdown bar follows the wearer: shown on the chat, hidden everywhere else.
-        // It is a contentFrame overlay every tab shares, so left alone it stays drawn across the
-        // bottom of whatever tab they switched to.
-        syncChatCountdownBar()
         if (newTabId == TabId.MAP || prevTabId == TabId.MAP) {
             sendBroadcast(Intent(ListenerService.ACTION_MAP_TAB_VISIBLE).apply {
                 setPackage(packageName)
@@ -5640,6 +5643,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             rcThreadContainer.visibility = if (rcThreadOpen) View.VISIBLE else View.GONE
             if (!rcThreadOpen) rcThreadSpinner?.stop()
         }
+        // AFTER the containers settle. Syncing earlier reads a stale rcThreadContainer visibility,
+        // and on the paths where closeRcThread is skipped (focus was preempted out of the thread
+        // by a notification reply or an incoming call, so the guard above does not fire) nothing
+        // would sync again -- leaving an armed window with no bar for the rest of its life.
+        syncChatCountdownBar()
         reidContainer.visibility = if (showReid) View.VISIBLE else View.GONE
         copilotContainer.visibility = if (showCopilot) View.VISIBLE else View.GONE
         if (showCopilot) {
@@ -7899,6 +7907,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      */
     private fun armChatSendWindow() {
         chatSendPending = true
+        chatSendArmedAtMs = SystemClock.elapsedRealtime()
         chatSendPendingRunnable?.let { mainHandler.removeCallbacks(it) }
         // The window is the PHONE's and it closes on its own; this only stops the glasses
         // believing a withdrawal is still possible after the message has gone.
@@ -7910,6 +7919,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
 
     private fun clearChatSendWindow() {
         chatSendPending = false
+        chatSendArmedAtMs = 0L
         chatSendPendingRunnable?.let { mainHandler.removeCallbacks(it) }
         chatSendPendingRunnable = null
         chatSendCountdown?.stop()
@@ -7928,16 +7938,24 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      */
     private fun syncChatCountdownBar() {
         val onChat = currentTabId == TabId.CHAT &&
-            rcThreadContainer.visibility != View.VISIBLE
-        if (chatSendPending && onChat) {
-            if (chatSendCountdown?.visibility != View.VISIBLE) {
-                // The PHONE's window, not ours: it owns the chat's confirm timer and we only draw
-                // over it. Our own 3 s would leave the bar a third full after the message had gone.
-                chatSendCountdown?.start(DictationUx.CHAT_WINDOW_MS)
-            }
-        } else {
+            (!::rcThreadContainer.isInitialized || rcThreadContainer.visibility != View.VISIBLE)
+        if (!chatSendPending || !onChat) {
             chatSendCountdown?.stop()
+            return
         }
+        // Already drawing this window; do NOT restart it. start() always animates a fresh full
+        // duration, so a sync mid-window would refill the track.
+        if (chatSendCountdown?.visibility == View.VISIBLE) return
+        // The REMAINDER, not the full window. The wearer may have been on another tab when this
+        // armed; showing a full track now would claim time that has already gone -- the exact
+        // thing CHAT_WINDOW_MS exists to prevent, and the bar would then keep draining past the
+        // moment the phone actually sent, with its "double-tap to cancel" a lie.
+        //
+        // The PHONE owns this window; we only draw over it.
+        val elapsed = SystemClock.elapsedRealtime() - chatSendArmedAtMs
+        val remaining = DictationUx.CHAT_WINDOW_MS - elapsed
+        if (remaining <= 0L) return
+        chatSendCountdown?.start(remaining)
     }
 
     private fun showDoubleTapHintPersistent() {
