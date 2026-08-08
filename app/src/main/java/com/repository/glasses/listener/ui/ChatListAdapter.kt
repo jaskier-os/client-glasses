@@ -36,7 +36,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     companion object {
         private const val VIEW_TYPE_NEW_CHAT = 0
         private const val VIEW_TYPE_CHAT = 1
-        private const val VIEW_TYPE_ASSISTANT = 2
         private const val VIEW_TYPE_RC_GROUP = 3
         private const val VIEW_TYPE_RC_SESSION = 4
 
@@ -173,7 +172,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     /** Derived from the row TYPE. No positional arithmetic anywhere in this adapter. */
     override fun getItemViewType(position: Int): Int = when (rows[position]) {
         is ChatRow.NewChat -> VIEW_TYPE_NEW_CHAT
-        is ChatRow.Assistant -> VIEW_TYPE_ASSISTANT
         is ChatRow.RcGroup -> VIEW_TYPE_RC_GROUP
         is ChatRow.RcSession -> VIEW_TYPE_RC_SESSION
         is ChatRow.Conversation -> VIEW_TYPE_CHAT
@@ -182,7 +180,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return when (viewType) {
             VIEW_TYPE_NEW_CHAT -> createHeaderHolder(parent, "+ New chat")
-            VIEW_TYPE_ASSISTANT -> createHeaderHolder(parent, "* Assistant")
             VIEW_TYPE_RC_GROUP -> createRcGroupHolder(parent)
             VIEW_TYPE_RC_SESSION -> createRcSessionHolder(parent)
             else -> createChatHolder(parent)
@@ -815,7 +812,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     fun isNewChatSelected(): Boolean = selection.isNewChatSelected()
 
-    fun isAssistantSelected(): Boolean = selection.isAssistantSelected()
 
     fun getSelectedItem(): ChatSummaryItem? = selection.selectedConversation()
 

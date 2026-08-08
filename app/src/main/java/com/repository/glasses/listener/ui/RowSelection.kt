@@ -107,7 +107,6 @@ class RowSelection {
 
     fun isNewChatSelected(): Boolean = selectedRow() is ChatRow.NewChat
 
-    fun isAssistantSelected(): Boolean = selectedRow() is ChatRow.Assistant
 
     fun selectedConversation(): ChatSummaryItem? =
         (selectedRow() as? ChatRow.Conversation)?.summary

@@ -30,7 +30,6 @@ class RowSelectionTest {
         assertNull(s.key)
         assertEquals(-1, s.index)
         assertNull(s.selectedRow())
-        assertFalse(s.isAssistantSelected())
     }
 
     @Test
@@ -45,20 +44,10 @@ class RowSelectionTest {
     }
 
     @Test
-    fun theCaretOnTheAssistantRowIsNeverReAimedByAnAsyncInsert() {
+    fun theCaretOnAHeaderRowIsNeverReAimedByAnAsyncInsert() {
         val s = sel(rows(conv = listOf(conv("c1"))))
-        s.select(ChatRow.Assistant.key)
+        s.select(ChatRow.NewChat.key)
         repeat(6) { i -> s.onRowsReplaced(rows((0..i).map { rc("s$it") }, listOf(conv("c1")))) }
-        assertEquals(ChatRow.Assistant.key, s.key)
-        assertTrue(s.isAssistantSelected())
-    }
-
-    @Test
-    fun aVanishedCaretNeverLandsOnTheAssistantRow() {
-        val s = sel(rows(listOf(rc("a"))))
-        s.select("rc:a")
-        s.onRowsReplaced(rows())
-        assertFalse("a snapshot removal may not arm the microphone", s.isAssistantSelected())
         assertEquals(ChatRow.NewChat.key, s.key)
     }
 
@@ -88,11 +77,11 @@ class RowSelectionTest {
         s.selectIndex(groupIdx)
         assertNull("the group marker is not selectable", s.key)
         // It is also skipped over by navigation in both directions.
-        s.select(ChatRow.Assistant.key)
+        s.select(ChatRow.NewChat.key)
         s.moveDown()
         assertEquals("rc:a", s.key)
         s.moveUp()
-        assertEquals(ChatRow.Assistant.key, s.key)
+        assertEquals(ChatRow.NewChat.key, s.key)
     }
 
     @Test
@@ -150,7 +139,7 @@ class RowSelectionTest {
     /**
      * A refusal has to be REPORTED, not merely obeyed. A caller that asks for a caret, is silently
      * refused, and goes on believing one exists will act on whatever row the index later lands on
-     * -- and on this list that can be the Assistant row, which starts the microphone.
+     * -- so it must land somewhere the user can act on deliberately.
      */
     @Test
     fun everyRefusalSaysSoRatherThanReportingSuccess() {

@@ -48,10 +48,6 @@ sealed class ChatRow {
         override val key: String = "hdr:new"
     }
 
-    object Assistant : ChatRow() {
-        override val key: String = "hdr:assistant"
-    }
-
     /** Marks the start of the pinned RC section. A desktop glyph, no text label, no rule. */
     object RcGroup : ChatRow() {
         override val key: String = "hdr:rc"
@@ -82,11 +78,12 @@ sealed class ChatRow {
     /**
      * True for rows the caret may be moved onto WITHOUT the user aiming at them.
      *
-     * The Assistant row starts the microphone. A row vanishing from a snapshot is not consent to
-     * arm it, so it is excluded from every fallback path; the user can still reach it by scrolling.
+     * Kept as its own concept even though every selectable row now qualifies: it existed because
+     * the Assistant row armed the microphone, and any future row with a side effect must be
+     * excluded here rather than discovering the hazard again.
      */
     val fallbackSafe: Boolean
-        get() = selectable && this !is Assistant
+        get() = selectable
 }
 
 /**
@@ -104,7 +101,6 @@ object ChatRowBuilder {
     fun build(rc: RcState, conversations: List<ChatSummaryItem>): List<ChatRow> {
         val rows = ArrayList<ChatRow>(conversations.size + rc.sessions.size + 3)
         rows.add(ChatRow.NewChat)
-        rows.add(ChatRow.Assistant)
 
         // sortedByDescending is stable in Kotlin, so sessions the phone listed earlier (i.e. more
         // recently active) keep their relative order within each group.

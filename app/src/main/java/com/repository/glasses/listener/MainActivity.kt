@@ -7449,13 +7449,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         updateFocusVisual(focusState)
     }
 
-    private fun openAssistant() {
-        // Ask the backend (ListenerService) to start/stop the assistant pipeline.
-        // The service tracks active state and toggles accordingly.
-        sendBroadcast(Intent(ListenerService.ACTION_TOGGLE_ASSISTANT).apply { setPackage(packageName) })
-        activityLog("Assistant toggle requested from chat list")
-    }
-
     private fun parseChatListAndDisplay(json: String) {
         hideLoadingSpinner()
         try {
@@ -8878,22 +8871,9 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                             // long after dispatchRemoteKey's finally has restored
                             // currentInputOrigin, so reading it inside the runnable would
                             // always say TOUCHPAD and the guard below would never fire.
-                            val tapOrigin = currentInputOrigin
                             val runnable = Runnable {
                                 if (chatListAdapter.isNewChatSelected()) {
                                     openNewChat()
-                                } else if (chatListAdapter.isAssistantSelected()) {
-                                    // The one dangerous row in this state: it toggles the
-                                    // assistant, which starts the microphone. Checked HERE
-                                    // rather than in the gate, because the selection can
-                                    // move during the 400 ms this waits -- a scroll later
-                                    // in the same burst would otherwise re-aim a tap that
-                                    // was judged safe onto this row.
-                                    if (tapOrigin == InputOrigin.REMOTE) {
-                                        uiLog("[RemoteInput] refused SELECT on the Assistant row (starts the mic)")
-                                    } else {
-                                        openAssistant()
-                                    }
                                 } else if (chatListAdapter.selectedRow() is ChatRow.RcSession) {
                                     openSelectedRcSession()
                                 } else {

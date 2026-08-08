@@ -10,7 +10,7 @@ import org.junit.Test
  * The chat list is a mixed list: two fixed header rows, an optional pinned RC section, then the
  * conversations. Every property asserted here exists to make ONE failure impossible -- an RC
  * session appearing asynchronously must never re-aim the caret onto a different row, because the
- * Assistant row starts the microphone.
+ * NewChat header sits above the pinned RC block.
  */
 class ChatRowModelTest {
 
@@ -47,7 +47,6 @@ class ChatRowModelTest {
         assertTrue("RC row must precede conversations", rcIdx < convIdx)
         // The two existing header rows keep position 0 and 1 -- they are untouched.
         assertEquals(ChatRow.NewChat, rows[0])
-        assertEquals(ChatRow.Assistant, rows[1])
     }
 
     @Test
@@ -107,26 +106,14 @@ class ChatRowModelTest {
     }
 
     @Test
-    fun selectionOnTheAssistantRowSurvivesAnRcInsertAbove() {
-        // The Assistant row starts the mic. An RC insert must not shift what "selected" means, and
+    fun selectionOnAHeaderRowSurvivesAnRcInsertAbove() {
+        // An RC insert must not shift what "selected" means, and
         // the anchor deliberately does NOT coincide with the answer: only the key lookup can pass.
         val after = build(listOf(rc("x"), rc("y")), listOf(conv("c1")))
         assertEquals(
-            ChatRow.Assistant,
-            after[ChatRowBuilder.resolveSelection(after, ChatRow.Assistant.key, previousIndex = 4)],
+            ChatRow.NewChat,
+            after[ChatRowBuilder.resolveSelection(after, ChatRow.NewChat.key, previousIndex = 4)],
         )
-    }
-
-    @Test
-    fun aVanishedSelectionNeverFallsBackOntoTheAssistantRow() {
-        // The caret sat on the only RC row; the next snapshot drops it. The anchor clamp would
-        // otherwise land on index 1, which is Assistant, and the very next tap starts the mic.
-        val before = build(listOf(rc("a")))
-        val anchor = before.indexOfFirst { it.key == "rc:a" }
-        val after = build()
-        val landed = after[ChatRowBuilder.resolveSelection(after, "rc:a", anchor)]
-        assertNotEquals("a fallback may never arm the microphone", ChatRow.Assistant, landed)
-        assertEquals(ChatRow.NewChat, landed)
     }
 
     @Test
@@ -146,7 +133,10 @@ class ChatRowModelTest {
         assertEquals(0, ChatRowBuilder.resolveSelection(rows, "conv:gone"))
         // Previous index known -> clamp into range, never past the end.
         assertEquals(rows.lastIndex, ChatRowBuilder.resolveSelection(rows, "conv:gone", 99))
-        assertEquals(2, ChatRowBuilder.resolveSelection(rows, "conv:gone", 2))
+        // Index-derived, not hardcoded: the header block above the conversations has
+        // changed size before (the Assistant row was removed) and a literal here silently
+        // asserted the wrong row afterwards.
+        assertEquals(rows.lastIndex, ChatRowBuilder.resolveSelection(rows, "conv:gone", rows.lastIndex))
         assertEquals(0, ChatRowBuilder.resolveSelection(rows, null, -1))
     }
 
