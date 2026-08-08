@@ -219,8 +219,10 @@ class RcCapture {
 /**
  * The 3 s undo between "the transcript arrived" and "the agent receives it".
  *
- * Deliberately a plain field on the activity rather than a FocusState: it changes nothing about
- * input routing, and one more state would mean one more BACK arm to keep in step.
+ * Deliberately NOT a FocusState: it changes nothing about input routing, and one more state would
+ * mean one more BACK arm to keep in step. It is owned by [RcVoiceLifecycle], alongside the capture
+ * identity and the phone-side voice session, so that every exit from a dictation tears down all
+ * three together -- the send path once tore down only two, which is the defect this all came from.
  *
  * The window exists because a misrecognised dictation goes straight into a coding agent that will
  * act on it. Three seconds and a double tap is the whole cost of not shipping that.

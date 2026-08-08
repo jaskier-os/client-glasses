@@ -1452,8 +1452,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         // The chrome deliberately STAYS UP. This final belonged to an abandoned
                         // capture, not to the one the wearer is speaking into right now, whose own
                         // final is still to come. Tearing down here would deafen a live dictation.
-                        // If no final ever arrives, the watchdog ends it -- and the watchdog owes
-                        // no discard, so it cannot start a debt that eats the next one.
+                        // If no final ever arrives, the watchdog ends it. That cancel owes a
+                        // discard like every other -- a timeout means none has come YET, not that
+                        // none is coming -- but the debt EXPIRES, so it cannot accumulate into the
+                        // loop that once deafened the thread permanently.
                         uiLog("RC: dropped a transcript from an abandoned capture " +
                             "('${text.take(20)}'); the running capture keeps listening")
                     }
