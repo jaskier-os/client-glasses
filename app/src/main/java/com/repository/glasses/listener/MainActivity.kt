@@ -8375,7 +8375,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         }
         // NUMPAD_2 doubletap in TAB_NAV -> turn screen off. Any other non-
         // NUMPAD_2 key breaks the chain (scroll via NUMPAD_0/1 included).
-        if (keyCode == KeyEvent.KEYCODE_NUMPAD_2) {
+        // The RC thread is excluded because this branch consumes EVERY NUMPAD_2 and returns: with
+        // a thread open the tap died here and the focus dispatch below never ran, which is why
+        // dictation could not be started or stopped from inside a remote session.
+        if (keyCode == KeyEvent.KEYCODE_NUMPAD_2 && focusState != FocusState.RC_THREAD_FOCUSED) {
             val now = SystemClock.uptimeMillis()
             val dt = now - lastNumpad2Ms
             if (focusState == FocusState.TAB_NAV &&
@@ -8727,6 +8730,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 // deliberately identical -- one gesture to learn for "say something into this
                 // conversation", whichever conversation it is.
                 when (keyCode) {
+                    // NUMPAD_2 is what a touchpad TAP actually delivers here. Only NUMPAD_0/1 are
+                    // remapped to DPAD above, so listening for DPAD_CENTER alone -- as the Telegram
+                    // chat can, being on a tab where the pad emits it -- meant the tap never
+                    // arrived. ENTER/DPAD_CENTER stay for the remote-input path.
+                    KeyEvent.KEYCODE_NUMPAD_2,
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                         if (rcCapture.active) {
                             uiLog("RC: tap -> stop dictation")
