@@ -148,7 +148,7 @@ class RcVoiceWiringTest {
             "rcCaptureWatchdog",
             "rcSendRunnable",
             "rcSendCountdown?.stop()",
-            "chatSendCountdown?.stop()",
+            "clearChatSendWindow()",
             // showAudioVisualizer registers an ACTION_AUDIO_LEVELS receiver that only
             // hideAudioVisualizer unregisters, and it is not in the bulk unregister list.
             "hideAudioVisualizer()",
@@ -381,7 +381,7 @@ class RcVoiceWiringTest {
         assertTrue(
             "the chat draws a countdown that says DOUBLE-TAP TO CANCEL but wires no withdrawal " +
                 "to a touchpad tap: $chat",
-            calls(chat, "chatSendCountdown") && calls(chat, "ACTION_CANCEL_SESSION")
+            calls(chat, "chatSendPending") && calls(chat, "ACTION_CANCEL_SESSION")
         )
         assertTrue(
             "a touchpad tap (NUMPAD_2) must reach the chat's tap handler, not only DPAD/ENTER",
@@ -573,25 +573,64 @@ class RcVoiceWiringTest {
     @Test
     fun theChatCountdownOnlyDrawsWhenTheChatIsOnScreen() {
         val main = read("MainActivity.kt")
-        val line = main.lineSequence()
-            .filter { it.contains("chatSendCountdown?.start(") }
-            .toList()
-        assertTrue("the chat countdown is never started", line.isNotEmpty())
-        val guard = main.substringBefore("chatSendCountdown?.start(", "")
-            .substringAfterLast("if (requestId == \"pending\"", "")
+        val fn = body(main, "private fun syncChatCountdownBar()")
+        // chatContainer is NOT the test: it wraps contentFrame and is visible on every tab, so
+        // gating on it excludes exactly one of the ten sibling surfaces the bar can paint over.
         assertTrue(
-            "chatSendCountdown is started without checking the chat is the visible surface; it " +
-                "would paint over the RC thread, which shares the same contentFrame: $guard",
-            guard.contains("rcThreadContainer.visibility") ||
-                guard.contains("chatContainer.visibility")
+            "the bar must be gated on the CHAT TAB; chatContainer wraps contentFrame and is " +
+                "visible on ReID, Telegram, Copilot and the rest: $fn",
+            calls(fn, "currentTabId == TabId.CHAT")
         )
-        // ...and opening a thread must take any bar already up back down.
-        val open = main.substringBefore("rcThreadContainer.visibility = View.VISIBLE", "")
-            .let { main.substringAfter("rcThreadContainer.visibility = View.VISIBLE", "") }
-            .take(300)
         assertTrue(
-            "opening an RC thread does not stop the chat's overlay bar: $open",
-            calls(open, "chatSendCountdown?.stop()")
+            "the RC thread draws inside the same frame and must also suppress the bar: $fn",
+            calls(fn, "rcThreadContainer.visibility")
+        )
+        // ...and the bar must FOLLOW the wearer, not be stranded on the tab that was up when the
+        // window opened.
+        // Bounded to the head of switchToTab, right after currentTabId is assigned: the function
+        // is 13k characters and searching all of it would prove nothing about ordering.
+        val switch = main.substringAfter("private fun switchToTab(index: Int", "")
+            .substringBefore("// Unfocus telegram chat list when switching tabs", "")
+        assertTrue("could not bound switchToTab", switch.isNotBlank() && switch.length < 2500)
+        assertTrue(
+            "switching tabs does not re-evaluate the bar, so it stays drawn over the new tab " +
+                "for the rest of the window: $switch",
+            calls(switch, "syncChatCountdownBar()")
+        )
+    }
+
+    /**
+     * The chat's pending state must NOT be read off the bar's visibility.
+     *
+     * The bar is an animation, and an animation can be cancelled, detached, or scaled to zero
+     * duration by the system's animator setting -- with animator scale off it ends on the first
+     * frame, so a visibility read would report "nothing pending" for the whole window and silently
+     * turn the wearer's withdrawal into a leave. Same reason the send is a posted runnable.
+     */
+    @Test
+    fun theChatPendingStateIsNotReadOffAnAnimation() {
+        val main = read("MainActivity.kt")
+        for (line in main.lineSequence().filter {
+            it.contains("chatSendCountdown?.visibility")
+        }) {
+            assertTrue(
+                "the chat's pending state is read off the countdown ANIMATION ('${line.trim()}'); " +
+                    "with animator duration scale off it ends immediately and a double tap would " +
+                    "leave the chat instead of withdrawing the message",
+                // The only legitimate read is the bar's own idempotence check inside the sync.
+                line.contains("!= View.VISIBLE")
+            )
+        }
+        assertTrue(
+            "there is no explicit pending flag for the chat send window",
+            calls(main, "private var chatSendPending = false")
+        )
+        // The window must close on its own, not only when the phone says so.
+        val arm = body(main, "private fun armChatSendWindow()")
+        assertTrue(
+            "the pending flag is armed with nothing to clear it; a dropped follow-up broadcast " +
+                "would latch tap-to-dictate off forever: $arm",
+            calls(arm, "postDelayed") && calls(arm, "CHAT_WINDOW_MS")
         )
     }
 

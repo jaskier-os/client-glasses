@@ -544,6 +544,19 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * thread uses, so the two dictation surfaces show the same thing rather than a lookalike.
      */
     private var chatSendCountdown: com.repository.glasses.listener.ui.SendCountdownBar? = null
+
+    /**
+     * Whether the AI chat has a transcript awaiting the phone's confirm window -- i.e. whether a
+     * double tap would WITHDRAW it.
+     *
+     * An explicit field rather than the bar's visibility. The bar is an animation, and an
+     * animation can be cancelled, detached, or scaled to zero duration by the system's animator
+     * setting; with animator scale off it ends on the first frame, and reading it would report "no
+     * pending send" for the whole window, silently turning a withdrawal into a leave. The same
+     * reason the SEND is a posted runnable and not an animation callback.
+     */
+    private var chatSendPending = false
+    private var chatSendPendingRunnable: Runnable? = null
     private lateinit var disconnectedOverlay: TextView
     // NotificationOverlay moved to ListenerService (WindowManager-based, activity-independent)
     private lateinit var timeText: TextView
@@ -983,7 +996,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         // The window is over one way or the other: withdrawn, sent, or cancelled.
                         // A bar left draining over a dead session is the AI chat's version of the
                         // "recording never wears off" defect.
-                        chatSendCountdown?.stop()
+                        clearChatSendWindow()
                         progressBar.visibility = View.GONE
                         uiLog("IDLE: before cleanup msgs=${chatAdapter.itemCount} roles=${chatAdapter.getMessages().map { "${it.role}:${it.requestId.take(8)}" }}")
                         // Clean ALL temporary messages
@@ -1000,7 +1013,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         stopLoading()
                         // A new dictation has begun; anything the previous one left pending is
                         // already resolved phone-side.
-                        chatSendCountdown?.stop()
+                        clearChatSendWindow()
                         partialsSuppressed = false
                         progressBar.visibility = View.GONE
                         // Clean slate for new session
@@ -1031,7 +1044,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         // See IDLE: not while an RC dictation owns these shared views.
                         if (!rcOwnsListeningChrome) hideAudioVisualizer()
                         // The message left; there is nothing left to withdraw.
-                        chatSendCountdown?.stop()
+                        clearChatSendWindow()
                         chatAdapter.removeMessagesByRequestId("listening")
                         chatAdapter.removeMessagesByRequestId("partial")
                         stopLoading()
@@ -1477,15 +1490,12 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 // painted the chat's countdown across the bottom of whatever tab the wearer was
                 // actually looking at -- including a coding thread, where a bar saying
                 // "DOUBLE-TAP TO CANCEL" means something else entirely.
-                if (requestId == "pending" && chatContainer.visibility == View.VISIBLE &&
-                    rcThreadContainer.visibility != View.VISIBLE
-                ) {
-                    // The PHONE's window, not ours: it owns the chat's confirm timer and we only
-                    // draw over it. Animating our own 3 s here would leave the bar a third full
-                    // after the message had already gone.
-                    chatSendCountdown?.start(DictationUx.CHAT_WINDOW_MS)
+                if (requestId == "pending") {
+                    // Armed regardless of which tab is showing: the WITHDRAW must work wherever
+                    // the wearer is, even though the bar is only DRAWN on the chat.
+                    armChatSendWindow()
                 } else {
-                    chatSendCountdown?.stop()
+                    clearChatSendWindow()
                 }
                 // Always display user text -- phone manages state and only sends valid messages.
                 hideAudioVisualizer()
@@ -5480,6 +5490,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         uiLog("NAV: switchToTab idx=$safeIndex tabId=$newTabId prev=$prevTab($prevTabId) tabs=${activeTabs.size} animate=$animate focus=$focusState")
         currentTabId = newTabId
         updateChatKeepScreenOnFlag()
+        // The chat's countdown bar follows the wearer: shown on the chat, hidden everywhere else.
+        // It is a contentFrame overlay every tab shares, so left alone it stays drawn across the
+        // bottom of whatever tab they switched to.
+        syncChatCountdownBar()
         if (newTabId == TabId.MAP || prevTabId == TabId.MAP) {
             sendBroadcast(Intent(ListenerService.ACTION_MAP_TAB_VISIBLE).apply {
                 setPackage(packageName)
@@ -7119,8 +7133,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         chatListRecycler.visibility = View.GONE
         rcThreadContainer.visibility = View.VISIBLE
         // The chat's overlay bar shares this contentFrame and would otherwise draw across the
-        // bottom of the thread.
-        chatSendCountdown?.stop()
+        // bottom of the thread. The pending STATE is untouched -- a withdrawal must still work.
+        syncChatCountdownBar()
         renderRcThreadChrome()
         // Asking for the rows IS the read acknowledgement; seenSeq is -1 because nothing is held.
         requestRcMessages(row.id)
@@ -7157,6 +7171,9 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         rcThreadAdapter.submit(emptyList())
         rcThreadContainer.visibility = View.GONE
         rcThreadSpinner?.stop()
+        // The thread no longer covers the frame; if a chat send window is still open the bar
+        // belongs back on screen.
+        syncChatCountdownBar()
         // A tab switch already owns focus and visibility for the tab it is moving to; forcing the
         // chat list back on there would show it over a different tab's content.
         if (returnToList) {
@@ -7870,6 +7887,56 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             val current = label.text.toString().replace(Regex("[^0-9]"), "").toIntOrNull() ?: 300
             val newVal = (current + direction * 100).coerceIn(100, 1000)
             label.text = "AMP x${newVal}"
+        }
+    }
+
+    /**
+     * The AI chat's pre-send window opened: the transcript is final but the message has not left,
+     * and a double tap still withdraws it.
+     *
+     * The STATE is armed unconditionally -- the wearer may have wandered to another tab, and the
+     * withdrawal must still work there. Only the BAR is tab-gated, by [syncChatCountdownBar].
+     */
+    private fun armChatSendWindow() {
+        chatSendPending = true
+        chatSendPendingRunnable?.let { mainHandler.removeCallbacks(it) }
+        // The window is the PHONE's and it closes on its own; this only stops the glasses
+        // believing a withdrawal is still possible after the message has gone.
+        val r = Runnable { clearChatSendWindow() }
+        chatSendPendingRunnable = r
+        mainHandler.postDelayed(r, DictationUx.CHAT_WINDOW_MS)
+        syncChatCountdownBar()
+    }
+
+    private fun clearChatSendWindow() {
+        chatSendPending = false
+        chatSendPendingRunnable?.let { mainHandler.removeCallbacks(it) }
+        chatSendPendingRunnable = null
+        chatSendCountdown?.stop()
+    }
+
+    /**
+     * Draw the chat's countdown only while the CHAT is the surface on screen.
+     *
+     * The bar is a bottom-gravity child of `contentFrame`, which every tab shares, so it would
+     * otherwise paint "DOUBLE-TAP TO CANCEL" across the bottom of ReID, Telegram, Copilot or an RC
+     * thread -- surfaces where a double tap means something else entirely. `chatContainer` is NOT
+     * the test: it wraps contentFrame and is visible on all of them.
+     *
+     * Called on arm and on every tab change, so the bar follows the wearer rather than being
+     * stranded on whichever tab happened to be up when the window opened.
+     */
+    private fun syncChatCountdownBar() {
+        val onChat = currentTabId == TabId.CHAT &&
+            rcThreadContainer.visibility != View.VISIBLE
+        if (chatSendPending && onChat) {
+            if (chatSendCountdown?.visibility != View.VISIBLE) {
+                // The PHONE's window, not ours: it owns the chat's confirm timer and we only draw
+                // over it. Our own 3 s would leave the bar a third full after the message had gone.
+                chatSendCountdown?.start(DictationUx.CHAT_WINDOW_MS)
+            }
+        } else {
+            chatSendCountdown?.stop()
         }
     }
 
@@ -9023,12 +9090,12 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                             // the NUMPAD_2 consumer the tap simply died and nothing happened;
                             // without this it would instead LEAVE for TAB_NAV while the session
                             // kept listening under a hint that says it was cancelled.
-                            if (chatSendCountdown?.visibility == View.VISIBLE ||
+                            if (chatSendPending ||
                                 serviceState in listOf("LISTENING", "RESPONDING")
                             ) {
                                 uiLog("KEY: CHAT_FOCUSED double-tap -> cancel session " +
                                     "(state=$serviceState)")
-                                chatSendCountdown?.stop()
+                                clearChatSendWindow()
                                 sendBroadcast(Intent(ListenerService.ACTION_CANCEL_SESSION).apply {
                                     setPackage(packageName)
                                 })
@@ -9061,7 +9128,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         // capture does inside a thread.
                         val action = DictationUx.onTap(
                             dictating = serviceState != "IDLE",
-                            sendPending = chatSendCountdown?.visibility == View.VISIBLE,
+                            sendPending = chatSendPending,
                             doubleTap = false,
                         )
                         if (action == DictationUx.TapAction.START) {
@@ -10981,7 +11048,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         rcSendRunnable?.let { mainHandler.removeCallbacks(it) }
         rcSendRunnable = null
         rcSendCountdown?.stop()
-        chatSendCountdown?.stop()
+        clearChatSendWindow()
         hideAudioVisualizer()
         telegramSendRunnable?.let { mainHandler.removeCallbacks(it) }
         callKeyHandler.removeCallbacks(callDurationTick)
