@@ -174,4 +174,20 @@ class SttDispatcherTest {
         assertEquals(SttDispatcher.Status.FAIL, r.status)
         assertEquals("an oversize payload must not reach the Binder at all", 0, bridge.calls)
     }
+    @Test
+    fun aColdModelIsGrantedTheLoadTimeItActuallyNeeds() {
+        // Measured on device: the first call after eviction spends ~21 s mapping
+        // the 231 MB context binary before it can answer. Budgeting the warm cost
+        // abandoned every first utterance -- the transcript completed and arrived
+        // as a LATE result that was dropped -- and since the model unloads when
+        // idle, the next attempt was cold again and local STT never won once.
+        val warm = SttDispatcher.timeoutFor(16_000, modelWarm = true)
+        val cold = SttDispatcher.timeoutFor(16_000, modelWarm = false)
+        assertTrue(
+            "a cold call must outlast the measured 21s load, got ${cold}ms",
+            cold >= 21_000L
+        )
+        assertTrue("cold must exceed warm", cold > warm)
+    }
+
 }

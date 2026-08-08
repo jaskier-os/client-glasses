@@ -789,10 +789,27 @@ class CaptureService : Service() {
         val tOnCreate = android.os.SystemClock.elapsedRealtime()
         super.onCreate()
 
-        // Enforce the recogniser's residency policy. Without this tick the 203 MB
-        // model stays resident until an explicit releaseStt or process death,
-        // which on a 1.7 GB device is what gets this process lmkd-killed.
+        // Enforce the recogniser's residency policy. The reaper is a no-op while
+        // keepResident is on; it stays wired so turning residency off restores
+        // eviction without another code change.
         stt.startIdleReaper(sttPool)
+
+        // Warm the recogniser now rather than inside the wearer's first utterance.
+        // The load is ~21 s of QNN graph deserialisation and NPU programming (the
+        // 231 MB read is 0.1 s), so paying it lazily meant the first Binder call
+        // could not answer in time, the transcript arrived after the caller had
+        // given up, and -- because the model then unloaded on idle -- the next
+        // attempt was cold again. Off the main thread: this must not delay
+        // onCreate, and a failure here is not fatal (the call path reloads).
+        sttPool.execute {
+            try {
+                val t0 = android.os.SystemClock.elapsedRealtime()
+                stt.ensureLoaded()
+                Log.i(TAG, "STT warm at boot in ${android.os.SystemClock.elapsedRealtime() - t0}ms")
+            } catch (t: Throwable) {
+                Log.w(TAG, "STT boot warm failed: ${t.message}")
+            }
+        }
 
         val channel = NotificationChannel(CHANNEL_ID, "Capture", NotificationManager.IMPORTANCE_MIN)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)

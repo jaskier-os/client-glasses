@@ -5275,9 +5275,16 @@ class ListenerService : LifecycleService(),
                 object : SttDispatcher.Bridge {
                     override fun transcribeUtterance(
                         pcm: ByteArray, lang: String, utteranceId: Long,
-                    ): String? = captureBridge.transcribeUtterance(pcm, lang, utteranceId)
+                    ): String? {
+                        val out = captureBridge.transcribeUtterance(pcm, lang, utteranceId)
+                        // Any answer -- text OR the empty final -- proves the model
+                        // is mapped. Only a null (unavailable/dead) leaves it cold.
+                        if (out != null) sttModelWarm = true
+                        return out
+                    }
                 },
                 GlassesConfig.sttLanguage,
+                modelWarm = { sttModelWarm },
             ),
             transport = object : LocalSttSession.Transport {
                 override fun sendSttMode(mode: String, sessionTag: String) {
@@ -5295,6 +5302,14 @@ class ListenerService : LifecycleService(),
      * failure here must leave the remote path working rather than break the
      * session the wearer just started.
      */
+    /**
+     * True once the capture process holds the model. The first call after an
+     * eviction pays a ~21 s mapping INSIDE the Binder call, so the dispatcher
+     * needs to know which budget applies; guessing warm abandoned every first
+     * utterance and dropped the transcript that arrived later.
+     */
+    @Volatile private var sttModelWarm: Boolean = false
+
     private fun beginLocalSttSession(tag: String) {
         try {
             // Everything the router is about to read, printed BEFORE it decides.
@@ -5308,6 +5323,19 @@ class ListenerService : LifecycleService(),
                     "micStreaming=$micStreaming micSubs=${MicBus.subscriberCount()}"
             )
             val local = localStt.begin(tag)
+            if (local) {
+                // Start mapping the 231 MB context binary NOW, in parallel with the
+                // wearer speaking, instead of inside the first Binder call. The load
+                // costs ~21 s; the wearer typically speaks for 2-3. Without this the
+                // first utterance pays the whole load and the transcript lands after
+                // the caller has given up.
+                try {
+                    captureBridge.prepareStt()
+                    SttTrace.i("prepareStt issued at session start (warm=$sttModelWarm)")
+                } catch (e: Exception) {
+                    SttTrace.w("prepareStt at session start threw ${e.javaClass.simpleName}: ${e.message}")
+                }
+            }
             btLog("STT session tag=$tag local=$local lang=${GlassesConfig.sttLanguage}")
         } catch (e: Exception) {
             btErr("STT session start failed (staying remote): ${e.message}")

@@ -43,6 +43,17 @@ class GigaAmStt(private val context: Context) {
         /** Drop the model after this long with no utterance. See the class kdoc. */
         const val IDLE_UNLOAD_MS = 90_000L
 
+        /**
+         * Keep the model mapped for the life of the process.
+         *
+         * The load is ~21 s of QNN graph deserialisation and NPU programming --
+         * not I/O, so it cannot be shortened, only amortised. With idle eviction
+         * the model was cold for nearly every utterance and the wearer waited
+         * every time. Resident costs ~235 MB in a 1.7 GB device, which is the
+         * accepted trade; if lmkd takes the process the next call reloads.
+         */
+        const val KEEP_RESIDENT_DEFAULT = true
+
         /** The only language the model was trained for. */
         private const val LANG_RU = "ru"
 
@@ -82,6 +93,9 @@ class GigaAmStt(private val context: Context) {
 
     @Volatile private var decoder: RnntDecoder? = null
     @Volatile private var lastUseMs = 0L
+
+    /** See [KEEP_RESIDENT_DEFAULT]. Settable so a test can exercise eviction. */
+    @Volatile var keepResident: Boolean = KEEP_RESIDENT_DEFAULT
 
     /** Parsed once; a device whose APK has no manifest can never be available. */
     private val manifest: SttManifest? by lazy {
@@ -253,9 +267,17 @@ class GigaAmStt(private val context: Context) {
         try { GigaAmNative.close() } catch (_: Throwable) {}
     }
 
-    /** True once the model has been idle past [IDLE_UNLOAD_MS]. */
+    /**
+     * True once the model has been idle past [IDLE_UNLOAD_MS].
+     *
+     * Only consulted when [keepResident] is off. The wearer chose to keep the
+     * model loaded: the 21 s is QNN deserialising the graph and programming the
+     * NPU (reading the 231 MB file is 0.1 s -- it is page-cached at 1.9 GB/s), so
+     * it cannot be made faster, only paid less often. Unloading on idle meant
+     * nearly every utterance paid it.
+     */
     fun isIdlePastUnloadWindow(nowMs: Long = SystemClock.elapsedRealtime()): Boolean =
-        GigaAmNative.isLoaded() && !transcribing && lastUseMs != 0L &&
+        !keepResident && GigaAmNative.isLoaded() && !transcribing && lastUseMs != 0L &&
             nowMs - lastUseMs >= IDLE_UNLOAD_MS
 
     /**

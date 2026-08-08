@@ -25,6 +25,12 @@ class SttDispatcher(
     private val language: String,
     private val shortTimeoutMs: Long = SHORT_TIMEOUT_MS,
     private val longTimeoutMs: Long = LONG_TIMEOUT_MS,
+    /**
+     * Whether the capture process already holds the model. False costs a ~21 s
+     * mapping of the context binary INSIDE the Binder call, so the budget has to
+     * cover it; defaults to warm so existing callers keep the tight budget.
+     */
+    private val modelWarm: () -> Boolean = { true },
 ) {
 
     /** The capture-process call, injected so the timeout logic is testable. */
@@ -56,11 +62,24 @@ class SttDispatcher(
 
         private const val SHORT_UTTERANCE_BYTES = 5 * 16_000 * BYTES_PER_SAMPLE
 
+        /**
+         * Extra budget for the first call after the model was evicted. Measured on
+         * device: mapping the 231 MB context binary takes ~21 s, during which the
+         * Binder call cannot return. Timing out at the warm budget meant EVERY
+         * first utterance was abandoned, the completed transcript arrived ~18 s
+         * later as a LATE result and was dropped -- and since the model unloads
+         * when idle, the next attempt was cold again. Local STT could never win.
+         */
+        const val COLD_LOAD_GRACE_MS = 30_000L
+
         /** Mirrors the AIDL ceiling; the 1 MB transaction buffer is shared with camera JPEGs. */
         const val MAX_UTTERANCE_BYTES = 384_000
 
-        fun timeoutFor(byteCount: Int): Long =
-            if (byteCount <= SHORT_UTTERANCE_BYTES) SHORT_TIMEOUT_MS else LONG_TIMEOUT_MS
+        fun timeoutFor(byteCount: Int, modelWarm: Boolean = true): Long {
+            val base =
+                if (byteCount <= SHORT_UTTERANCE_BYTES) SHORT_TIMEOUT_MS else LONG_TIMEOUT_MS
+            return if (modelWarm) base else base + COLD_LOAD_GRACE_MS
+        }
     }
 
     private val callPool = Executors.newCachedThreadPool { r ->
@@ -100,12 +119,17 @@ class SttDispatcher(
 
         // The INSTANCE budgets, not the companion defaults: reading the companion
         // here would silently ignore any override and make the timeout untestable.
+        // A cold model cannot answer inside the warm budget -- it is still mapping
+        // 231 MB -- so grant the load its measured cost or abandon every first
+        // utterance.
+        val warm = modelWarm()
         val timeoutMs =
-            if (bytes.size <= SHORT_UTTERANCE_BYTES) shortTimeoutMs else longTimeoutMs
+            (if (bytes.size <= SHORT_UTTERANCE_BYTES) shortTimeoutMs else longTimeoutMs) +
+                (if (warm) 0L else COLD_LOAD_GRACE_MS)
         val t0 = System.currentTimeMillis()
         SttTrace.i(
             "u$utteranceId binder CALL transcribeUtterance bytes=${bytes.size} " +
-                "lang=$language timeoutMs=$timeoutMs"
+                "lang=$language warm=$warm timeoutMs=$timeoutMs"
         )
         val future = callPool.submit<String?> {
             val text = bridge.transcribeUtterance(bytes, language, utteranceId)
