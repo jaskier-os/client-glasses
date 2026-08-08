@@ -186,6 +186,9 @@ class RcVoiceLifecycle(
     /** Test hook: arm the window without a capture, to exercise the stale-send path. */
     fun armForTest(text: String): Boolean = window.arm(text)
 
+    /** Outstanding discards, after expiring any whose deadline has passed. Diagnostics and tests. */
+    fun owedDiscards(): Int = capture.owedDiscards(clock())
+
     companion object {
         /**
          * How long an abandoned capture's transcript may still be arriving, and therefore how long

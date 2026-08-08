@@ -77,9 +77,19 @@ class RcCapture {
      */
     private val owed = ArrayDeque<Long>()
 
-    /** Drop debts whose in-flight transcript can no longer be arriving. */
+    /**
+     * Drop debts whose in-flight transcript can no longer be arriving.
+     *
+     * Sweeps the WHOLE deque, not just the head. Deadlines are absolute and the two TTLs differ by
+     * a factor of five, so the deque is NOT sorted: a 20 s handover debt recorded first sits in
+     * front of a 4 s abandon debt recorded second. A head-only sweep would stop at the handover,
+     * strand the expired abandon behind it, and then let acceptTranscript pay the WRONG debt --
+     * eating a legitimate dictation and restarting the self-sustaining loop.
+     *
+     * Payment order stays FIFO; only expiry is per-entry.
+     */
     private fun expire(now: Long) {
-        while (owed.isNotEmpty() && owed.first() <= now) owed.removeFirst()
+        owed.removeAll { it <= now }
     }
 
     /** Begins a capture. A still-running one is abandoned, and owes a discard like any other. */
@@ -99,8 +109,17 @@ class RcCapture {
         if (!active) return false
         active = false
         expire(now)
-        if (owed.size < MAX_PENDING_DISCARDS) owed.addLast(now + ttlMs)
-        return true
+        owed.addLast(now + ttlMs)
+        // Over the cap, the debt with the EARLIEST deadline is evicted -- never the incoming one.
+        // Refusing the newcomer dropped whichever debt happened to arrive last, and if that was a
+        // handover it re-opened the worst failure this class exists to prevent: a notification
+        // reply's words delivered to a coding agent that acts on them. The oldest debt is both the
+        // least likely to still be redeemed and the cheapest to be wrong about.
+        while (owed.size > MAX_PENDING_DISCARDS) {
+            val earliest = owed.minOrNull() ?: break
+            owed.remove(earliest)
+        }
+    return true
     }
 
     /**
@@ -114,8 +133,11 @@ class RcCapture {
         active = false
     }
 
-    /** Test/diagnostic view of the outstanding debt. */
-    fun owedDiscards(): Int = owed.size
+    /** Outstanding debts, after expiring any whose deadline has passed. */
+    fun owedDiscards(now: Long): Int {
+        expire(now)
+        return owed.size
+    }
 
     /**
      * A final transcript arrived.
@@ -149,17 +171,31 @@ class RcCapture {
         /**
          * How long an ABANDONED capture's transcript may still be arriving.
          *
-         * For the ordinary exits -- BACK, the watchdog, a mid-flight abort. The wearer has already
-         * STOPPED SPEAKING by the time any of these fire, so only the tail of the pipeline is
-         * left: the phone's VAD silence window (1.5 s) plus transcription (~2 s), about 3.5 s.
+         * READ THIS BEFORE CHANGING IT. Six audit rounds oscillated over this number because the
+         * two bounds nearly touch and one of them is not a real bound at all:
          *
-         * The upper bound is the fastest their NEXT final can arrive: an instant re-hold (~0.5 s)
-         * plus a one-word utterance (~1 s) plus that same ~3 s tail, about 4.5 s. A debt still
-         * owed then eats a legitimate dictation, whose capture waits for a final it has already
-         * consumed, hangs to the 30 s watchdog, and the watchdog owes again -- the loop.
+         *  - lower: the phone's VAD silence window (1.5 s) plus transcription. Transcription has
+         *    NO upper limit -- it is a network call with a 120 s read timeout -- so on a slow link
+         *    there is no value that covers it.
+         *  - upper: the fastest possible re-dictation, ~4.5 s (instant re-hold, one word, the same
+         *    tail). A debt outliving that eats a legitimate utterance.
          *
-         * 4 s is the only comfortable point between 3.5 and 4.5. The window really is that narrow;
-         * do not move this without re-deriving both numbers.
+         * So a TTL cannot be correct in general, and the design does not ask it to be. What makes
+         * this safe is that the two failures are NOT symmetric, and the expiry only decides which
+         * one a rare race produces:
+         *
+         *  - too short: a very late final is adopted. But MainActivity gates on focus as well, and
+         *    the wearer sees the words in the 3 s countdown before they are sent, and can withdraw.
+         *  - too long: a legitimate dictation is silently eaten and, before the loop was fixed,
+         *    the thread went deaf forever.
+         *
+         * 4 s covers the ordinary case (measured ~3.5 s) and stays under the fastest re-dictation.
+         * The countdown is the real backstop for the tail; do not try to make this number cover it.
+         *
+         * The structurally correct fix is to put the capture token on the wire so the phone echoes
+         * it on the final and the match is exact -- no clock, no deque, no cap. That needs a phone
+         * change (CH_GLASSES_USER_TEXT carries a shared literal "tg_voice" for all three owners
+         * today) and is the right next step if this ever misbehaves again.
          */
         const val DEFAULT_DISCARD_TTL_MS = 4_000L
 

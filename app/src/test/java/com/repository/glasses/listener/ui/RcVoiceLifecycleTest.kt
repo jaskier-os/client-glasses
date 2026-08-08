@@ -480,6 +480,91 @@ class RcVoiceLifecycleTest {
         assertEquals(listOf("CANCEL"), r.stops)
     }
 
+    // --- The two TTLs share one deque, so it is not sorted ---
+
+    /**
+     * A short debt recorded AFTER a long one must still expire on its own schedule.
+     *
+     * The deque holds absolute deadlines and the two TTLs differ by a factor of five, so a 20 s
+     * handover recorded first sits in front of a 4 s abandon recorded second. A head-only expiry
+     * sweep stops at the handover, strands the expired abandon behind it, and the wearer's next
+     * legitimate final then pays the WRONG debt -- eating the dictation, hanging that capture to
+     * its watchdog, and restarting the loop with BOTH debts still outstanding.
+     */
+    @Test
+    fun anExpiredShortDebtIsNotStrandedBehindALiveLongOne() {
+        val r = Recorder()
+        // A handover: 20 s debt.
+        r.lifecycle.start()
+        r.lifecycle.forgetCaptureWithoutStopping()
+
+        // A second later, an ordinary abandon: 4 s debt, recorded BEHIND the 20 s one.
+        r.elapse(1)
+        r.lifecycle.start()
+        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.BACK)
+
+        // Past the abandon's deadline, well short of the handover's. Only the abandon debt is
+        // genuinely gone -- but the handover's transcript never arrived either, so the wearer's
+        // own next final must not be eaten by a debt that has already expired.
+        // With a head-only sweep both debts are still outstanding here (the expired 4 s one is
+        // stuck behind the live 20 s one). With a full sweep only the handover debt remains.
+        r.elapse(6)
+        assertEquals(
+            "the expired abandon debt was stranded behind the live handover debt; expiry must " +
+                "sweep the whole deque, not just its head",
+            1, r.lifecycle.owedDiscards()
+        )
+
+        // Which means: the handover debt eats one dictation, and the NEXT one lands. With the
+        // stranded debt it would have eaten two -- and the second of those is a dictation the
+        // wearer would have no idea went missing.
+        r.lifecycle.start()
+        assertFalse("the live handover debt correctly eats this one",
+            r.lifecycle.acceptTranscript())
+        // A capture whose final was consumed to pay a debt stays active on purpose (see
+        // acceptTranscript), so in MainActivity its watchdog is what ends it. Model that, or the
+        // next start() would abandon it and owe a debt of its own.
+        r.elapse(30)
+        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
+        r.elapse(10)
+
+        r.lifecycle.start()
+        assertTrue(
+            "a second dictation was eaten, by a debt that had already expired",
+            r.lifecycle.acceptTranscript()
+        )
+    }
+
+    /**
+     * Over the cap, the OLDEST debt is evicted -- never the incoming one.
+     *
+     * Refusing the newcomer dropped whichever debt arrived last, and if that was a handover it
+     * re-opened the worst outcome here: a notification reply's words delivered to a coding agent
+     * that acts on them.
+     */
+    @Test
+    fun theCapEvictsTheOldestDebtNotTheIncomingOne() {
+        val r = Recorder()
+        // Fill the cap with ordinary abandons.
+        repeat(RcCapture.MAX_PENDING_DISCARDS) {
+            r.lifecycle.start()
+            r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.BACK)
+        }
+        // Now a handover arrives, over the cap.
+        r.lifecycle.start()
+        r.lifecycle.forgetCaptureWithoutStopping()
+
+        // Everything short has expired; only the handover debt should remain, and it must still
+        // be owed when the foreign reply's final lands.
+        r.elapse(10)
+        r.lifecycle.start()
+        assertFalse(
+            "the handover debt was refused because the cap was full of older abandons; the " +
+                "notification reply's words would be adopted and sent to the coding agent",
+            r.lifecycle.acceptTranscript()
+        )
+    }
+
     /**
      * Every exit, driven the way MainActivity drives it. Kept exhaustive with a `when` over the
      * enum (no `else`), so a new exit will not compile until it is driven here.
