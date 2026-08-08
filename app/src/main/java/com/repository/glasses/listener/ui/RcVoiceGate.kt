@@ -11,11 +11,10 @@ object RcVoiceGate {
 
     enum class Verdict(val allowed: Boolean, val hudText: String) {
         /**
-         * No words: the tap and mic icons in the footer are the instruction. Text here would
-         * duplicate them. Every OTHER verdict must say why, since a silently blocked tap leaves
-         * the user believing they dictated into their coding agent when nothing was captured.
+         * The wording a Telegram chat uses for the same gesture on the same hardware. Icons alone
+         * did not teach it: the wearer could see a microphone but not learn how to reach it.
          */
-        Allowed(true, ""),
+        Allowed(true, "Tap to record message"),
 
         /** The phone's orchestrator link is down. Reading stale rows is fine, dictating is not. */
         Offline(false, "agent offline"),

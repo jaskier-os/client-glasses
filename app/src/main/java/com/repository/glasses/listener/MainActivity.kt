@@ -7163,13 +7163,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // Voice states own the footer; the mic affordance is only shown when idle.
         val voiceBarUp = rcCapture.active || rcSendWindow.pending
         rcThreadFooter.visibility = if (voiceBarUp) View.GONE else View.VISIBLE
-        // Allowed: the two icons ARE the instruction, so no sentence. Refused: the icons go and
-        // the reason takes their place -- the footer never shows both, and never shows neither.
+        // Allowed: icons plus the instruction, worded exactly as a Telegram chat words it.
+        // Refused: the icons go and the reason takes the same line. Always exactly one message.
         val ready = verdict.allowed
         rcThreadTapGlyph.visibility = if (ready) View.VISIBLE else View.GONE
         rcThreadMicGlyph.visibility = if (ready) View.VISIBLE else View.GONE
-        rcThreadFooterHint.text = if (ready) "" else verdict.hudText
-        rcThreadFooterHint.visibility = if (ready) View.GONE else View.VISIBLE
+        rcThreadFooterHint.text = verdict.hudText
+        rcThreadFooterHint.visibility = View.VISIBLE
     }
 
     private fun renderRcThreadRows() {
@@ -8707,7 +8707,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             FocusState.NIGHTVISION_FOCUSED, FocusState.MAP_FOCUSED, FocusState.MAP_ZOOM_FOCUSED,
             FocusState.TRANSLATE_FOCUSED, FocusState.TELEPROMPTER_FOCUSED,
             FocusState.TODO_FOCUSED, FocusState.REID_FOCUSED, FocusState.REID_FACES_FOCUSED,
-            FocusState.REID_INTEL_MODAL, FocusState.COPILOT_FOCUSED, FocusState.STOP_MODAL
+            FocusState.REID_INTEL_MODAL, FocusState.COPILOT_FOCUSED, FocusState.STOP_MODAL,
+            // The RC thread draws its own surface, so chatContainer is hidden and the gate below
+            // would drop every key before the focus dispatch ran -- neither tap nor hold reached
+            // the thread at all.
+            FocusState.RC_THREAD_FOCUSED
         )
         if (chatContainer.visibility != View.VISIBLE && !onTelegramTab && !hasOwnHandler) {
             uiLog("NAV: GATE BLOCKED key=$keyCode focus=$focusState chatVis=${chatContainer.visibility} tab=$currentTab/${activeTabs.size}")

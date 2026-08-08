@@ -97,12 +97,12 @@ class RcVoiceGateTest {
         assertEquals("working", RcVoiceGate.Verdict.Turning.hudText)
         assertEquals("answer the prompt", RcVoiceGate.Verdict.PromptOpen.hudText)
         assertEquals("busy", RcVoiceGate.Verdict.Busy.hudText)
-        // Allowed prints nothing: the tap and mic icons carry the instruction, and a sentence
-        // beside them would just repeat it. Only a REFUSAL owes the user words.
-        assertEquals("", RcVoiceGate.Verdict.Allowed.hudText)
+        // Word-for-word what a Telegram chat says for the same gesture. Pinned literally: the
+        // point is that the two surfaces read identically, so a divergence here is a defect.
+        assertEquals("Tap to record message", RcVoiceGate.Verdict.Allowed.hudText)
         assertTrue(
-            "every refusal must say why; a silently blocked tap is the worst failure here",
-            RcVoiceGate.Verdict.values().filter { !it.allowed }.all { it.hudText.isNotBlank() }
+            "every verdict must say something; a silently blocked tap is the worst failure here",
+            RcVoiceGate.Verdict.values().all { it.hudText.isNotBlank() }
         )
     }
 
