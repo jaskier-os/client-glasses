@@ -7216,6 +7216,21 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     }
 
     /**
+     * Stop dictating and wait for the transcript, mirroring [telegramStopVoice].
+     *
+     * The capture stays "active" until text arrives or the watchdog fires: the wearer has finished
+     * speaking but the utterance is still in flight, and treating that as idle would let the next
+     * tap start a second capture on top of the first.
+     */
+    private fun rcStopCapture() {
+        if (!rcCapture.active) return
+        rcShowVoiceMeter(false)
+        sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_STOP).apply { setPackage(packageName) })
+        renderRcThreadChrome()
+        uiLog("RC: capture stopped by tap, waiting for transcript")
+    }
+
+    /**
      * A capture that never produces a transcript must not latch the microphone shut forever. The
      * phone can drop the utterance, the link can die, or another consumer can own the audio gate --
      * none of which sends anything back. Time it out and say so.
@@ -8274,11 +8289,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // would silently open an assistant chat instead of dictating to the coding agent. The
         // in-flight guard mirrors the [NREPLY] one: a second hold must not start a second capture.
         if (keyCode == KeyEvent.KEYCODE_NUMPAD_3 && focusState == FocusState.RC_THREAD_FOCUSED) {
-            // Dictation moved to a single tap (NUMPAD_2 below). The hold is swallowed here rather
-            // than left to fall through: the branches after this one would otherwise treat it as a
-            // notification reply arm or an assistant summon while the user is inside a coding
-            // thread, which is precisely the confusion moving the gesture was meant to end.
-            uiLog("RC: NUMPAD_3 (hold) ignored in thread; dictation is a single tap")
+            // Dictation is a tap (DPAD_CENTER), exactly as in a Telegram chat. The hold is
+            // swallowed rather than left to fall through: the branches below would otherwise arm a
+            // notification reply or summon the assistant from inside a coding thread.
+            uiLog("RC: NUMPAD_3 (hold) ignored in thread; dictation is a tap")
             return true
         }
         if (keyCode == KeyEvent.KEYCODE_NUMPAD_3) {
@@ -8328,38 +8342,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             sendBroadcast(Intent(com.repository.glasses.listener.service.ListenerService.ACTION_SENSOR_LONG_PRESS).apply {
                 setPackage(packageName)
             })
-            return true
-        }
-        // NUMPAD_2 inside an RC thread. Placed here -- above the reply branches and above the
-        // TAB_NAV screen-off chain -- because a release that belongs to the hold gesture must not
-        // register as an unrelated tap, and because a double tap here means "cancel the pending
-        // send", never "leave the screen".
-        if (keyCode == KeyEvent.KEYCODE_NUMPAD_2 && focusState == FocusState.RC_THREAD_FOCUSED) {
-            // Hands-free, exactly like the notification reply: the finger release during a capture
-            // is a no-op, and the phone's VAD decides when the utterance ended.
-            if (rcSendWindow.pending) {
-                // The send window owns the tap: a DOUBLE-tap cancels, a single one is ignored.
-                // Starting a new capture here would discard the sentence still waiting to go.
-                if (rcSendWindow.tapCancel(SystemClock.uptimeMillis())) {
-                    uiLog("RC: double-tap in send window -> cancel")
-                    rcClearSendWindow()
-                    renderRcThreadChrome()
-                }
-            } else if (rcCapture.active) {
-                uiLog("RC: tap ignored, capture already running")
-            } else {
-                val verdict = rcVoiceVerdict()
-                if (verdict.allowed) {
-                    uiLog("RC: tap -> start capture")
-                    rcStartCapture()
-                } else {
-                    // Never silently swallow it: the user believes they are dictating.
-                    uiLog("RC: tap refused (${verdict.hudText})")
-                    renderRcThreadChrome()
-                }
-            }
-            // Consumed either way, so a tap in a thread can never fall through to screen-off.
-            lastNumpad2Ms = 0L
             return true
         }
         // NUMPAD_2 (finger lifted / tap) during reply arming or NOTIFICATION_REPLY.
@@ -8736,7 +8718,30 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             // Every RC_THREAD_FOCUSED key is decided above, before the global double-tap-cancel
             // branch, because an RC dictation puts serviceState in LISTENING and that branch would
             // otherwise swallow the confirm. Nothing is left for this dispatch to do.
-            FocusState.RC_THREAD_FOCUSED -> {}
+            FocusState.RC_THREAD_FOCUSED -> {
+                // Same model as a Telegram chat: a tap starts dictation, a tap stops it. Kept
+                // deliberately identical -- one gesture to learn for "say something into this
+                // conversation", whichever conversation it is.
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                        if (rcCapture.active) {
+                            uiLog("RC: tap -> stop dictation")
+                            rcStopCapture()
+                        } else {
+                            val verdict = rcVoiceVerdict()
+                            if (verdict.allowed) {
+                                uiLog("RC: tap -> start dictation")
+                                rcStartCapture()
+                            } else {
+                                // Never silently swallowed: the wearer believes they dictated.
+                                uiLog("RC: tap refused (${verdict.hudText})")
+                                renderRcThreadChrome()
+                            }
+                        }
+                        return true
+                    }
+                }
+            }
             FocusState.TAB_NAV -> {
                 when (keyCode) {
                     KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_DOWN -> {

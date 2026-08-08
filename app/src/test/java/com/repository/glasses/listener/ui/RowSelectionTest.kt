@@ -71,20 +71,6 @@ class RowSelectionTest {
     }
 
     @Test
-    fun theCaretNeverRestsOnTheRcGroupMarker() {
-        val s = sel(rows(listOf(rc("a")), listOf(conv("c1"))))
-        val groupIdx = s.rows.indexOfFirst { it is ChatRow.RcGroup }
-        s.selectIndex(groupIdx)
-        assertNull("the group marker is not selectable", s.key)
-        // It is also skipped over by navigation in both directions.
-        s.select(ChatRow.NewChat.key)
-        s.moveDown()
-        assertEquals("rc:a", s.key)
-        s.moveUp()
-        assertEquals(ChatRow.NewChat.key, s.key)
-    }
-
-    @Test
     fun navigationStopsAtBothEndsWithoutLosingTheCaret() {
         val s = sel(rows(conv = listOf(conv("c1"))))
         s.select(ChatRow.NewChat.key)
@@ -143,16 +129,13 @@ class RowSelectionTest {
      */
     @Test
     fun everyRefusalSaysSoRatherThanReportingSuccess() {
-        val withGroup = sel(rows(listOf(rc("a")), listOf(conv("c1"))))
-        val groupIdx = rows(listOf(rc("a")), listOf(conv("c1")))
-            .indexOfFirst { it is ChatRow.RcGroup }
-        assertTrue("the fixture must actually contain a group marker", groupIdx >= 0)
+        val s = sel(rows(listOf(rc("a")), listOf(conv("c1"))))
 
-        assertTrue("a present, selectable key is accepted", withGroup.select("conv:c1"))
-        assertFalse("an absent key is refused and says so", withGroup.select("conv:nope"))
-        assertFalse("the group marker is refused and says so", withGroup.selectIndex(groupIdx))
-        assertFalse("an index off the end is refused and says so", withGroup.selectIndex(99))
-        assertEquals("no refusal moved the caret", "conv:c1", withGroup.key)
+        assertTrue("a present, selectable key is accepted", s.select("conv:c1"))
+        assertFalse("an absent key is refused and says so", s.select("conv:nope"))
+        assertFalse("an index off the end is refused and says so", s.selectIndex(99))
+        assertFalse("a negative index is refused and says so", s.selectIndex(-1))
+        assertEquals("no refusal moved the caret", "conv:c1", s.key)
     }
 
     /**

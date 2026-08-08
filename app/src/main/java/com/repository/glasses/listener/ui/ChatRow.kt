@@ -48,11 +48,6 @@ sealed class ChatRow {
         override val key: String = "hdr:new"
     }
 
-    /** Marks the start of the pinned RC section. A desktop glyph, no text label, no rule. */
-    object RcGroup : ChatRow() {
-        override val key: String = "hdr:rc"
-    }
-
     data class RcSession(
         val id: String,
         val name: String,
@@ -73,7 +68,7 @@ sealed class ChatRow {
 
     /** True for rows the caret may rest on. The RC group marker opens nothing, so it may not. */
     val selectable: Boolean
-        get() = this !is RcGroup
+        get() = true
 
     /**
      * True for rows the caret may be moved onto WITHOUT the user aiming at them.
@@ -109,7 +104,6 @@ object ChatRowBuilder {
             .take(MAX_PINNED_RC)
 
         if (pinned.isNotEmpty()) {
-            rows.add(ChatRow.RcGroup)
             pinned.forEach { rows.add(toRow(it, rc.wsConnected)) }
         }
 

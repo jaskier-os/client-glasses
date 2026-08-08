@@ -34,13 +34,13 @@ class RcDiscoveredSessionRendersTest {
         // This is the bug's signature. Pinned so "the glasses show nothing" stays a test failure.
         val rows = ChatRowBuilder.build(RcStateParser.parse(emptyFrame)!!, emptyList())
         assertTrue(rows.filterIsInstance<ChatRow.RcSession>().isEmpty())
-        assertFalse("no RC header without RC rows", rows.any { it is ChatRow.RcGroup })
+        assertTrue("an empty snapshot yields no RC rows", rows.none { it is ChatRow.RcSession })
     }
 
     @Test
     fun theDiscoveredSessionFrameRendersOneEnterableRow() {
         val rows = ChatRowBuilder.build(RcStateParser.parse(discoveredFrame)!!, emptyList())
-        assertTrue("the pinned RC header must appear", rows.any { it is ChatRow.RcGroup })
+        assertTrue("the session must render as a row", rows.any { it is ChatRow.RcSession })
         val row = rows.filterIsInstance<ChatRow.RcSession>().single()
         assertEquals("bb05f47b-c842-4558-8172-27cd524779d6", row.id)
         assertEquals("test", row.name)

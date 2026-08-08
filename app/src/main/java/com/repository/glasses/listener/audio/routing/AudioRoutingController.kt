@@ -58,7 +58,6 @@ class AudioRoutingController(
 
     private val a2dp = A2dpSinkController(ctx, log)
     private val audioMgr = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    private val stillness = StillnessSensor(ctx, log)
 
     /**
      * Fold state mirrored from ListenerService.handleFoldChange. Sole gate
@@ -304,18 +303,20 @@ class AudioRoutingController(
         } catch (e: Throwable) {
             log("addOnModeChangedListener failed: ${e.message}")
         }
-        stillness.listener = object : StillnessSensor.Listener {
-            override fun onStillnessChanged(still: Boolean) {
-                if (!running) return
-                log("stillness changed -> still=$still")
-                // WEAR-DECOUPLED 2026-05-08: stillness only mattered combined
-                // with wear=0 for the off-head decision. With A2DP gated on
-                // fold-only, stillness no longer drives transitions. Sensor
-                // stays running -- callers (e.g. isStill) may still want it.
-                // if (still) reevaluateOffHead("stillness")
-            }
-        }
-        stillness.start()
+        // NO stillness sensor here. WEAR-DECOUPLED 2026-05-08 disabled the only
+        // consumer (the off-head re-evaluation) once A2DP became fold-gated, but
+        // left the sensor running "in case callers want it" -- nothing ever did;
+        // isStill() has no call sites anywhere in the app.
+        //
+        // It was a 15 Hz IMU subscription held for the whole service lifetime.
+        // Each sample crosses from the SLPI DSP over qrtr, and qrtr_ws is a
+        // kernel wakeup source. Measured on-device, same charger state, this
+        // removal alone took qrtr_ws from 30 wakes/s to 15/s while
+        // SensorsHAL_WAKEUP stayed at 15/s -- i.e. one qrtr wake per sample per
+        // subscribed sensor. A non-wakeup sensor only stops delivering once a
+        // freeze COMPLETES, so it still aborts in-flight s2idle attempts; dmesg
+        // blamed "Abort: Last active Wakeup Source: qrtr_ws" for 9 of 10 aborts.
+        // Do not re-add a sensor here without a live consumer.
         try {
             val flags2 = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                 Context.RECEIVER_EXPORTED else 0
@@ -366,8 +367,6 @@ class AudioRoutingController(
         try { ctx.unregisterReceiver(btStateReceiver) } catch (_: Exception) {}
         try { a2dp.removeWatcher(reactiveWatcher) } catch (_: Throwable) {}
         try { audioMgr.removeOnModeChangedListener(modeChangedListener) } catch (_: Throwable) {}
-        stillness.stop()
-        stillness.listener = null
         a2dp.release()
         workHandler?.removeCallbacksAndMessages(null)
         workThread?.quitSafely()

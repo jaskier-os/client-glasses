@@ -3029,6 +3029,11 @@ class ListenerService : LifecycleService(),
             batteryLedArmer?.setCharging(isCablePlugged(initialBattery))
             btLog("BatteryLedArmer wired: battery receiver registered, charging seeded")
         } catch (e: Exception) {
+            // stop() before dropping the reference: if start() succeeded and a
+            // later step threw, the armer is live and owns a sensor
+            // registration. Nulling it out without stopping would strand that
+            // registration -- and it is a WAKE-UP sensor, which blocks s2idle.
+            try { batteryLedArmer?.stop() } catch (_: Exception) {}
             batteryLedArmer = null
             btErr("BatteryLedArmer init failed: ${e.message}")
         }

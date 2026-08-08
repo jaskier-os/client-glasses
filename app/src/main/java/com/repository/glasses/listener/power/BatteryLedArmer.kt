@@ -39,6 +39,14 @@ class BatteryLedArmer(
     // non-wakeup IMU would stop delivering and freeze the stillness verdict.
     // The wakeup variant keeps motion detection alive during idle.
     // motionSustainMs: reject isolated desk vibrations (see MOTION_SUSTAIN_MS).
+    //
+    // A wake-up sensor asserts the kernel SensorsHAL_WAKEUP wakeup source on
+    // every sample, which aborts s2idle outright ("Abort: Pending Wakeup
+    // Sources: SensorsHAL_WAKEUP"). So it is registered ONLY while charging --
+    // see reconcileSensor(). That is safe precisely because glasses-power-daemon
+    // refuses to arm fold-suspend while the charger is online, so the LED and
+    // fold-suspend never need the AP awake at the same time. Off-charger -- the
+    // only state in which fold-suspend runs -- the sensor is fully unregistered.
     private val stillness = StillnessSensor(
         ctx, log, useWakeup = true, motionSustainMs = MOTION_SUSTAIN_MS,
     )
@@ -47,6 +55,9 @@ class BatteryLedArmer(
     @Volatile private var charging = false
     @Volatile private var still = false
     private var running = false
+    // Mirrors whether stillness.start() is currently in effect, so we only
+    // touch the SensorManager on real transitions.
+    private var sensorRunning = false
 
     private val armRunnable = Runnable {
         if (charging && still) {
@@ -66,14 +77,17 @@ class BatteryLedArmer(
         if (running) return
         running = true
         stillness.listener = stillnessListener
-        stillness.start()
+        // Do NOT start the sensor here -- it is gated on charging so the
+        // wake-up sensor cannot block fold-suspend. setCharging() (seeded by
+        // ListenerService right after start()) brings it up when relevant.
+        reconcileSensor("start")
         log("BatteryLedArmer started")
     }
 
     fun stop() {
         running = false
         handler.removeCallbacks(armRunnable)
-        stillness.stop()
+        reconcileSensor("stop")
         stillness.listener = null
         BatteryLedControl.setArmed(false)
         log("BatteryLedArmer stopped")
@@ -83,7 +97,34 @@ class BatteryLedArmer(
     fun setCharging(isCharging: Boolean) {
         if (isCharging == charging) return
         charging = isCharging
+        reconcileSensor("charging=$isCharging")
         reevaluate("charging=$isCharging")
+    }
+
+    /**
+     * The wake-up IMU runs only while running && charging. Unregistering it
+     * off-charger is what lets the kernel reach s2idle on fold.
+     *
+     * Not synchronized: every caller (start/stop from service lifecycle,
+     * setCharging from the battery BroadcastReceiver) is on the main thread.
+     * Keep it that way, or add synchronization -- a lost update here would
+     * strand the wake-up sensor registered and silently block suspend again.
+     */
+    private fun reconcileSensor(reason: String) {
+        val want = running && charging
+        if (want == sensorRunning) return
+        sensorRunning = want
+        if (want) {
+            stillness.start()
+            log("battery-led stillness sensor started ($reason)")
+        } else {
+            stillness.stop()
+            // The verdict is stale the moment we stop sampling. Reset it so a
+            // later charge does not arm the LED off a pre-unplug "still" that
+            // was never re-validated.
+            still = false
+            log("battery-led stillness sensor stopped, wakeup source released ($reason)")
+        }
     }
 
     private fun reevaluate(reason: String) {

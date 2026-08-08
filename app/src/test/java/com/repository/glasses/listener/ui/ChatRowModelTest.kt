@@ -51,8 +51,9 @@ class ChatRowModelTest {
 
     @Test
     fun rcGroupHeaderOnlyExistsWhenThereIsAtLeastOneRcRow() {
-        assertTrue(build(conversations = listOf(conv("c1"))).none { it is ChatRow.RcGroup })
-        assertTrue(build(listOf(rc("a"))).any { it is ChatRow.RcGroup })
+        // No category marker at all: RC rows are ordinary rows that happen to be pinned first.
+        assertEquals(listOf("hdr:new", "conv:c1"), build(conversations = listOf(conv("c1"))).map { it.key })
+        assertEquals(listOf("hdr:new", "rc:a"), build(listOf(rc("a"))).map { it.key })
     }
 
     @Test
@@ -114,16 +115,6 @@ class ChatRowModelTest {
             ChatRow.NewChat,
             after[ChatRowBuilder.resolveSelection(after, ChatRow.NewChat.key, previousIndex = 4)],
         )
-    }
-
-    @Test
-    fun fallbackSkipsTheRcGroupMarkerBecauseItOpensNothing() {
-        val rows = build(listOf(rc("a")), listOf(conv("c1")))
-        val groupIdx = rows.indexOfFirst { it is ChatRow.RcGroup }
-        assertTrue(groupIdx > 0)
-        val landed = rows[ChatRowBuilder.resolveSelection(rows, "conv:gone", groupIdx)]
-        assertFalse("the group marker is not selectable", landed is ChatRow.RcGroup)
-        assertTrue(landed.selectable)
     }
 
     @Test

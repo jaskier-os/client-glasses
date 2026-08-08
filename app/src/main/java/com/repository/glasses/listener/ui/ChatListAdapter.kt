@@ -36,7 +36,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     companion object {
         private const val VIEW_TYPE_NEW_CHAT = 0
         private const val VIEW_TYPE_CHAT = 1
-        private const val VIEW_TYPE_RC_GROUP = 3
         private const val VIEW_TYPE_RC_SESSION = 4
 
         /** Rebind only the caret border. */
@@ -124,7 +123,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         var currentDrawable: GradientDrawable? = null
     }
 
-    class RcGroupViewHolder(val container: LinearLayout) : RecyclerView.ViewHolder(container)
 
     class ChatItemViewHolder(
         val container: LinearLayout,
@@ -172,7 +170,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     /** Derived from the row TYPE. No positional arithmetic anywhere in this adapter. */
     override fun getItemViewType(position: Int): Int = when (rows[position]) {
         is ChatRow.NewChat -> VIEW_TYPE_NEW_CHAT
-        is ChatRow.RcGroup -> VIEW_TYPE_RC_GROUP
         is ChatRow.RcSession -> VIEW_TYPE_RC_SESSION
         is ChatRow.Conversation -> VIEW_TYPE_CHAT
     }
@@ -180,7 +177,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return when (viewType) {
             VIEW_TYPE_NEW_CHAT -> createHeaderHolder(parent, "+ New chat")
-            VIEW_TYPE_RC_GROUP -> createRcGroupHolder(parent)
             VIEW_TYPE_RC_SESSION -> createRcSessionHolder(parent)
             else -> createChatHolder(parent)
         }
@@ -217,25 +213,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
      * The RC section marker: a desktop glyph on its own line. No text label and no separator rule,
      * per the approved sketch -- the glyph plus the rows' rails carry the grouping.
      */
-    private fun createRcGroupHolder(parent: ViewGroup): RcGroupViewHolder {
-        val glyph = ImageView(parent.context).apply {
-            setBackgroundColor(Lum.VOID)
-            setImageDrawable(ContextCompat.getDrawable(parent.context, R.drawable.ic_device_desktop))
-            setColorFilter(Lum.SOFT)
-        }
-        val container = LinearLayout(parent.context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = RecyclerView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            setPadding(8.dpToPx(), 9.dpToPx(), 8.dpToPx(), 5.dpToPx())
-            setBackgroundColor(Lum.VOID)
-            addView(glyph, LinearLayout.LayoutParams(12.dpToPx(), 12.dpToPx()))
-        }
-        return RcGroupViewHolder(container)
-    }
-
     private fun createRcSessionHolder(parent: ViewGroup): RcSessionViewHolder {
         val ctx = parent.context
 
@@ -461,7 +438,6 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
                 { holder.currentDrawable }, { holder.borderAnimator },
                 { d, a -> holder.currentDrawable = d; holder.borderAnimator = a },
             )
-            is RcGroupViewHolder -> Unit
             is RcSessionViewHolder -> {
                 // The title's colour depends on selection as well as on content, so a
                 // selection-only rebind still has to recolour it (sketch: .rc.sel .title = GLOW).
@@ -469,13 +445,13 @@ class ChatListAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
                     if (content) bindRcSession(holder, it)
                     holder.titleView.setTextColor(rcTitleColor(it, isSelected))
                 }
-                // The TRACE fill is what marks the pinned block as one region; it must survive the
-                // caret arriving and leaving, so it is applied on both branches.
+                // No fill: an RC row is an ordinary row that happens to be pinned. The rail and
+                // the brighter title already say what it is, and a block of filled rows read as a
+                // separate widget rather than part of the same list.
                 applyCaret(
                     holder.container, isSelected,
                     { holder.currentDrawable }, { holder.borderAnimator },
                     { d, a -> holder.currentDrawable = d; holder.borderAnimator = a },
-                    fillColor = Lum.TRACE,
                 )
             }
             is ChatItemViewHolder -> {
