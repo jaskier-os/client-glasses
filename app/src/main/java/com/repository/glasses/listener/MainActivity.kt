@@ -72,6 +72,7 @@ import com.repository.glasses.listener.ui.RcVoiceGate
 import com.repository.glasses.listener.ui.RcVoiceLifecycle
 import com.repository.glasses.listener.ui.SpinnerView
 import com.repository.glasses.listener.ui.TabHighlightView
+import com.repository.glasses.listener.ui.TapAfterCancelGuard
 import com.repository.glasses.listener.ui.VerticalHighlightView
 import com.repository.glasses.listener.ui.MessageItemAnimator
 import com.repository.glasses.listener.ui.TabLoaderController
@@ -417,6 +418,16 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     }
     private var rcSendRunnable: Runnable? = null
     private var rcSendAnimator: android.animation.ValueAnimator? = null
+
+    /**
+     * Eats the touchpad release that trails the double tap which just cancelled a dictation.
+     *
+     * The pad delivers that one gesture as TWO keycodes from two producers -- the PSoC firmware
+     * classifies the double tap and sends KEYCODE_BACK, the daemon separately emits NUMPAD_2 for
+     * the finger lifting off. The BACK cancelled, then 25 ms later the NUMPAD_2 found an idle
+     * thread and legitimately started a new dictation. See [TapAfterCancelGuard].
+     */
+    private val rcTapAfterCancel = TapAfterCancelGuard()
 
     /**
      * How long a capture may run with nothing coming back before it is abandoned. Generous, since
@@ -7387,6 +7398,24 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     }
 
     /**
+     * A touchpad gesture cancelled a RUNNING capture inside an RC thread: arm the trailing-release
+     * guard, tear the capture down, re-render.
+     *
+     * This is not the only gesture cancel -- a double tap inside the 3 s send window is withdrawn
+     * by [RcVoiceLifecycle.tapCancel] itself, which has already closed the session by the time the
+     * branch runs and so has nothing for [rcCancelCapture] to do. That branch arms the guard
+     * inline. Both are covered by TapAfterCancelWiringTest rather than by a claim here that one
+     * funnel exists when it does not.
+     */
+    private fun rcCancelByGesture(exit: RcVoiceLifecycle.Exit) {
+        // Armed BEFORE the cancel: the guard is timed against the gesture, and the cancel below is
+        // free to log and broadcast for as long as it likes without moving the deadline.
+        rcTapAfterCancel.onCancel(SystemClock.uptimeMillis())
+        rcCancelCapture(exit)
+        renderRcThreadChrome()
+    }
+
+    /**
      * The phone's STT produced a final transcript. A blank one captured nothing: tear down rather
      * than opening a window over whitespace.
      */
@@ -8701,9 +8730,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 // A pending send is undone by BACK without leaving the thread -- the same undo the
                 // double tap performs, on the key users reach for first.
                 if (rcVoice.busy) {
+                    // On this pad BACK *is* the double tap: the PSoC firmware classifies the
+                    // gesture and emits KEYCODE_BACK for it (docs/rokid-touchpad.md). So this is
+                    // not a second, independent cancel path racing the tap one -- it is the only
+                    // one that ever fires for the gesture, and the NUMPAD_2 that follows is the
+                    // finger lifting off, which rcCancelByGesture arms the guard against.
                     uiLog("RC: BACK cancels the pending voice send")
-                    rcCancelCapture(RcVoiceLifecycle.Exit.BACK)
-                    renderRcThreadChrome()
+                    rcCancelByGesture(RcVoiceLifecycle.Exit.BACK)
                     return true
                 }
                 closeRcThread()
@@ -8943,7 +8976,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                             DictationUx.TapAction.WITHDRAW -> {
                                 uiLog("RC: double-tap in send window -> cancel")
                                 // tapCancel already withdrew the send and closed the session;
-                                // only the chrome is left to take down.
+                                // only the chrome is left to take down. Armed all the same: the
+                                // pad can deliver the pair as two NUMPAD_2s rather than as
+                                // BACK + release, and the third release of a fast triple would
+                                // otherwise restart the dictation exactly as the BACK path did.
+                                rcTapAfterCancel.onCancel(SystemClock.uptimeMillis())
                                 rcClearSendCallbacks()
                                 rcHideCountdown()
                                 rcShowListeningChrome(false)
@@ -8954,6 +8991,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                                 uiLog("RC: tap ignored (dictating=${rcVoice.active} " +
                                     "pending=${rcVoice.pending}); the VAD ends the utterance")
                             DictationUx.TapAction.START -> {
+                                // The tail of the double tap that just cancelled is NOT a request
+                                // to dictate again. Measured 25 ms apart on the device; without
+                                // this the cancelled dictation reappeared in the next frame.
+                                if (rcTapAfterCancel.swallows(SystemClock.uptimeMillis())) {
+                                    uiLog("RC: tap swallowed (tail of the cancelling double tap)")
+                                    return true
+                                }
                                 val verdict = rcVoiceVerdict()
                                 if (verdict.allowed) {
                                     uiLog("RC: tap -> start dictation")
