@@ -972,8 +972,14 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         hideLoadingSpinner()
                         stopLoading()
                         stopThinkingPulse()
-                        hideDoubleTapHint()
-                        hideAudioVisualizer()
+                        // NOT torn down when an RC dictation is the thing driving them: these are
+                        // shared views, and the AI chat's own turn ending says nothing about a
+                        // coding-agent dictation that is still running. Stripping them there
+                        // leaves a recording bar with no status line behind it.
+                        if (!rcOwnsListeningChrome) {
+                            hideDoubleTapHint()
+                            hideAudioVisualizer()
+                        }
                         // The window is over one way or the other: withdrawn, sent, or cancelled.
                         // A bar left draining over a dead session is the AI chat's version of the
                         // "recording never wears off" defect.
@@ -986,7 +992,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         chatAdapter.removeMessagesByRequestId("pending")
                         uiLog("IDLE: after cleanup msgs=${chatAdapter.itemCount}")
                         chatAdapter.clearSelection()
-                        statusArea.visibility = View.INVISIBLE
+                        if (!rcOwnsListeningChrome) statusArea.visibility = View.INVISIBLE
                     }
                     "LISTENING" -> {
                         stopTimer()
@@ -1005,6 +1011,15 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         setStatus(LISTENING_STATUS_TEXT, R.drawable.ic_mic, Lum.GLOW)
                         showDoubleTapHintPersistent()
                         showAudioVisualizer()
+                        // An RC dictation puts the SERVICE in LISTENING too -- that is how the
+                        // thread's own capture is driven. Flipping focus to the chat there would
+                        // orphan the thread's transcript: the final is only accepted while
+                        // RC_THREAD_FOCUSED, so it would be discarded and the voice bar would sit
+                        // there until the watchdog gave up.
+                        if (focusState == FocusState.RC_THREAD_FOCUSED && rcVoice.busy) {
+                            uiLog("NAV: LISTENING is this thread's own dictation; keeping focus")
+                            return@runOnUiThread
+                        }
                         // Auto-focus chat when conversation starts
                         if (focusState != FocusState.CHAT_FOCUSED) {
                             uiLog("NAV: LISTENING auto-focus CHAT_FOCUSED (was $focusState tab=$currentTab/${activeTabs.getOrNull(currentTab)})")
@@ -1013,7 +1028,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         }
                     }
                     "RESPONDING" -> {
-                        hideAudioVisualizer()
+                        // See IDLE: not while an RC dictation owns these shared views.
+                        if (!rcOwnsListeningChrome) hideAudioVisualizer()
                         // The message left; there is nothing left to withdraw.
                         chatSendCountdown?.stop()
                         chatAdapter.removeMessagesByRequestId("listening")
@@ -7108,6 +7124,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // One call: rcCancelCapture also drops any pending send and closes the voice session.
         rcCancelCapture(RcVoiceLifecycle.Exit.THREAD_CLOSED)
         rcThread.close()
+        // The in-flight guard is scoped to the OPEN session: its result frame is matched against
+        // rcOpenSession and is dropped once that is null, so a thread closed inside the send's
+        // round trip would latch Busy forever and refuse hold-to-speak in EVERY thread until the
+        // app restarted. Nothing can clear it after this point, so it is cleared here.
+        if (rcSendInFlight) uiLog("RC: thread closed with a send in flight; releasing the guard")
+        rcSendInFlight = false
+        rcSendClientMsgId = null
         rcOpenSession = null
         rcThreadAdapter.submit(emptyList())
         rcThreadContainer.visibility = View.GONE
@@ -7272,8 +7295,14 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 uiLog("RC: watchdog fired but $focusState owns the microphone now; " +
                     "dropping the capture without stopping the session")
                 rcVoice.forgetCaptureWithoutStopping()
+                // The SAME chrome teardown every other exit does. Skipping it leaves the status
+                // line, the visualizer, the hint and the meter lit with no capture behind them --
+                // and with the footer already hidden by the last render, the wearer gets neither
+                // an affordance nor an explanation. That is the original complaint, verbatim.
+                rcShowListeningChrome(false)
                 rcShowCountdown(false)
                 rcThreadVoiceBar.visibility = View.GONE
+                renderRcThreadChrome()
                 return@Runnable
             }
             uiLog("RC: capture produced nothing within ${RC_CAPTURE_TIMEOUT_MS}ms -> giving up")

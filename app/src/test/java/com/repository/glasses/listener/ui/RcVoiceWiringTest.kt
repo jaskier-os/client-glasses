@@ -182,6 +182,137 @@ class RcVoiceWiringTest {
         )
     }
 
+    // --- Every exit leaves the SCREEN correct, not just the broadcast ---
+
+    /**
+     * The user's complaint was visual: "recording doesn't wear off". A path that closes the
+     * session but leaves the chrome lit is the same bug with a different cause, so EVERY exit must
+     * take the chrome down and re-render -- including the one where another feature stole the
+     * microphone, which was missed. (Found by audit round 2 on exactly that path.)
+     */
+    @Test
+    fun everyExitPathTakesTheRecordingChromeDown() {
+        val main = read("MainActivity.kt")
+        val paths = mapOf(
+            "private fun rcCancelCapture(" to 4000,
+            "private fun rcArmCaptureWatchdog()" to 4000,
+            "private fun rcOnFinalTranscript(" to 4000,
+            "private fun rcCommitSend()" to 5000,
+        )
+        for ((sig, max) in paths) {
+            val fn = body(main, sig, maxLen = max)
+            assertTrue(
+                "$sig does not take the listening chrome down; the status line, visualizer, " +
+                    "hint and mic meter would stay lit with no capture behind them",
+                fn.contains("rcShowListeningChrome(false)")
+            )
+            assertTrue(
+                "$sig does not hide the voice bar",
+                fn.contains("rcThreadVoiceBar.visibility = View.GONE") ||
+                    // rcOnFinalTranscript hides it only on the blank-transcript branch; the
+                    // non-blank branch legitimately keeps the bar up for the send window.
+                    sig.contains("rcOnFinalTranscript")
+            )
+        }
+    }
+
+    /**
+     * The watchdog's stolen-microphone branch specifically. It returns early, so it does not fall
+     * through to the normal teardown below it and must do its own -- including the re-render,
+     * without which the footer stays hidden from the last pass and the wearer is left with no
+     * affordance and no explanation.
+     */
+    @Test
+    fun theStolenMicrophoneBranchAlsoRerendersTheChrome() {
+        val fn = body(read("MainActivity.kt"), "private fun rcArmCaptureWatchdog()")
+        val branch = fn.substringAfter("forgetCaptureWithoutStopping()", "")
+            .substringBefore("return@Runnable", "")
+        assertTrue("could not locate the stolen-microphone branch: $fn", branch.isNotBlank())
+        assertTrue(
+            "the stolen-microphone branch does not take the chrome down: $branch",
+            branch.contains("rcShowListeningChrome(false)")
+        )
+        assertTrue(
+            "the stolen-microphone branch does not re-render, so the footer stays hidden from " +
+                "the previous pass and the wearer gets no affordance at all: $branch",
+            branch.contains("renderRcThreadChrome()")
+        )
+    }
+
+    /**
+     * rcSendInFlight makes RcVoiceGate return Busy. Its result frame is matched against the OPEN
+     * session and dropped once that is null, so a thread closed inside the send's round trip
+     * latches Busy forever and refuses hold-to-speak in EVERY thread until the app restarts.
+     */
+    @Test
+    fun closingAThreadReleasesTheSendInFlightGuard() {
+        val fn = body(read("MainActivity.kt"), "private fun closeRcThread(")
+        assertTrue(
+            "closeRcThread does not clear rcSendInFlight; nothing else can, because the result " +
+                "frame is dropped once rcOpenSession is null, so the voice gate latches Busy " +
+                "forever: $fn",
+            fn.contains("rcSendInFlight = false")
+        )
+    }
+
+    /**
+     * The chat's own state broadcasts must not strip chrome an RC dictation is driving. These are
+     * SHARED views now; the chat's turn ending says nothing about a coding-agent dictation that is
+     * still running.
+     */
+    @Test
+    fun theChatStateReceiverDoesNotStripAnRcDictationsChrome() {
+        val main = read("MainActivity.kt")
+        val receiver = main.substringAfter("private val stateReceiver", "")
+            .substringBefore("\n    private val ", "")
+        assertTrue("could not locate stateReceiver", receiver.isNotBlank() && receiver.length < 6000)
+        for (branch in listOf("\"IDLE\" ->", "\"RESPONDING\" ->")) {
+            val body = receiver.substringAfter(branch, "").substringBefore("\n                    \"")
+            assertTrue("could not locate the $branch branch", body.isNotBlank())
+            // A teardown counts as guarded if the ownership flag is on the SAME line (a one-line
+            // `if (...) x`) or the line sits inside an `if (!rcOwnsListeningChrome) {` block,
+            // which shows up as deeper indentation than that `if`. Matching only on the same line
+            // would report the block form as unguarded -- it did, on the first run.
+            val guardIndents = body.lineSequence()
+                .filter { it.contains("if (!rcOwnsListeningChrome) {") }
+                .map { it.takeWhile { c -> c == ' ' }.length }
+                .toList()
+            for (line in body.lineSequence().filter {
+                it.contains("hideAudioVisualizer()") || it.contains("hideDoubleTapHint()") ||
+                    it.contains("statusArea.visibility = View.INVISIBLE")
+            }) {
+                val indent = line.takeWhile { it == ' ' }.length
+                val guarded = line.contains("rcOwnsListeningChrome") ||
+                    guardIndents.any { indent > it }
+                assertTrue(
+                    "$branch tears down a SHARED listening view unguarded ('${line.trim()}'); an " +
+                        "RC dictation would be left as a recording bar with no status behind it",
+                    guarded
+                )
+            }
+        }
+    }
+
+    /**
+     * An RC dictation puts the SERVICE in LISTENING -- that is how the thread's capture is driven.
+     * Auto-focusing the chat there orphans the thread's transcript, because the final is only
+     * accepted while RC_THREAD_FOCUSED.
+     */
+    @Test
+    fun listeningDoesNotStealFocusFromTheThreadsOwnDictation() {
+        val main = read("MainActivity.kt")
+        val listening = main.substringAfter("\"LISTENING\" -> {", "")
+            .substringBefore("\n                    \"RESPONDING\"", "")
+        assertTrue("could not locate the LISTENING branch", listening.isNotBlank())
+        val guard = listening.substringBefore("focusState = FocusState.CHAT_FOCUSED", "")
+        assertTrue(
+            "LISTENING auto-focuses the chat with no exemption for a thread's own dictation; " +
+                "the RC transcript would be discarded and the voice bar would hang until the " +
+                "watchdog fired: $guard",
+            guard.contains("FocusState.RC_THREAD_FOCUSED") && guard.contains("rcVoice.busy")
+        )
+    }
+
     // --- The countdown cannot outlive its view ---
 
     @Test
