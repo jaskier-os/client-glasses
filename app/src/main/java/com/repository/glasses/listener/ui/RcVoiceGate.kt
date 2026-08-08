@@ -83,7 +83,7 @@ class RcCapture {
     }
 
     /** Begins a capture. A still-running one is abandoned, and owes a discard like any other. */
-    fun start(now: Long = 0L) {
+    fun start(now: Long) {
         if (active) cancel(now)
         expire(now)
         active = true
@@ -95,7 +95,7 @@ class RcCapture {
      *
      * @return true when a capture was actually running.
      */
-    fun cancel(now: Long = 0L, ttlMs: Long = DEFAULT_DISCARD_TTL_MS): Boolean {
+    fun cancel(now: Long, ttlMs: Long = DEFAULT_DISCARD_TTL_MS): Boolean {
         if (!active) return false
         active = false
         expire(now)
@@ -124,7 +124,7 @@ class RcCapture {
      *         False means it belonged to an abandoned capture, or to no capture at all, and must
      *         be dropped on the floor.
      */
-    fun acceptTranscript(now: Long = 0L): Boolean {
+    fun acceptTranscript(now: Long): Boolean {
         expire(now)
         if (owed.isNotEmpty()) {
             owed.removeFirst()
@@ -149,12 +149,23 @@ class RcCapture {
         /**
          * How long an abandoned capture's transcript may still be arriving.
          *
-         * The phone's VAD can end an utterance a moment before we give up on it, and the
-         * transcription that follows takes seconds. This is the window a debt guards. Past it a
-         * debt is not protection, it is an unrelated dictation being eaten -- which then hangs to
-         * its own watchdog and owes again, forever.
+         * This constant is squeezed between two real latencies and both bounds matter.
+         *
+         * LOWER BOUND -- it must outlast the race it exists for. The phone's VAD can end an
+         * utterance moments before we abandon the capture; the transcription that follows is a
+         * couple of seconds. A late final inside that window must be discarded, or an utterance
+         * the wearer abandoned is sent to a coding agent that acts on it.
+         *
+         * UPPER BOUND -- it must expire before the wearer's NEXT final can arrive, which is the
+         * re-hold reaction (~2 s) plus a short utterance (~4 s) plus transcription (~2 s), so
+         * about 8 s at the fastest. A debt still owed then eats a legitimate dictation; that
+         * capture keeps listening for a final it has already consumed, hangs until the 30 s
+         * watchdog, and the watchdog owes a fresh debt -- the loop, just at a slower cadence.
+         *
+         * 5 s sits inside both: comfortably past transcription latency, comfortably short of the
+         * fastest possible re-dictation. Do not raise it towards 8 s without re-measuring both.
          */
-        const val DEFAULT_DISCARD_TTL_MS = 15_000L
+        const val DEFAULT_DISCARD_TTL_MS = 5_000L
     }
 }
 

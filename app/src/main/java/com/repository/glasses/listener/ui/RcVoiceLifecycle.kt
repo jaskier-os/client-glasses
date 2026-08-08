@@ -17,9 +17,13 @@ package com.repository.glasses.listener.ui
 class RcVoiceLifecycle(
     /**
      * Monotonic time source, injected so the discard EXPIRY can be driven in a test without
-     * sleeping. Defaults to the same clock the rest of the activity's timing uses.
+     * sleeping.
+     *
+     * elapsedRealtime, NOT uptimeMillis: the debt ages against a race running on the PHONE, which
+     * keeps transcribing while this device is suspended. uptimeMillis pauses in deep sleep, so a
+     * debt would come back from a suspend with most of its life left and eat the next dictation.
      */
-    private val clock: () -> Long = { android.os.SystemClock.uptimeMillis() },
+    private val clock: () -> Long = { android.os.SystemClock.elapsedRealtime() },
     /**
      * Broadcasts ACTION_RC_VOICE_STOP. Invoked at most once per opened session, never for a
      * session that is not open -- a stray stop would tear down a Telegram or notification-reply

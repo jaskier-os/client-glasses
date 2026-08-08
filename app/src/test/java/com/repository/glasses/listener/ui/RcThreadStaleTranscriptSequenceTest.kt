@@ -6,6 +6,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
+ * A frozen instant.
+ *
+ * The suites in this file assert the discard COUNTING semantics, which are orthogonal to the
+ * deadline sweep [RcCapture] also performs. Holding one instant keeps every debt live for the
+ * whole scenario, so each test still means exactly what it was written to mean. Expiry has its
+ * own coverage in RcVoiceLifecycleTest.
+ */
+private const val T0 = 1_000_000L
+
+/**
  * Replays step 13b of `RcThreadInstrumentedTest` against the real [RcCapture] / [RcSendWindow],
  * driven through a model of MainActivity's key ladder.
  *
@@ -48,7 +58,7 @@ class RcThreadStaleTranscriptSequenceTest {
         /** NUMPAD_3: rcStartCapture, refused while the gate reads Busy. */
         fun hold() {
             if (capture.active || window.pending) return
-            capture.start()
+            capture.start(T0)
             voiceBarVisible = true
         }
 
@@ -66,7 +76,7 @@ class RcThreadStaleTranscriptSequenceTest {
             require(window.pending || capture.active) {
                 "this model only covers the undo arm of BACK; nothing was live to undo"
             }
-            capture.cancel()
+            capture.cancel(T0)
             window.cancel()
             countdownVisible = false
             voiceBarVisible = false
@@ -74,7 +84,7 @@ class RcThreadStaleTranscriptSequenceTest {
 
         /** userTextReceiver -> rcOnFinalTranscript, gated by the capture's identity. */
         fun finalTranscript(text: String) {
-            if (!capture.acceptTranscript()) return
+            if (!capture.acceptTranscript(T0)) return
             if (window.arm(text)) {
                 countdownVisible = true
                 voiceBarVisible = true

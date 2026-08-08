@@ -7,6 +7,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
+ * A frozen instant.
+ *
+ * The suites in this file assert the discard COUNTING semantics, which are orthogonal to the
+ * deadline sweep [RcCapture] also performs. Holding one instant keeps every debt live for the
+ * whole scenario, so each test still means exactly what it was written to mean. Expiry has its
+ * own coverage in RcVoiceLifecycleTest.
+ */
+private const val T0 = 1_000_000L
+
+/**
  * Every reason the microphone may or may not run inside an RC thread, and the whole life of the
  * 3 s send window, decided in one pure place.
  *
@@ -132,56 +142,56 @@ class RcVoiceGateTest {
         // its own, so the ONLY way to tell them apart is to count the abandoned ones. Without this,
         // words the user explicitly cancelled would arm the next capture's send window.
         val c = RcCapture()
-        c.start()
-        c.cancel()
-        c.start()
+        c.start(T0)
+        c.cancel(T0)
+        c.start(T0)
         assertTrue("a capture IS running", c.active)
-        assertFalse("but this transcript belongs to the abandoned one", c.acceptTranscript())
-        assertTrue("the next one is this capture's", c.acceptTranscript())
+        assertFalse("but this transcript belongs to the abandoned one", c.acceptTranscript(T0))
+        assertTrue("the next one is this capture's", c.acceptTranscript(T0))
     }
 
     @Test
     fun everyAbandonedCaptureSwallowsExactlyOneTranscript() {
         val c = RcCapture()
-        c.start(); c.cancel()
-        c.start(); c.cancel()
-        c.start()
-        assertFalse(c.acceptTranscript())
-        assertFalse(c.acceptTranscript())
-        assertTrue(c.acceptTranscript())
+        c.start(T0); c.cancel(T0)
+        c.start(T0); c.cancel(T0)
+        c.start(T0)
+        assertFalse(c.acceptTranscript(T0))
+        assertFalse(c.acceptTranscript(T0))
+        assertTrue(c.acceptTranscript(T0))
     }
 
     @Test
     fun aTranscriptArrivingWithNoCaptureRunningIsRefused() {
         val c = RcCapture()
-        assertFalse(c.acceptTranscript())
-        c.start()
-        assertTrue(c.acceptTranscript())
+        assertFalse(c.acceptTranscript(T0))
+        c.start(T0)
+        assertTrue(c.acceptTranscript(T0))
         assertFalse("the capture ended with that final; a duplicate must not be adopted",
-            c.acceptTranscript())
+            c.acceptTranscript(T0))
         assertFalse(c.active)
     }
 
     @Test
     fun acceptingATranscriptEndsTheCapture() {
         val c = RcCapture()
-        c.start()
+        c.start(T0)
         assertTrue(c.active)
-        c.acceptTranscript()
+        c.acceptTranscript(T0)
         assertFalse(c.active)
     }
 
     @Test
     fun cancelOnAnIdleCaptureIsANoOpAndOwesNoSwallow() {
         val c = RcCapture()
-        assertFalse(c.cancel())
-        c.start()
-        assertTrue(c.cancel())
+        assertFalse(c.cancel(T0))
+        c.start(T0)
+        assertTrue(c.cancel(T0))
         assertFalse("a second cancel of the same capture must not owe a second swallow",
-            c.cancel())
-        c.start()
-        assertFalse("exactly one transcript is owed", c.acceptTranscript())
-        assertTrue(c.acceptTranscript())
+            c.cancel(T0))
+        c.start(T0)
+        assertFalse("exactly one transcript is owed", c.acceptTranscript(T0))
+        assertTrue(c.acceptTranscript(T0))
     }
 
     @Test
@@ -189,18 +199,18 @@ class RcVoiceGateTest {
         // The watchdog gives up on a silent capture; if the phone then delivers late, that text is
         // still from the abandoned utterance.
         val c = RcCapture()
-        c.start()
-        assertTrue(c.cancel())
-        assertFalse(c.acceptTranscript())
+        c.start(T0)
+        assertTrue(c.cancel(T0))
+        assertFalse(c.acceptTranscript(T0))
     }
 
     @Test
     fun theSwallowDebtIsBoundedSoAThrashedCaptureCannotDeafenTheThreadForever() {
         val c = RcCapture()
-        repeat(RcCapture.MAX_PENDING_DISCARDS + 5) { c.start(); c.cancel() }
-        c.start()
+        repeat(RcCapture.MAX_PENDING_DISCARDS + 5) { c.start(T0); c.cancel(T0) }
+        c.start(T0)
         var swallowed = 0
-        while (!c.acceptTranscript()) {
+        while (!c.acceptTranscript(T0)) {
             swallowed++
             if (swallowed > 100) break
         }

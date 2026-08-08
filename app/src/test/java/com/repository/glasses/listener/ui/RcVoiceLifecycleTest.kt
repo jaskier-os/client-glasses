@@ -306,6 +306,37 @@ class RcVoiceLifecycleTest {
         )
     }
 
+    /**
+     * THE loop, walked at realistic speed rather than with a convenient gap.
+     *
+     * A debt is owed, the abandoned utterance is dropped phone-side so it is never paid, and the
+     * wearer reacts to "no speech" the way people actually do: re-hold almost immediately, speak
+     * briefly, and the phone's final lands a few seconds later. If the TTL outlasts that cycle,
+     * the debt eats a LEGITIMATE dictation -- whose capture then waits for a final it has already
+     * consumed, hangs to the 30 s watchdog, and the watchdog owes again. Forever, just slowly.
+     *
+     * Timings are the fastest realistic ones, because those are the ones that break it.
+     */
+    @Test
+    fun aDebtCannotEatTheDictationTheWearerMakesRightAfterIt() {
+        val r = Recorder()
+        r.lifecycle.start()
+        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
+
+        repeat(6) { round ->
+            r.elapse(2)          // the wearer reacts to "no speech" and re-holds
+            r.lifecycle.start()
+            r.elapse(4)          // a short utterance
+            r.elapse(2)          // the phone transcribes it
+            assertTrue(
+                "dictation ${round + 1} was eaten by a debt that outlived the re-hold cycle; " +
+                    "that capture then hangs to its watchdog, which owes again -- the loop, at a " +
+                    "slower cadence",
+                r.lifecycle.acceptTranscript()
+            )
+        }
+    }
+
     /** The expiry must not be so eager that it opens the race it exists to close. */
     @Test
     fun aDiscardIsStillOwedWithinTheRaceWindow() {

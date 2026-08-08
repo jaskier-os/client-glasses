@@ -487,6 +487,44 @@ class RcVoiceWiringTest {
         )
     }
 
+    /**
+     * The discard debt ages against a race running on the PHONE, which keeps transcribing while
+     * this device is suspended. uptimeMillis pauses in deep sleep, so a debt would return from a
+     * suspend with most of its life left and eat the wearer's next dictation.
+     */
+    @Test
+    fun theDiscardClockSurvivesDeviceSuspend() {
+        val src = read("ui/RcVoiceLifecycle.kt")
+        assertTrue(
+            "the discard clock must be elapsedRealtime; uptimeMillis pauses in deep sleep and " +
+                "the race it measures runs on the phone, which does not",
+            calls(src, "SystemClock.elapsedRealtime()")
+        )
+        assertTrue(
+            "uptimeMillis must not be the discard clock",
+            !calls(src, "SystemClock.uptimeMillis()")
+        )
+    }
+
+    /**
+     * The TTL is squeezed between two real latencies -- long enough to cover a late final, short
+     * enough not to eat the next dictation -- so the reasoning has to travel with the number.
+     */
+    @Test
+    fun theDiscardTtlDocumentsBothOfItsBounds() {
+        val src = read("ui/RcVoiceGate.kt")
+        val doc = src.substringBefore("const val DEFAULT_DISCARD_TTL_MS", "")
+            .substringAfterLast("/**", "")
+        assertTrue("DEFAULT_DISCARD_TTL_MS has no kdoc", doc.isNotBlank())
+        for (bound in listOf("LOWER BOUND", "UPPER BOUND")) {
+            assertTrue(
+                "the TTL's kdoc does not state its $bound; the number is only correct relative " +
+                    "to latencies a later reader cannot guess: $doc",
+                doc.contains(bound)
+            )
+        }
+    }
+
     // --- The countdown cannot outlive its view ---
 
     @Test

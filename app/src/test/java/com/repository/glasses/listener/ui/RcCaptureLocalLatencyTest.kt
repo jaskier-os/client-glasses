@@ -5,6 +5,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
+ * A frozen instant.
+ *
+ * The suites in this file assert the discard COUNTING semantics, which are orthogonal to the
+ * deadline sweep [RcCapture] also performs. Holding one instant keeps every debt live for the
+ * whole scenario, so each test still means exactly what it was written to mean. Expiry has its
+ * own coverage in RcVoiceLifecycleTest.
+ */
+private const val T0 = 1_000_000L
+
+/**
  * Plan task 4.5 -- the RC dictation ordering that on-glasses recognition changes.
  *
  * The existing gate was written against the REMOTE transcriber, where a final
@@ -28,11 +38,11 @@ class RcCaptureLocalLatencyTest {
     @Test
     fun aTranscriptArrivingBeforeTheStopIsAcceptedExactlyOnce() {
         val c = RcCapture()
-        c.start()
-        assertTrue("the running capture's own transcript must be accepted", c.acceptTranscript())
+        c.start(T0)
+        assertTrue("the running capture's own transcript must be accepted", c.acceptTranscript(T0))
         assertFalse(
             "a second delivery of the same final must not send the words twice",
-            c.acceptTranscript()
+            c.acceptTranscript(T0)
         )
     }
 
@@ -43,17 +53,17 @@ class RcCaptureLocalLatencyTest {
         // debt is paid by swallowing the NEXT dictation's transcript -- the
         // wearer speaks, sees nothing happen, and nothing is logged as wrong.
         val c = RcCapture()
-        c.start()
-        assertTrue(c.acceptTranscript())
+        c.start(T0)
+        assertTrue(c.acceptTranscript(T0))
 
         // The stop event lands afterwards. The capture is already finished, so
         // there is nothing left to abandon.
-        assertFalse("a completed capture must not be counted as abandoned", c.cancel())
+        assertFalse("a completed capture must not be counted as abandoned", c.cancel(T0))
 
-        c.start()
+        c.start(T0)
         assertTrue(
             "the next dictation must not be swallowed by a debt from the previous one",
-            c.acceptTranscript()
+            c.acceptTranscript(T0)
         )
     }
 
@@ -61,25 +71,25 @@ class RcCaptureLocalLatencyTest {
     fun theRemoteOrderingStillHolds() {
         // Stop first, transcript second: the original path, unchanged.
         val c = RcCapture()
-        c.start()
-        assertTrue(c.cancel())
-        assertFalse("an abandoned capture's transcript is still discarded", c.acceptTranscript())
+        c.start(T0)
+        assertTrue(c.cancel(T0))
+        assertFalse("an abandoned capture's transcript is still discarded", c.acceptTranscript(T0))
     }
 
     @Test
     fun aTranscriptWithNoCaptureRunningIsStillRefused() {
         // Faster local delivery must not become an excuse to accept a final that
         // belongs to no capture at all.
-        assertFalse(RcCapture().acceptTranscript())
+        assertFalse(RcCapture().acceptTranscript(T0))
     }
 
     @Test
     fun anAbandonedCaptureStillEatsExactlyOneLateTranscript() {
         val c = RcCapture()
-        c.start()
-        c.cancel()
-        c.start()
-        assertFalse("the abandoned capture's late final is discarded", c.acceptTranscript())
-        assertTrue("the new capture's own final is then accepted", c.acceptTranscript())
+        c.start(T0)
+        c.cancel(T0)
+        c.start(T0)
+        assertFalse("the abandoned capture's late final is discarded", c.acceptTranscript(T0))
+        assertTrue("the new capture's own final is then accepted", c.acceptTranscript(T0))
     }
 }
