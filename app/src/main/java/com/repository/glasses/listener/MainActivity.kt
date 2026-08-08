@@ -370,7 +370,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private lateinit var rcThreadRecycler: RecyclerView
     private lateinit var rcThreadAdapter: RcThreadAdapter
     private lateinit var rcThreadFooter: LinearLayout
-    private lateinit var rcThreadMicGlyph: TextView
+    private lateinit var rcThreadTapGlyph: ImageView
+    private lateinit var rcThreadMicGlyph: ImageView
     private lateinit var rcThreadFooterHint: TextView
     private lateinit var rcThreadVoiceBar: LinearLayout
     private lateinit var rcThreadVoiceText: TextView
@@ -3784,6 +3785,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             rcThreadSpinnerSlot = findViewById(R.id.rcThreadSpinnerSlot)
             rcThreadRecycler = findViewById(R.id.rcThreadRecycler)
             rcThreadFooter = findViewById(R.id.rcThreadFooter)
+            rcThreadTapGlyph = findViewById(R.id.rcThreadTapGlyph)
             rcThreadMicGlyph = findViewById(R.id.rcThreadMicGlyph)
             rcThreadFooterHint = findViewById(R.id.rcThreadFooterHint)
             rcThreadVoiceBar = findViewById(R.id.rcThreadVoiceBar)
@@ -7125,11 +7127,18 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
 
         rcThreadTitle.scaled(14f)
         rcThreadFolder.scaled(11f)
-        rcThreadMicGlyph.scaled(12f)
         rcThreadFooterHint.scaled(11f)
         rcThreadVoiceText.scaled(14f)
         rcThreadVoiceMicGlyph.scaled(12f)
         rcThreadCancelHint.scaled(10f)
+
+        // The footer glyphs are icons now, so they take a dp box rather than a text size. Scale
+        // them off the same setting anyway: left fixed, they shrink into insignificance beside
+        // 18sp text on the largest setting.
+        val glyphPx = (com.repository.glasses.listener.ui.ChatFontScale.sp(12f) * resources.displayMetrics.density).toInt()
+        for (v in listOf(rcThreadTapGlyph, rcThreadMicGlyph)) {
+            v.layoutParams = v.layoutParams.apply { width = glyphPx; height = glyphPx }
+        }
         rcThreadCountdownSecs.scaled(13f)
     }
 
@@ -7154,11 +7163,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // Voice states own the footer; the mic affordance is only shown when idle.
         val voiceBarUp = rcCapture.active || rcSendWindow.pending
         rcThreadFooter.visibility = if (voiceBarUp) View.GONE else View.VISIBLE
-        rcThreadMicGlyph.visibility = if (verdict.allowed) View.VISIBLE else View.GONE
-        // Always shown: allowed carries the instruction, every other verdict the reason. Hiding it
-        // when allowed left the mic glyph standing alone with no way to learn the gesture.
-        rcThreadFooterHint.text = verdict.hudText
-        rcThreadFooterHint.visibility = View.VISIBLE
+        // Allowed: the two icons ARE the instruction, so no sentence. Refused: the icons go and
+        // the reason takes their place -- the footer never shows both, and never shows neither.
+        val ready = verdict.allowed
+        rcThreadTapGlyph.visibility = if (ready) View.VISIBLE else View.GONE
+        rcThreadMicGlyph.visibility = if (ready) View.VISIBLE else View.GONE
+        rcThreadFooterHint.text = if (ready) "" else verdict.hudText
+        rcThreadFooterHint.visibility = if (ready) View.GONE else View.VISIBLE
     }
 
     private fun renderRcThreadRows() {

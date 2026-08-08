@@ -11,11 +11,11 @@ object RcVoiceGate {
 
     enum class Verdict(val allowed: Boolean, val hudText: String) {
         /**
-         * The only verdict carrying an instruction rather than a reason. A bare microphone glyph
-         * said dictation existed but not how to reach it, and since every refusal already prints
-         * something, an empty allowed state read as "nothing to do here".
+         * No words: the tap and mic icons in the footer are the instruction. Text here would
+         * duplicate them. Every OTHER verdict must say why, since a silently blocked tap leaves
+         * the user believing they dictated into their coding agent when nothing was captured.
          */
-        Allowed(true, "Tap to dictate"),
+        Allowed(true, ""),
 
         /** The phone's orchestrator link is down. Reading stale rows is fine, dictating is not. */
         Offline(false, "agent offline"),

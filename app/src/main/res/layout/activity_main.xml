@@ -275,14 +275,29 @@
                         android:focusable="false"
                         android:defaultFocusHighlightEnabled="false">
 
-                        <TextView
-                            android:id="@+id/rcThreadMicGlyph"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="[mic]"
-                            android:textColor="#008800"
-                            android:fontFamily="monospace"
+                        <!--
+                          Tap + mic, in the order the gesture happens: press the pad, then speak.
+                          Two icons say it without a sentence; the hint beside them is only used
+                          when dictation is REFUSED and a reason is owed.
+                        -->
+                        <ImageView
+                            android:id="@+id/rcThreadTapGlyph"
+                            android:layout_width="12dp"
+                            android:layout_height="12dp"
+                            android:src="@drawable/ic_tap"
                             android:background="#000000"
+                            android:contentDescription="Tap to dictate"
+                            android:focusable="false"
+                            android:defaultFocusHighlightEnabled="false" />
+
+                        <ImageView
+                            android:id="@+id/rcThreadMicGlyph"
+                            android:layout_width="12dp"
+                            android:layout_height="12dp"
+                            android:src="@drawable/ic_mic"
+                            android:background="#000000"
+                            android:layout_marginStart="5dp"
+                            android:contentDescription="dictate"
                             android:focusable="false"
                             android:defaultFocusHighlightEnabled="false" />
 
