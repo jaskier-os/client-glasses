@@ -100,7 +100,18 @@ class RcVoiceLifecycle(
      * @return true when a capture was actually cancelled.
      */
     fun cancelCapture(exit: Exit): Boolean {
-        val was = capture.cancel()
+        // The WATCHDOG owes no discard. Every other cancel abandons a capture whose transcript may
+        // still be in flight, so a debt is right. The watchdog fires precisely BECAUSE no
+        // transcript arrived in 30 s -- there is nothing left to discard, and owing anyway made
+        // the debt self-sustaining: a debt eats a dictation, the eaten capture stays live (its own
+        // final was consumed) until the watchdog, the watchdog owes a fresh debt, and the next
+        // dictation is eaten too. The debt oscillated 1 -> 0 -> 1 forever and the thread went
+        // permanently deaf, with MAX_PENDING_DISCARDS never engaging because it never grew.
+        val was = if (exit == Exit.WATCHDOG) {
+            capture.active.also { capture.cancelSilently() }
+        } else {
+            capture.cancel()
+        }
         // Cleared alongside: a cancel that left a pending send behind would keep the countdown
         // running over a dictation the user just abandoned.
         window.cancel()

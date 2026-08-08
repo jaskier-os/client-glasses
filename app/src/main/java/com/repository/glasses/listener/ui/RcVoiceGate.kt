@@ -113,6 +113,9 @@ class RcCapture {
     fun acceptTranscript(): Boolean {
         if (owedDiscards > 0) {
             owedDiscards--
+            // The running capture stays ACTIVE. It is a different capture from the abandoned one
+            // whose final this was, and its own final is still to come -- so tearing it down here
+            // would deafen a capture the wearer is actively speaking into.
             return false
         }
         if (!active) return false

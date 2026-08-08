@@ -1429,8 +1429,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                     if (rcVoice.acceptTranscript()) {
                         rcOnFinalTranscript(text)
                     } else {
+                        // The chrome deliberately STAYS UP. This final belonged to an abandoned
+                        // capture, not to the one the wearer is speaking into right now, whose own
+                        // final is still to come. Tearing down here would deafen a live dictation.
+                        // If no final ever arrives, the watchdog ends it -- and the watchdog owes
+                        // no discard, so it cannot start a debt that eats the next one.
                         uiLog("RC: dropped a transcript from an abandoned capture " +
-                            "('${text.take(20)}')")
+                            "('${text.take(20)}'); the running capture keeps listening")
                     }
                     return@runOnUiThread
                 }

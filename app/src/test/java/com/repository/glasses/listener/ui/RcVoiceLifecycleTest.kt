@@ -228,11 +228,89 @@ class RcVoiceLifecycleTest {
                 "would be sent to the coding agent, which would act on them",
             r.lifecycle.acceptTranscript()
         )
-        // The wearer's own words, arriving next, are still theirs to send.
+        // The debt is paid exactly once. The capture that paid it is still live -- its own final
+        // is what arrives next -- and that one is the wearer's to send.
         assertTrue(
-            "the debt must be paid exactly once, not latch and swallow every later dictation",
+            "the debt must be paid exactly once, not swallow every later dictation",
             r.lifecycle.acceptTranscript()
         )
+    }
+
+    /**
+     * Paying a debt must also END the capture that was running.
+     *
+     * The wire delivers exactly ONE final per utterance, so a capture whose final was consumed to
+     * pay a debt will never receive another. Leaving it active hangs the recording UI until the
+     * watchdog fires -- and the watchdog cancels, which owes a FRESH discard, which eats the next
+     * dictation, which re-arms the watchdog. The debt oscillates 1 -> 0 -> 1 forever and the thread
+     * is permanently deaf; MAX_PENDING_DISCARDS never engages because the debt never grows.
+     *
+     * This walks that loop for real: one dictation per round, one final per dictation, as the wire
+     * actually behaves.
+     */
+    @Test
+    fun theDiscardDebtDoesNotSustainItselfAcrossDictations() {
+        val r = Recorder()
+        r.lifecycle.start()
+        r.lifecycle.forgetCaptureWithoutStopping()
+
+        // The wearer returns and dictates. The debt eats this final -- correctly: it might be the
+        // foreign one. But no SECOND final is coming for this capture (the handover's transcript
+        // never arrived), so it sits active until the watchdog gives up.
+        r.lifecycle.start()
+        assertFalse(r.lifecycle.acceptTranscript())
+        assertTrue("the capture is still live, waiting for a final that will not come",
+            r.lifecycle.active)
+        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
+
+        // THE LOOP. If the watchdog owed a discard, that debt would eat the next dictation, whose
+        // capture would then hang until the watchdog, which would owe again -- forever, with the
+        // debt oscillating 1 -> 0 -> 1 so MAX_PENDING_DISCARDS never engages. Every dictation from
+        // here must land.
+        repeat(5) { round ->
+            r.lifecycle.start()
+            assertTrue(
+                "dictation ${round + 2} was swallowed; the discard debt is self-sustaining and " +
+                    "the thread is permanently deaf",
+                r.lifecycle.acceptTranscript()
+            )
+            r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
+        }
+    }
+
+    /**
+     * The watchdog specifically owes nothing: it fires BECAUSE no transcript arrived, so there is
+     * none in flight to discard. Every other cancel still owes one -- that distinction is the
+     * whole defence against an abandoned capture's words being sent by the next one.
+     */
+    @Test
+    fun theWatchdogOwesNoDiscardButEveryOtherCancelDoes() {
+        val watchdog = Recorder()
+        watchdog.lifecycle.start()
+        watchdog.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
+        watchdog.lifecycle.start()
+        assertTrue(
+            "a watchdog timeout must not cost the wearer their next dictation: nothing was in " +
+                "flight to discard, which is exactly why it fired",
+            watchdog.lifecycle.acceptTranscript()
+        )
+
+        for (exit in RcVoiceLifecycle.Exit.values().filter {
+            it != RcVoiceLifecycle.Exit.WATCHDOG &&
+                it != RcVoiceLifecycle.Exit.FINAL_TRANSCRIPT &&
+                it != RcVoiceLifecycle.Exit.SEND_COMMIT &&
+                it != RcVoiceLifecycle.Exit.SEND_WITHDRAWN
+        }) {
+            val r = Recorder()
+            r.lifecycle.start()
+            r.lifecycle.cancelCapture(exit)
+            r.lifecycle.start()
+            assertFalse(
+                "$exit abandoned a capture whose transcript may still be in flight; without a " +
+                    "discard those words would be sent as the NEXT capture's message",
+                r.lifecycle.acceptTranscript()
+            )
+        }
     }
 
     /** A genuine abandonment still owes its discard -- the distinction must not be flattened. */
