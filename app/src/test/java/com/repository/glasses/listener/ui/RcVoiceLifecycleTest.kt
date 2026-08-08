@@ -203,24 +203,34 @@ class RcVoiceLifecycleTest {
     }
 
     /**
-     * Handing the microphone over must NOT owe a discard.
+     * Handing the microphone over MUST owe a discard, even though it costs a spurious drop.
      *
-     * The new owner's transcript is routed by focus state and never passes through
-     * acceptTranscript(), so a debt taken here is never paid by the utterance that caused it --
-     * it is paid by the wearer's NEXT legitimate dictation, which is then dropped as "a transcript
-     * from an abandoned capture", hanging the voice bar until the watchdog gives up.
+     * The new owner's final carries the same wire id as ours and is routed by FOCUS, not by owner.
+     * If the wearer leaves the reply and returns to the thread before it lands, an unpaid handover
+     * means it is delivered into the running RC capture and adopted -- the notification reply's
+     * words sent to a coding agent that will act on them, with no way to take them back.
+     *
+     * The debt makes that impossible, at the price of dropping one dictation in the case where the
+     * foreign transcript never arrives. A dictation the wearer repeats is the recoverable failure;
+     * a message they never addressed to the agent being executed by it is not.
      */
     @Test
-    fun forgettingACaptureDoesNotOweADiscardAgainstTheNextDictation() {
+    fun aForeignTranscriptCannotBeAdoptedByTheNextRcCapture() {
         val r = Recorder()
         r.lifecycle.start()
+        // Another feature takes the microphone; our capture is handed over.
         r.lifecycle.forgetCaptureWithoutStopping()
-
-        // The wearer comes back and dictates again.
+        // The wearer returns to the thread and starts a new dictation...
         r.lifecycle.start()
+        // ...and the OTHER feature's final lands first.
+        assertFalse(
+            "the foreign transcript was adopted by this capture; the other feature's words " +
+                "would be sent to the coding agent, which would act on them",
+            r.lifecycle.acceptTranscript()
+        )
+        // The wearer's own words, arriving next, are still theirs to send.
         assertTrue(
-            "the next dictation's own transcript was thrown away to pay a debt the handover " +
-                "should never have taken",
+            "the debt must be paid exactly once, not latch and swallow every later dictation",
             r.lifecycle.acceptTranscript()
         )
     }

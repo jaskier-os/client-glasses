@@ -145,12 +145,19 @@ class RcVoiceLifecycle(
      * leave the session to its new owner, who will close it.
      */
     fun forgetCaptureWithoutStopping() {
-        // cancelSilently, NOT cancel: a cancel owes a discard, and nothing here will ever pay it.
-        // The new owner's transcript is routed by focus state and never passes through
-        // acceptTranscript(), so the debt would instead be paid by the wearer's NEXT legitimate RC
-        // dictation -- which would be dropped as "a transcript from an abandoned capture", hang
-        // the voice bar, and cost them another watchdog timeout.
-        capture.cancelSilently()
+        // cancel(), which OWES a discard -- deliberately, and after getting this wrong in both
+        // directions.
+        //
+        // The new owner's final carries the same "tg_voice" id as ours and is routed by FOCUS, not
+        // by owner. So if the wearer leaves the reply and returns to the thread before it lands,
+        // it is delivered into whatever RC capture is running and, without a debt, adopted: the
+        // notification reply's words are sent to a coding agent that will act on them.
+        //
+        // The debt costs one spurious drop in the case where the foreign transcript never arrives.
+        // That is a dictation the wearer repeats. The alternative is words they never addressed to
+        // the agent being executed by it, which they cannot take back. The recoverable failure is
+        // the correct one to choose.
+        capture.cancel()
         window.cancel()
         voiceSessionOpen = false
     }

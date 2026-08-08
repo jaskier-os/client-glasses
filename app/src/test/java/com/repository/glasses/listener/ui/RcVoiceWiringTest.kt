@@ -457,6 +457,20 @@ class RcVoiceWiringTest {
             "the 'dictating' argument must come from the chat's actual service state: $call",
             call.contains("serviceState")
         )
+        // ...and the ANSWER must actually decide. Re-testing serviceState in the `if` alongside
+        // the action makes the guard strictly stronger than the table, so the table is masked and
+        // the call folds to a constant again -- which is what the first attempt at this fix did:
+        // it changed the argument text and nothing else. (Caught by audit round 6.)
+        val guard = chat.substringAfter("== DictationUx.TapAction.START", "")
+            .let { chat.substringBefore("== DictationUx.TapAction.START", "") }
+            .substringAfterLast("if (", "")
+        assertTrue("could not locate the guard around the table's answer: $chat", guard.isNotBlank())
+        assertTrue(
+            "the table's answer is combined with a separate serviceState test, which is stronger " +
+                "than the table itself; the answer is masked and the sharing is decorative: " +
+                "if ($guard== START)",
+            !guard.contains("serviceState")
+        )
     }
 
     /**

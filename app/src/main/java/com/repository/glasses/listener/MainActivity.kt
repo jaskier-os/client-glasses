@@ -9035,19 +9035,21 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         // single tap in CHAT_FOCUSED previously did nothing at all, and the double
                         // tap that leaves for TAB_NAV is handled above and unchanged.
                         //
+                        // The shared table is the SOLE decider here. It was previously called with
+                        // literals (a compile-time constant), and then with real state but behind
+                        // an `if (serviceState == "IDLE")` that was strictly stronger -- so the
+                        // answer was masked either way and the "sharing" was decorative.
                         //
-                        // The decision goes through the SHARED table with the chat's REAL state,
-                        // not with constants: while the service is LISTENING the wearer is already
-                        // dictating, and while the pre-send bar is up a transcript is pending --
-                        // both of which the table answers IGNORE for, exactly as in a thread.
-                        // (Passing literals here made the call a compile-time constant and the
-                        // shared table decorative.)
+                        // `dictating` means "a session already owns the microphone", which on this
+                        // surface is LISTENING or RESPONDING: the wearer is mid-utterance, or the
+                        // assistant is still speaking. Both answer IGNORE, exactly as a running
+                        // capture does inside a thread.
                         val action = DictationUx.onTap(
-                            dictating = serviceState == "LISTENING",
+                            dictating = serviceState != "IDLE",
                             sendPending = chatSendCountdown?.visibility == View.VISIBLE,
                             doubleTap = false,
                         )
-                        if (serviceState == "IDLE" && action == DictationUx.TapAction.START) {
+                        if (action == DictationUx.TapAction.START) {
                             // DEFERRED past the double-tap window: firing immediately would start
                             // a dictation on the first half of the leave-to-TAB_NAV gesture.
                             runAfterTapWindow(Runnable {
