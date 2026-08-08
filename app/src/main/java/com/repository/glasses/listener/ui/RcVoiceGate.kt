@@ -93,6 +93,17 @@ class RcCapture {
     }
 
     /**
+     * Ends the capture WITHOUT owing a discard.
+     *
+     * Used when the capture's own final has arrived: the transcript this capture was going to
+     * produce is the one in hand, so there is no later one to discard. Owing a discard here would
+     * make the NEXT capture's legitimate transcript be thrown away.
+     */
+    fun cancelSilently() {
+        active = false
+    }
+
+    /**
      * A final transcript arrived.
      *
      * @return true when it belongs to the capture that is running -- and therefore may be sent.

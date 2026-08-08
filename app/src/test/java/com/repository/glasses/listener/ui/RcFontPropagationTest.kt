@@ -160,11 +160,40 @@ class RcFontPropagationTest {
             "rcThreadFooterHint",
             "rcThreadVoiceText",
             "rcThreadVoiceMicGlyph",
-            "rcThreadCancelHint",
-            "rcThreadCountdownSecs",
+            // The countdown's own hint and seconds label moved into SendCountdownBar, which is
+            // shared with the AI chat. MainActivity must still poke it, and BOTH instances of it.
+            "rcSendCountdown",
+            "chatSendCountdown",
         ).forEach { view ->
             assertTrue("applyRcThreadFontSizes does not size $view", fn.contains(view))
         }
+        assertTrue(
+            "the shared countdown bar must be re-scaled through applyFontScale(), not by " +
+                "MainActivity reaching into its children",
+            fn.contains("applyFontScale()")
+        )
+    }
+
+    /**
+     * The shared countdown bar sizes its OWN text, off the same [ChatFontScale] everything else
+     * uses. A hard-coded sp there would strand it at one size while the rest of the chrome scaled.
+     */
+    @Test
+    fun `the shared countdown bar scales its own text off ChatFontScale`() {
+        val bar = read("ui/SendCountdownBar.kt")
+        val fn = bar
+            .substringAfter("fun applyFontScale()", "")
+            .substringBefore("\n    /**", "")
+        assertTrue("SendCountdownBar has no applyFontScale()", fn.isNotBlank() && fn.length < 800)
+        assertTrue(
+            "applyFontScale must route both labels through ChatFontScale.sp: $fn",
+            Regex("ChatFontScale\\.sp").findAll(fn).count() >= 2
+        )
+        assertTrue(
+            "SendCountdownBar must not hard-code a text size in sp units outside applyFontScale",
+            !bar.substringBefore("fun applyFontScale()")
+                .contains("COMPLEX_UNIT_SP")
+        )
     }
 
     /**

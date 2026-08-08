@@ -360,64 +360,16 @@
 
                         </LinearLayout>
 
-                        <!-- Draining countdown bar: the fill sits INSIDE the track, so the two are
-                             one 2dp line whose lit portion shrinks - not two stacked lines. -->
-                        <FrameLayout
-                            android:id="@+id/rcThreadCountdownTrack"
-                            android:layout_width="match_parent"
-                            android:layout_height="2dp"
-                            android:layout_marginTop="9dp"
-                            android:background="#004400"
-                            android:visibility="gone"
-                            android:focusable="false"
-                            android:defaultFocusHighlightEnabled="false">
-
-                            <View
-                                android:id="@+id/rcThreadCountdownFill"
-                                android:layout_width="match_parent"
-                                android:layout_height="2dp"
-                                android:background="#00FF00"
-                                android:focusable="false"
-                                android:defaultFocusHighlightEnabled="false" />
-
-                        </FrameLayout>
-
-                        <LinearLayout
-                            android:id="@+id/rcThreadCountdownRow"
+                        <!-- The 3s withdraw countdown. The SAME view class the AI chat shows over
+                             its pre-send preview, so the two dictation surfaces are one thing
+                             rather than two lookalikes that drift. -->
+                        <com.repository.glasses.listener.ui.SendCountdownBar
+                            android:id="@+id/rcThreadSendCountdown"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:orientation="horizontal"
-                            android:gravity="center_vertical"
-                            android:background="#000000"
-                            android:paddingTop="6dp"
                             android:visibility="gone"
                             android:focusable="false"
-                            android:defaultFocusHighlightEnabled="false">
-
-                            <TextView
-                                android:id="@+id/rcThreadCancelHint"
-                                android:layout_width="0dp"
-                                android:layout_weight="1"
-                                android:layout_height="wrap_content"
-                                android:text="DOUBLE-TAP TO CANCEL"
-                                android:textColor="#008800"
-                                android:fontFamily="monospace"
-                                android:letterSpacing="0.18"
-                                android:background="#000000"
-                                android:focusable="false"
-                                android:defaultFocusHighlightEnabled="false" />
-
-                            <TextView
-                                android:id="@+id/rcThreadCountdownSecs"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:textColor="#00FF00"
-                                android:fontFamily="monospace"
-                                android:background="#000000"
-                                android:focusable="false"
-                                android:defaultFocusHighlightEnabled="false" />
-
-                        </LinearLayout>
+                            android:defaultFocusHighlightEnabled="false" />
 
                     </LinearLayout>
 

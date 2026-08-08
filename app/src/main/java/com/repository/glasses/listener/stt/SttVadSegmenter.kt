@@ -295,6 +295,38 @@ class SttVadSegmenter {
             b.copyInto(out, off)
             off += b.size
         }
+        // MEASURED, not inferred. An utterance that transcribes to nothing is either silence the
+        // VAD should not have emitted or speech the model failed on, and those have completely
+        // different fixes. Printing the peak and RMS of the exact samples handed to the recogniser
+        // settles it from the log alone -- the live incident could not, and cost a whole round of
+        // debugging aimed at the wrong layer.
+        t("vad segment levels ${levels(out)}")
         return Segment(out, naturalEnd)
+    }
+
+    /**
+     * Peak and RMS of an utterance, both raw and after [MIC_GAIN] -- the raw pair says what the
+     * microphone actually delivered, the gained pair says what the model saw.
+     */
+    internal fun levels(pcm: ShortArray): String {
+        if (pcm.isEmpty()) return "samples=0 (empty)"
+        var peak = 0
+        var sumSq = 0.0
+        for (s in pcm) {
+            val a = if (s.toInt() == Short.MIN_VALUE.toInt()) 32768 else kotlin.math.abs(s.toInt())
+            if (a > peak) peak = a
+            val v = s.toFloat() / 32768.0f
+            sumSq += (v * v).toDouble()
+        }
+        val rms = sqrt(sumSq / pcm.size).toFloat()
+        val peakF = peak / 32768.0f
+        // Gain is applied to the MEASUREMENT, clipped exactly as accept() clips it, so the two
+        // numbers describe the same signal the threshold was compared against.
+        val gainedPeak = minOf(1.0f, peakF * MIC_GAIN)
+        val gainedRms = minOf(1.0f, rms * MIC_GAIN)
+        return "samples=${pcm.size} (${pcm.size * 1000 / SAMPLE_RATE}ms) " +
+            "peak=${"%.5f".format(peakF)} rms=${"%.5f".format(rms)} " +
+            "gainedPeak=${"%.5f".format(gainedPeak)} gainedRms=${"%.5f".format(gainedRms)} " +
+            "threshold=${"%.5f".format(threshold)}"
     }
 }

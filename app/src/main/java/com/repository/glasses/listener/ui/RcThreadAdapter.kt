@@ -8,9 +8,11 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
+import com.repository.glasses.listener.R
 
 /**
  * Renders an RC thread: the agent's prose, the user's messages, a glyph and a count for each tool
@@ -23,6 +25,7 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
 
     companion object {
         const val TAG_TOOL_COLLAPSE = "rc_tool_collapse"
+        const val TAG_TOOL_ICON = "rc_tool_icon"
         const val TAG_PROMPT_BOX = "rc_prompt_box"
         const val TAG_PROMPT_OPTION = "rc_prompt_option"
         const val TAG_EARLIER = "rc_earlier"
@@ -53,6 +56,8 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
         val designSp: Float,
         /** Prompt rows only: the vertical option list the DPAD walks. */
         val options: LinearLayout? = null,
+        /** Tool rows only: the wrench glyph beside the count. */
+        val toolIcon: ImageView? = null,
     ) : RecyclerView.ViewHolder(container)
 
     private var items: List<RcThreadItem> = emptyList()
@@ -101,6 +106,7 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
 
         val container: ViewGroup
         var options: LinearLayout? = null
+        var toolIcon: ImageView? = null
         // The size each row type is drawn at in the sketch. Recorded, not applied: the actual
         // setTextSize happens at bind so a live setting change reaches existing holders.
         val designSp: Float
@@ -131,11 +137,30 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
                 text.apply {
                     tag = TAG_TOOL_COLLAPSE
                     setTextColor(Lum.DIM)
-                    setPadding(2.dpToPx(), 3.dpToPx(), 2.dpToPx(), 3.dpToPx())
+                    setPadding(0, 3.dpToPx(), 2.dpToPx(), 3.dpToPx())
                 }
-                container = FrameLayout(ctx).apply {
+                // Icon beside text, the same ImageView + TextView pairing the RC session rows use
+                // (ChatListAdapter's desktopIcon + title), so the two surfaces stay consistent.
+                toolIcon = ImageView(ctx).apply {
+                    tag = TAG_TOOL_ICON
+                    setImageResource(R.drawable.ic_tool)
+                    setColorFilter(Lum.DIM)
                     setBackgroundColor(Lum.VOID)
-                    addView(text)
+                }
+                container = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setBackgroundColor(Lum.VOID)
+                    setPadding(2.dpToPx(), 0, 0, 0)
+                    // Sized at bind off ChatFontScale, not fixed here: a 10dp icon vanishes beside
+                    // 18sp text once the wearer turns the font up.
+                    addView(toolIcon, LinearLayout.LayoutParams(0, 0).apply {
+                        marginEnd = 5.dpToPx()
+                    })
+                    addView(text, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ))
                 }
             }
             TYPE_PROMPT -> {
@@ -197,7 +222,7 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { bottomMargin = 11.dpToPx() }
-        return Holder(container, text, designSp, options)
+        return Holder(container, text, designSp, options, toolIcon)
     }
 
     override fun onBindViewHolder(holder: Holder, position: Int) {
@@ -211,8 +236,16 @@ class RcThreadAdapter : RecyclerView.Adapter<RcThreadAdapter.Holder>() {
 
         when (row.role) {
             RcThreadModel.ROLE_TOOLS -> {
-                // Glyph + count, exactly as the sketch: the names are on the phone.
-                holder.text.text = ">> ${row.toolCount}"
+                // Icon + a sentence, not a bare chevron and a number: the number alone taught
+                // nobody what it counted. The names of the tools stay on the phone.
+                holder.text.text = RcToolLabel.of(row.toolCount)
+                holder.toolIcon?.let { icon ->
+                    // Scaled off the same ChatFontScale the text uses, so the glyph tracks the
+                    // wearer's font setting instead of shrinking away beside it.
+                    val px = (ChatFontScale.sp(holder.designSp) *
+                        Resources.getSystem().displayMetrics.density).toInt()
+                    icon.layoutParams = icon.layoutParams.apply { width = px; height = px }
+                }
             }
             RcThreadModel.ROLE_PROMPT -> {
                 holder.text.text = row.text

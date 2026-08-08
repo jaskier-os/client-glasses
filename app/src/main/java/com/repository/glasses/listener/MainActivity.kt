@@ -63,11 +63,13 @@ import com.repository.glasses.listener.ui.ChatRow
 import com.repository.glasses.listener.ui.ChatMessage
 import com.repository.glasses.listener.ui.ChatSummaryItem
 import com.repository.glasses.listener.ui.Lum
-import com.repository.glasses.listener.ui.RcCapture
+import com.repository.glasses.listener.ui.DictationUx
+import com.repository.glasses.listener.ui.RcCountdownLabel
 import com.repository.glasses.listener.ui.RcSendWindow
 import com.repository.glasses.listener.ui.RcThreadAdapter
 import com.repository.glasses.listener.ui.RcThreadModel
 import com.repository.glasses.listener.ui.RcVoiceGate
+import com.repository.glasses.listener.ui.RcVoiceLifecycle
 import com.repository.glasses.listener.ui.SpinnerView
 import com.repository.glasses.listener.ui.TabHighlightView
 import com.repository.glasses.listener.ui.VerticalHighlightView
@@ -105,6 +107,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
 
     companion object {
         private const val TAG = "MainActivityUI"
+
+        /**
+         * The status line shown while dictating. ONE constant, because the AI chat and the RC
+         * thread must read identically -- two literals is how they drift.
+         */
+        const val LISTENING_STATUS_TEXT = "Listening..."
+
         private const val FOLD_LEG_ACTION = "com.rokid.sprite.ACTION_LEG_STATUS_CHANGED"
         private const val DOUBLE_TAP_THRESHOLD_MS = 400L
         // Pre-daemon the stock touchpad fired one event per swipe so we
@@ -376,15 +385,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private lateinit var rcThreadVoiceBar: LinearLayout
     private lateinit var rcThreadVoiceText: TextView
     private lateinit var rcThreadVoiceMeter: LinearLayout
-    /** The level meter shown while capturing. The same view the Telegram voice path uses. */
-    private var rcVoiceVisualizer: com.repository.glasses.listener.ui.AudioVisualizerView? = null
-    private var rcVoiceLevelsReceiver: BroadcastReceiver? = null
-    private lateinit var rcThreadCountdownTrack: View
-    private lateinit var rcThreadCountdownFill: View
-    private lateinit var rcThreadCountdownRow: LinearLayout
-    private lateinit var rcThreadCountdownSecs: TextView
     private lateinit var rcThreadVoiceMicGlyph: ImageView
-    private lateinit var rcThreadCancelHint: TextView
+
+    /** The 3 s withdraw countdown inside a thread. Same class as the AI chat's. */
+    private var rcSendCountdown: com.repository.glasses.listener.ui.SendCountdownBar? = null
 
     /** Merges CH_RC_MESSAGES_RESP frames. Empty until a session is opened. */
     private val rcThread = RcThreadModel()
@@ -392,16 +396,20 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     /** The session-list row the open thread belongs to, refreshed by every state push. */
     private var rcOpenSession: ChatRow.RcSession? = null
 
-    /** The 3 s undo between the transcript and the agent. A field, deliberately not a FocusState. */
-    private val rcSendWindow = RcSendWindow()
-    private var rcSendRunnable: Runnable? = null
-    private var rcSendTickRunnable: Runnable? = null
-
     /**
-     * Identity of the running dictation. A transcript that belongs to an abandoned capture is
-     * refused rather than adopted by whatever capture is running when it lands.
+     * The whole lifetime of an RC dictation: the capture identity, the 3 s undo window, and the
+     * phone-side voice session.
+     *
+     * The stop broadcast is emitted from HERE and nowhere else. It used to be hand-copied at each
+     * exit, and the send path never got its copy -- so after a send the microphone stayed up, the
+     * VAD ground room noise into empty transcripts, and the recording UI never wore off.
      */
-    private val rcCapture = RcCapture()
+    private val rcVoice = RcVoiceLifecycle { reason ->
+        uiLog("RC: voice session stop ($reason)")
+        sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_STOP).apply { setPackage(packageName) })
+    }
+    private var rcSendRunnable: Runnable? = null
+    private var rcSendAnimator: android.animation.ValueAnimator? = null
 
     /**
      * How long a capture may run with nothing coming back before it is abandoned. Generous, since
@@ -523,6 +531,12 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private var btConnected = true
     private var orchConnected = true
     private lateinit var contentFrame: FrameLayout
+
+    /**
+     * The 3 s withdraw countdown over the AI chat's pre-send preview. The SAME view class the RC
+     * thread uses, so the two dictation surfaces show the same thing rather than a lookalike.
+     */
+    private var chatSendCountdown: com.repository.glasses.listener.ui.SendCountdownBar? = null
     private lateinit var disconnectedOverlay: TextView
     // NotificationOverlay moved to ListenerService (WindowManager-based, activity-independent)
     private lateinit var timeText: TextView
@@ -953,6 +967,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         stopThinkingPulse()
                         hideDoubleTapHint()
                         hideAudioVisualizer()
+                        // The window is over one way or the other: withdrawn, sent, or cancelled.
+                        // A bar left draining over a dead session is the AI chat's version of the
+                        // "recording never wears off" defect.
+                        chatSendCountdown?.stop()
                         progressBar.visibility = View.GONE
                         uiLog("IDLE: before cleanup msgs=${chatAdapter.itemCount} roles=${chatAdapter.getMessages().map { "${it.role}:${it.requestId.take(8)}" }}")
                         // Clean ALL temporary messages
@@ -967,6 +985,9 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         stopTimer()
                         hideLoadingSpinner()
                         stopLoading()
+                        // A new dictation has begun; anything the previous one left pending is
+                        // already resolved phone-side.
+                        chatSendCountdown?.stop()
                         partialsSuppressed = false
                         progressBar.visibility = View.GONE
                         // Clean slate for new session
@@ -974,7 +995,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         chatAdapter.removeMessagesByRequestId("partial")
                         chatAdapter.removeMessagesByRequestId("pending")
                         statusArea.visibility = View.VISIBLE
-                        setStatus("Listening...", R.drawable.ic_mic, Lum.GLOW)
+                        setStatus(LISTENING_STATUS_TEXT, R.drawable.ic_mic, Lum.GLOW)
                         showDoubleTapHintPersistent()
                         showAudioVisualizer()
                         // Auto-focus chat when conversation starts
@@ -986,6 +1007,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                     }
                     "RESPONDING" -> {
                         hideAudioVisualizer()
+                        // The message left; there is nothing left to withdraw.
+                        chatSendCountdown?.stop()
                         chatAdapter.removeMessagesByRequestId("listening")
                         chatAdapter.removeMessagesByRequestId("partial")
                         stopLoading()
@@ -1341,7 +1364,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                     return@runOnUiThread
                 }
                 // RC dictation: the partial renders in the thread's voice bar.
-                if (focusState == FocusState.RC_THREAD_FOCUSED && rcCapture.active) {
+                if (focusState == FocusState.RC_THREAD_FOCUSED && rcVoice.active) {
                     if (text.isNotBlank()) rcThreadVoiceText.text = text
                     return@runOnUiThread
                 }
@@ -1380,7 +1403,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 // only for the capture that is actually running -- a transcript belonging to a
                 // cancelled one would otherwise be sent as this capture's message.
                 if (focusState == FocusState.RC_THREAD_FOCUSED && requestId == "tg_voice") {
-                    if (rcCapture.acceptTranscript()) {
+                    if (rcVoice.acceptTranscript()) {
                         rcOnFinalTranscript(text)
                     } else {
                         uiLog("RC: dropped a transcript from an abandoned capture " +
@@ -1416,6 +1439,12 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                     return@runOnUiThread
                 }
                 uiLog("UTXT: reqId=${requestId.take(8)} state=$serviceState msgs=${chatAdapter.itemCount} text='${text.take(40)}'")
+                // "pending" is the phone's pre-send preview: the transcript is final but the
+                // message has NOT left yet, and a double tap still withdraws it. That is the same
+                // moment the RC thread shows its countdown over, so the chat now shows the SAME
+                // bar ([SendCountdownBar]) instead of leaving the wearer to guess. A real
+                // requestId means the message is already gone -- the bar comes down.
+                if (requestId == "pending") chatSendCountdown?.start() else chatSendCountdown?.stop()
                 // Always display user text -- phone manages state and only sends valid messages.
                 hideAudioVisualizer()
                 stopLoading()
@@ -1951,12 +1980,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * one. Busy is excluded because that verdict IS the in-flight voice itself.
      */
     private fun rcAbortVoiceIfNoLongerAllowed() {
-        if (!rcCapture.active && !rcSendWindow.pending) return
+        if (!rcVoice.busy) return
         val verdict = rcVoiceVerdict()
         if (verdict.allowed || verdict == RcVoiceGate.Verdict.Busy) return
         uiLog("RC: voice aborted mid-flight (${verdict.name})")
-        rcCancelCapture()
-        rcClearSendWindow()
+        rcCancelCapture(RcVoiceLifecycle.Exit.ABORTED)
         dbg(verdict.hudText)
     }
 
@@ -3790,12 +3818,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             rcThreadVoiceBar = findViewById(R.id.rcThreadVoiceBar)
             rcThreadVoiceText = findViewById(R.id.rcThreadVoiceText)
             rcThreadVoiceMeter = findViewById(R.id.rcThreadVoiceMeter)
-            rcThreadCountdownTrack = findViewById(R.id.rcThreadCountdownTrack)
-            rcThreadCountdownFill = findViewById(R.id.rcThreadCountdownFill)
-            rcThreadCountdownRow = findViewById(R.id.rcThreadCountdownRow)
-            rcThreadCountdownSecs = findViewById(R.id.rcThreadCountdownSecs)
+            rcSendCountdown = findViewById(R.id.rcThreadSendCountdown)
             rcThreadVoiceMicGlyph = findViewById(R.id.rcThreadVoiceMicGlyph)
-            rcThreadCancelHint = findViewById(R.id.rcThreadCancelHint)
             // The RC thread chrome carries no android:textSize; an XML size is frozen at inflate
             // and would ignore every later change to the wearer's setting. Sized here instead.
             applyRcThreadFontSizes()
@@ -3850,6 +3874,14 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             tpStopButton = findViewById(R.id.tpStopButton)
             contentFrame = findViewById<FrameLayout>(R.id.contentFrame)
             loaderCtl = TabLoaderController(this, contentFrame) { currentTabId }
+            // Pinned to the bottom of the chat content, where the wearer's eye already is while
+            // their own words are being previewed.
+            chatSendCountdown = com.repository.glasses.listener.ui.SendCountdownBar(this).also {
+                contentFrame.addView(it, FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                ).apply { gravity = android.view.Gravity.BOTTOM })
+            }
             disconnectedOverlay = findViewById(R.id.disconnectedOverlay)
             tabChat = findViewById(R.id.tabChat)
             tabChatList = findViewById(R.id.tabChatList)
@@ -7066,8 +7098,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * nobody is looking at -- without it they keep flowing forever.
      */
     private fun closeRcThread(returnToList: Boolean = true) {
-        rcCancelCapture()
-        rcClearSendWindow()
+        // One call: rcCancelCapture also drops any pending send and closes the voice session.
+        rcCancelCapture(RcVoiceLifecycle.Exit.THREAD_CLOSED)
         rcThread.close()
         rcOpenSession = null
         rcThreadAdapter.submit(emptyList())
@@ -7101,8 +7133,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             // Awaiting-reply, not still-answerable: answering does not unblock the session, so the
             // mic stays refused across the round trip rather than re-opening on the confirm.
             blockingPrompt = rcThread.promptAwaitingReply(),
-            capturing = rcCapture.active,
-            sendPending = rcSendWindow.pending,
+            capturing = rcVoice.active,
+            sendPending = rcVoice.pending,
             sendInFlight = rcSendInFlight,
         )
     }
@@ -7128,7 +7160,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         rcThreadFolder.scaled(11f)
         rcThreadFooterHint.scaled(11f)
         rcThreadVoiceText.scaled(14f)
-        rcThreadCancelHint.scaled(10f)
 
         // The footer glyphs are icons now, so they take a dp box rather than a text size. Scale
         // them off the same setting anyway: left fixed, they shrink into insignificance beside
@@ -7137,7 +7168,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         for (v in listOf(rcThreadMicGlyph, rcThreadVoiceMicGlyph)) {
             v.layoutParams = v.layoutParams.apply { width = glyphPx; height = glyphPx }
         }
-        rcThreadCountdownSecs.scaled(13f)
+        // The countdown bar owns its own two text sizes; it is a shared component, so its scaling
+        // must not be re-implemented per surface.
+        rcSendCountdown?.applyFontScale()
+        chatSendCountdown?.applyFontScale()
     }
 
     /** Header, spinner and footer. The mic affordance is absent whenever voice is refused. */
@@ -7159,7 +7193,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
 
         val verdict = rcVoiceVerdict()
         // Voice states own the footer; the mic affordance is only shown when idle.
-        val voiceBarUp = rcCapture.active || rcSendWindow.pending
+        val voiceBarUp = rcVoice.busy
         rcThreadFooter.visibility = if (voiceBarUp) View.GONE else View.VISIBLE
         // Allowed: icons plus the instruction, worded exactly as a Telegram chat words it.
         // Refused: the icons go and the reason takes the same line. Always exactly one message.
@@ -7191,7 +7225,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             renderRcThreadChrome()
             return
         }
-        rcCapture.start()
+        rcVoice.start()
         rcThreadVoiceText.text = ""
         // GLOW while speaking, per the sketch; the send window re-tints it as the user's bubble.
         rcThreadVoiceText.setTextColor(Lum.GLOW)
@@ -7199,7 +7233,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         rcThreadVoiceText.background = null
         rcThreadVoiceText.setPadding(0, 0, 0, 0)
         rcThreadVoiceBar.visibility = View.VISIBLE
-        rcShowVoiceMeter(true)
+        rcShowListeningChrome(true)
         rcShowCountdown(false)
         renderRcThreadChrome()
         // The existing dictation pipeline, unchanged: glasses mic -> phone STT -> final user text.
@@ -7221,9 +7255,9 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         rcClearCaptureWatchdog()
         val r = Runnable {
             rcCaptureWatchdog = null
-            if (!rcCapture.active) return@Runnable
+            if (!rcVoice.active) return@Runnable
             uiLog("RC: capture produced nothing within ${RC_CAPTURE_TIMEOUT_MS}ms -> giving up")
-            rcCancelCapture()
+            rcCancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
             dbg("no speech")
             renderRcThreadChrome()
         }
@@ -7236,16 +7270,22 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         rcCaptureWatchdog = null
     }
 
-    /** Stops a capture without sending. Safe to call when none is running. */
-    private fun rcCancelCapture() {
+    /**
+     * Stops a capture without sending. Safe to call when none is running.
+     *
+     * The ACTION_RC_VOICE_STOP is NOT broadcast here: [rcVoice] owns it, so every exit closes the
+     * phone-side session the same way and none of them can be the one that forgets.
+     */
+    private fun rcCancelCapture(exit: RcVoiceLifecycle.Exit = RcVoiceLifecycle.Exit.CANCEL) {
         rcClearCaptureWatchdog()
-        rcShowVoiceMeter(false)
+        rcShowListeningChrome(false)
+        rcClearSendCallbacks()
+        rcShowCountdown(false)
         // The abandoned utterance is remembered even if no capture was running locally, so a
         // transcript still in flight on the phone can never be adopted after this point.
-        if (!rcCapture.cancel()) return
-        sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_STOP).apply { setPackage(packageName) })
+        val was = rcVoice.cancelCapture(exit)
         rcThreadVoiceBar.visibility = View.GONE
-        uiLog("RC: capture cancelled")
+        if (was) uiLog("RC: capture cancelled ($exit)")
     }
 
     /**
@@ -7254,9 +7294,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      */
     private fun rcOnFinalTranscript(text: String) {
         rcClearCaptureWatchdog()
-        rcShowVoiceMeter(false)
-        sendBroadcast(Intent(ListenerService.ACTION_RC_VOICE_STOP).apply { setPackage(packageName) })
-        if (!rcSendWindow.arm(text)) {
+        rcShowListeningChrome(false)
+        if (!rcVoice.onFinalTranscript(text)) {
             uiLog("RC: blank transcript, nothing to send")
             rcThreadVoiceBar.visibility = View.GONE
             renderRcThreadChrome()
@@ -7264,7 +7303,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         }
         // The pending text is what the user is about to say, so it wears the same right-aligned
         // trace-filled bubble their sent messages wear in the thread above.
-        rcThreadVoiceText.text = rcSendWindow.text
+        rcThreadVoiceText.text = rcVoice.text
         rcThreadVoiceText.setTextColor(Lum.BRIGHT)
         rcThreadVoiceText.gravity = android.view.Gravity.END
         val pad = (10 * resources.displayMetrics.density).toInt()
@@ -7281,83 +7320,63 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     }
 
     /**
-     * The capture level meter. Reuses [AudioVisualizerView] and the ACTION_AUDIO_LEVELS broadcast
-     * the Telegram voice path already drives, so there is one meter implementation, not two.
+     * The "we are listening" chrome for an RC dictation.
+     *
+     * These are the AI chat's OWN listening views, driven by the AI chat's own helpers -- not a
+     * lookalike built for the thread. `statusArea` + [setStatus], [showAudioVisualizer] and
+     * [showDoubleTapHintPersistent] are the exact three things the "LISTENING" service state
+     * turns on for the chat, and they all live above/inside `contentFrame`, which the RC thread
+     * sits inside too. So one implementation renders both surfaces and they cannot drift.
      */
-    private fun rcShowVoiceMeter(show: Boolean) {
-        rcVoiceLevelsReceiver?.let {
-            try { unregisterReceiver(it) } catch (_: Exception) {}
-            rcVoiceLevelsReceiver = null
+    private fun rcShowListeningChrome(show: Boolean) {
+        if (show) {
+            statusArea.visibility = View.VISIBLE
+            setStatus(LISTENING_STATUS_TEXT, R.drawable.ic_mic, Lum.GLOW)
+            showAudioVisualizer()
+            showDoubleTapHintPersistent()
+        } else {
+            hideAudioVisualizer()
+            hideDoubleTapHint()
+            statusArea.visibility = View.INVISIBLE
         }
-        rcVoiceVisualizer?.let {
-            (it.parent as? android.view.ViewGroup)?.removeView(it)
-            rcVoiceVisualizer = null
-        }
+        // The thread's own in-bar mic glyph tracks the same flag, so the bar does not keep an
+        // orphan microphone lit under a torn-down capture.
         rcThreadVoiceMeter.visibility = if (show) View.VISIBLE else View.GONE
-        if (!show) return
-
-        val vis = com.repository.glasses.listener.ui.AudioVisualizerView(this)
-        val dp = resources.displayMetrics.density
-        rcThreadVoiceMeter.addView(vis, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, (14 * dp).toInt()
-        ))
-        rcVoiceVisualizer = vis
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
-                val levels = intent.getFloatArrayExtra(ListenerService.EXTRA_AUDIO_LEVELS) ?: return
-                val bands = intent.getIntExtra(ListenerService.EXTRA_AUDIO_LEVELS_BANDS, levels.size)
-                runOnUiThread { rcVoiceVisualizer?.pushEnvelope(levels, bands) }
-            }
-        }
-        registerReceiver(receiver, IntentFilter(ListenerService.ACTION_AUDIO_LEVELS))
-        rcVoiceLevelsReceiver = receiver
     }
 
     private fun rcShowCountdown(show: Boolean) {
-        val vis = if (show) View.VISIBLE else View.GONE
-        rcThreadCountdownTrack.visibility = vis
-        rcThreadCountdownFill.visibility = vis
-        rcThreadCountdownRow.visibility = vis
+        if (!show) rcSendCountdown?.stop()
     }
 
+    /**
+     * The 3 s undo, drained smoothly by the SAME [SendCountdownBar] the AI chat shows.
+     *
+     * The bar animates per frame rather than on a 100 ms posted tick, which stepped it in visible
+     * jumps on a 60 Hz waveguide. The COMMIT is still a separate posted runnable -- an animation
+     * that is cancelled, paused by the window losing focus, or scaled to zero by the system's
+     * animator duration setting must never be what decides whether a message reaches an agent.
+     */
     private fun rcStartSendCountdown() {
         rcClearSendCallbacks()
-        val startedAt = SystemClock.uptimeMillis()
-        rcThreadCountdownFill.scaleX = 1f
-        rcThreadCountdownFill.pivotX = 0f
-        rcThreadCountdownSecs.text = "3s"
-        val tick = object : Runnable {
-            override fun run() {
-                if (!rcSendWindow.pending) return
-                val elapsed = SystemClock.uptimeMillis() - startedAt
-                val remaining = (RcSendWindow.WINDOW_MS - elapsed).coerceAtLeast(0L)
-                rcThreadCountdownFill.scaleX = remaining.toFloat() / RcSendWindow.WINDOW_MS
-                rcThreadCountdownSecs.text = "${((remaining + 999) / 1000)}s"
-                if (remaining > 0) {
-                    rcSendTickRunnable = this
-                    mainHandler.postDelayed(this, 100L)
-                }
-            }
-        }
-        rcSendTickRunnable = tick
-        mainHandler.post(tick)
+        rcSendCountdown?.start(DictationUx.WINDOW_MS)
         val commit = Runnable { rcCommitSend() }
         rcSendRunnable = commit
-        mainHandler.postDelayed(commit, RcSendWindow.WINDOW_MS)
+        mainHandler.postDelayed(commit, DictationUx.WINDOW_MS)
     }
 
     private fun rcClearSendCallbacks() {
         rcSendRunnable?.let { mainHandler.removeCallbacks(it) }
         rcSendRunnable = null
-        rcSendTickRunnable?.let { mainHandler.removeCallbacks(it) }
-        rcSendTickRunnable = null
+        rcSendCountdown?.stop()
     }
 
-    private fun rcClearSendWindow() {
+    private fun rcClearSendWindow(
+        exit: RcVoiceLifecycle.Exit = RcVoiceLifecycle.Exit.SEND_WITHDRAWN,
+    ) {
         rcClearSendCallbacks()
-        rcSendWindow.cancel()
+        rcVoice.cancelSendWindow(exit)
         rcShowCountdown(false)
-        rcShowVoiceMeter(false)
+        rcShowListeningChrome(false)
         rcThreadVoiceBar.visibility = View.GONE
     }
 
@@ -7377,14 +7396,23 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         val verdict = rcVoiceVerdict()
         if (!verdict.allowed && verdict != RcVoiceGate.Verdict.Busy) {
             uiLog("RC: send abandoned at the boundary (${verdict.name})")
-            rcClearSendWindow()
+            rcClearSendWindow(RcVoiceLifecycle.Exit.ABORTED)
             renderRcThreadChrome()
             return
         }
-        val text = rcSendWindow.commit() ?: return
+        // commit() closes the phone-side voice session before it hands back the text. The final
+        // normally closed it already; this is the belt for a send reached without one (a stale
+        // posted runnable), which is the door the original leak came through.
+        val text = rcVoice.commit() ?: run {
+            rcShowListeningChrome(false)
+            rcShowCountdown(false)
+            rcThreadVoiceBar.visibility = View.GONE
+            return
+        }
         val session = rcOpenSession
         if (session == null) {
             uiLog("RC: send dropped, thread already closed")
+            rcShowListeningChrome(false)
             rcShowCountdown(false)
             rcThreadVoiceBar.visibility = View.GONE
             return
@@ -7398,6 +7426,9 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             putExtra(ListenerService.EXTRA_RC_CLIENT_MSG_ID, clientMsgId)
             putExtra(ListenerService.EXTRA_RC_TEXT, text)
         })
+        // The recording chrome comes down with the send, not eventually: leaving it up is exactly
+        // what the wearer reported as "recording never wears off".
+        rcShowListeningChrome(false)
         rcShowCountdown(false)
         rcThreadVoiceBar.visibility = View.GONE
         renderRcThreadChrome()
@@ -8489,10 +8520,9 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             if (focusState == FocusState.RC_THREAD_FOCUSED) {
                 // A pending send is undone by BACK without leaving the thread -- the same undo the
                 // double tap performs, on the key users reach for first.
-                if (rcSendWindow.pending || rcCapture.active) {
+                if (rcVoice.busy) {
                     uiLog("RC: BACK cancels the pending voice send")
-                    rcCancelCapture()
-                    rcClearSendWindow()
+                    rcCancelCapture(RcVoiceLifecycle.Exit.BACK)
                     renderRcThreadChrome()
                     return true
                 }
@@ -8718,26 +8748,32 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                     // arrived. ENTER/DPAD_CENTER stay for the remote-input path.
                     KeyEvent.KEYCODE_NUMPAD_2,
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                        when {
-                            // The 3 s countdown after a final transcript is the ONLY place a tap
-                            // does anything: a double tap withdraws the sentence, a single one is
-                            // ignored so a brush of the temple cannot discard it. Left alone, it
-                            // sends -- same contract as the notification reply.
-                            rcSendWindow.pending -> {
-                                if (rcSendWindow.tapCancel(SystemClock.uptimeMillis())) {
-                                    uiLog("RC: double-tap in send window -> cancel")
-                                    rcClearSendWindow()
-                                    renderRcThreadChrome()
-                                } else {
-                                    uiLog("RC: single tap in send window ignored")
-                                }
+                        // The decision itself lives in [DictationUx], shared with the AI chat, so
+                        // the two surfaces cannot drift into two different gestures for the same
+                        // act. Only the CONSEQUENCES are local.
+                        val action = DictationUx.onTap(
+                            dictating = rcVoice.active,
+                            sendPending = rcVoice.pending,
+                            // The withdraw pairing is timed by the window itself, which already
+                            // owns the same min/max gap the rest of the app uses.
+                            doubleTap = rcVoice.pending &&
+                                rcVoice.tapCancel(SystemClock.uptimeMillis()),
+                        )
+                        when (action) {
+                            DictationUx.TapAction.WITHDRAW -> {
+                                uiLog("RC: double-tap in send window -> cancel")
+                                // tapCancel already withdrew the send and closed the session;
+                                // only the chrome is left to take down.
+                                rcClearSendCallbacks()
+                                rcShowCountdown(false)
+                                rcShowListeningChrome(false)
+                                rcThreadVoiceBar.visibility = View.GONE
+                                renderRcThreadChrome()
                             }
-                            // While dictating the wearer simply stops talking: the phone's VAD ends
-                            // the utterance and delivers the final, exactly as for a Telegram voice
-                            // message or an AI prompt. Nothing to do here.
-                            rcCapture.active ->
-                                uiLog("RC: tap while dictating ignored; VAD ends the utterance")
-                            else -> {
+                            DictationUx.TapAction.IGNORE ->
+                                uiLog("RC: tap ignored (dictating=${rcVoice.active} " +
+                                    "pending=${rcVoice.pending}); the VAD ends the utterance")
+                            DictationUx.TapAction.START -> {
                                 val verdict = rcVoiceVerdict()
                                 if (verdict.allowed) {
                                     uiLog("RC: tap -> start dictation")
@@ -8874,14 +8910,49 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         }
                         return true
                     }
+                    KeyEvent.KEYCODE_NUMPAD_2,
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                         uiLog("KEY: CENTER in CHAT_FOCUSED state=$serviceState isDoubleTap=${(SystemClock.elapsedRealtime() - lastCenterPressTime) < DOUBLE_TAP_THRESHOLD_MS}")
                         if (isDoubleTap()) {
+                            // The deferred single-tap dictation is withdrawn: this was the first
+                            // half of a leave gesture, not a request to speak.
+                            pendingTapRunnable?.let { mainHandler.removeCallbacks(it) }
+                            pendingTapRunnable = null
                             uiLog("KEY: CHAT_FOCUSED double-tap -> TAB_NAV")
                             chatAdapter.clearSelection()
                             focusState = FocusState.TAB_NAV
                             updateFocusVisual(focusState)
                             lastCenterPressTime = 0L
+                            return true
+                        }
+                        // A single tap on an idle chat STARTS dictation, exactly as it does inside
+                        // an RC thread ([DictationUx]). The two surfaces used to disagree -- the
+                        // chat wanted a 500 ms hold, the thread a tap -- so the wearer had to
+                        // remember which conversation they were in. The tap was free here: a
+                        // single tap in CHAT_FOCUSED previously did nothing at all, and the double
+                        // tap that leaves for TAB_NAV is handled above and unchanged.
+                        //
+                        // A live session is left alone: the tap-during-LISTENING/RESPONDING
+                        // double-tap-to-cancel branch further down owns those states, and starting
+                        // a second dictation over a running one is what the RC path also refuses.
+                        if (serviceState == "IDLE" &&
+                            DictationUx.onTap(
+                                dictating = false, sendPending = false, doubleTap = false
+                            ) == DictationUx.TapAction.START
+                        ) {
+                            // DEFERRED past the double-tap window: firing immediately would start
+                            // a dictation on the first half of the leave-to-TAB_NAV gesture.
+                            runAfterTapWindow(Runnable {
+                                pendingTapRunnable = null
+                                if (focusState != FocusState.CHAT_FOCUSED) return@Runnable
+                                if (serviceState != "IDLE") return@Runnable
+                                uiLog("KEY: CHAT_FOCUSED tap -> start dictation")
+                                sendBroadcast(
+                                    Intent(ListenerService.ACTION_SENSOR_LONG_PRESS).apply {
+                                        setPackage(packageName)
+                                    }
+                                )
+                            })
                         }
                         return true
                     }
