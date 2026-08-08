@@ -52,23 +52,6 @@
                 android:focusable="false"
                 android:defaultFocusHighlightEnabled="false" />
 
-            <!-- Double-tap hint (shown briefly on first tap during LISTENING/RESPONDING) -->
-            <TextView
-                android:id="@+id/doubleTapHint"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Double-tap again to stop"
-                android:textColor="#00DD00"
-                android:textSize="11sp"
-                android:fontFamily="monospace"
-                android:background="#000000"
-                android:gravity="center"
-                android:paddingVertical="2dp"
-                android:visibility="gone"
-                android:focusable="false"
-                android:focusableInTouchMode="false"
-                android:defaultFocusHighlightEnabled="false" />
-
             <!-- Status area: icon + text -->
             <LinearLayout
                 android:id="@+id/statusArea"
@@ -1374,6 +1357,30 @@
                 </FrameLayout>
 
             </FrameLayout>
+
+            <!-- Double-tap hint. Shown while a dictation is running, on BOTH surfaces (the RC
+                 thread and the regular AI chat share these views by design).
+
+                 Placed here, AFTER contentFrame, so it reads UNDER the waveform pill: the pill is
+                 added programmatically into contentFrame with gravity=BOTTOM, and this row is the
+                 next sibling down. It sat at the very top of the screen before, above everything,
+                 which put the instruction nowhere near the thing it describes. Its own row rather
+                 than a child of contentFrame so it can never overlap the pill. -->
+            <TextView
+                android:id="@+id/doubleTapHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Double-tap again to stop"
+                android:textColor="#00DD00"
+                android:textSize="11sp"
+                android:fontFamily="monospace"
+                android:background="#000000"
+                android:gravity="center"
+                android:paddingVertical="2dp"
+                android:visibility="gone"
+                android:focusable="false"
+                android:focusableInTouchMode="false"
+                android:defaultFocusHighlightEnabled="false" />
 
             <!-- Pill tab bar at the very bottom -->
             <FrameLayout
