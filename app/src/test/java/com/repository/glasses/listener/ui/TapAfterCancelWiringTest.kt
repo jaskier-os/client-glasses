@@ -1,5 +1,6 @@
 package com.repository.glasses.listener.ui
 
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -37,18 +38,27 @@ class TapAfterCancelWiringTest {
         .any { it.trimStart().let { l -> !l.startsWith("//") && !l.startsWith("*") } }
 
     @Test
-    fun theStartBranchAsksTheGuardBeforeStartingACapture() {
-        val start = between("DictationUx.TapAction.START -> {", "rcStartCapture()")
-        assertTrue(
-            "the START branch reaches rcStartCapture without consulting rcTapAfterCancel; the " +
-                "release trailing the cancelling double tap will restart the dictation again",
-            calls(start, "rcTapAfterCancel.swallows(")
+    fun aTapNeverStartsACaptureInAThread() {
+        // Dictation starts on the HOLD, matching the AI chat. That is what makes the trailing
+        // release of a cancelling double tap harmless: the guard this file was written for is
+        // retired, and the property it protected is now structural. If a tap ever starts a capture
+        // again, the 25 ms restart measured on the device comes back with it.
+        val rc = main.substringAfter("FocusState.RC_THREAD_FOCUSED -> {", "")
+            .substringBefore("FocusState.TAB_NAV -> {", "")
+        assertTrue("could not locate the RC thread key branch", rc.isNotBlank())
+        assertFalse(
+            "a tap starts a capture in the RC thread; dictation must start on the hold so the " +
+                "release trailing a cancelling double tap cannot restart it: $rc",
+            rc.contains("rcStartCapture()")
         )
-        assertTrue(
-            "the guard is consulted but its verdict is not acted on -- the branch must return " +
-                "without starting anything",
-            start.contains("return true")
-        )
+    }
+
+    @Test
+    fun theHoldStartsTheCapture() {
+        val hold = main.substringAfter(
+            "if (keyCode == KeyEvent.KEYCODE_NUMPAD_3 && focusState == FocusState.RC_THREAD_FOCUSED) {", ""
+        ).substringBefore("return true", "")
+        assertTrue("the hold does not start a capture in the RC thread", hold.contains("rcStartCapture()"))
     }
 
     @Test

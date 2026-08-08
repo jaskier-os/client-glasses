@@ -329,18 +329,6 @@
                             android:focusable="false"
                             android:defaultFocusHighlightEnabled="false">
 
-                            <ImageView
-                                android:id="@+id/rcThreadVoiceMicGlyph"
-                                android:layout_width="12dp"
-                                android:layout_height="12dp"
-                                android:src="@drawable/ic_mic"
-                                android:contentDescription="recording"
-                                android:background="#000000"
-                                android:paddingEnd="5dp"
-                                android:paddingStart="0dp"
-                                android:focusable="false"
-                                android:defaultFocusHighlightEnabled="false" />
-
                         </LinearLayout>
 
                         <!-- The 3s withdraw countdown. The SAME view class the AI chat shows over

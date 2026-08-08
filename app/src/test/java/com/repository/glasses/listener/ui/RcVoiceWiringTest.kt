@@ -355,13 +355,16 @@ class RcVoiceWiringTest {
     @Test
     fun bothDictationSurfacesAreExemptFromTheNumpad2Consumer() {
         val main = read("MainActivity.kt")
-        val branch = main.substringAfter("if (keyCode == KeyEvent.KEYCODE_NUMPAD_2 &&", "")
-            .substringBefore("val now = SystemClock.uptimeMillis()", "")
+        // The exemption moved: the branch now RECORDS the chain for every tap and only returns
+        // early off the dictation surfaces, so a double tap spanning a thread and TAB_NAV still
+        // turns the screen off. Read to the end of the branch rather than to its first statement.
+        val branch = main.substringAfter("if (keyCode == KeyEvent.KEYCODE_NUMPAD_2) {", "")
+            .substringBefore("// Any non-NUMPAD_2 key", "")
         assertTrue("could not locate the NUMPAD_2 screen-off branch", branch.isNotBlank())
         for (surface in listOf("FocusState.RC_THREAD_FOCUSED", "FocusState.CHAT_FOCUSED")) {
             assertTrue(
                 "$surface is not exempt from the NUMPAD_2 consumer, so a touchpad tap there is " +
-                    "swallowed before the focus dispatch and dictation can never start: $branch",
+                    "swallowed before the focus dispatch and the withdraw can never fire: $branch",
                 calls(branch, surface)
             )
         }

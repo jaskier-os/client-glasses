@@ -386,7 +386,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private lateinit var rcThreadVoiceBar: LinearLayout
     private lateinit var rcThreadVoiceText: TextView
     private lateinit var rcThreadVoiceMeter: LinearLayout
-    private lateinit var rcThreadVoiceMicGlyph: ImageView
 
     /** The 3 s withdraw countdown inside a thread. Same class as the AI chat's. */
     private var rcSendCountdown: com.repository.glasses.listener.ui.SendCountdownBar? = null
@@ -3891,7 +3890,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             rcThreadVoiceText = findViewById(R.id.rcThreadVoiceText)
             rcThreadVoiceMeter = findViewById(R.id.rcThreadVoiceMeter)
             rcSendCountdown = findViewById(R.id.rcThreadSendCountdown)
-            rcThreadVoiceMicGlyph = findViewById(R.id.rcThreadVoiceMicGlyph)
             // The RC thread chrome carries no android:textSize; an XML size is frozen at inflate
             // and would ignore every later change to the wearer's setting. Sized here instead.
             applyRcThreadFontSizes()
@@ -7255,7 +7253,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // them off the same setting anyway: left fixed, they shrink into insignificance beside
         // 18sp text on the largest setting.
         val glyphPx = (com.repository.glasses.listener.ui.ChatFontScale.sp(12f) * resources.displayMetrics.density).toInt()
-        for (v in listOf(rcThreadMicGlyph, rcThreadVoiceMicGlyph)) {
+        for (v in listOf(rcThreadMicGlyph)) {
             v.layoutParams = v.layoutParams.apply { width = glyphPx; height = glyphPx }
         }
         // The countdown bar owns its own two text sizes; it is a shared component, so its scaling
@@ -8505,10 +8503,23 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // would silently open an assistant chat instead of dictating to the coding agent. The
         // in-flight guard mirrors the [NREPLY] one: a second hold must not start a second capture.
         if (keyCode == KeyEvent.KEYCODE_NUMPAD_3 && focusState == FocusState.RC_THREAD_FOCUSED) {
-            // Dictation is a tap (DPAD_CENTER), exactly as in a Telegram chat. The hold is
-            // swallowed rather than left to fall through: the branches below would otherwise arm a
+            // HOLD starts dictation here, the same gesture the AI chat uses. Talking to a remote
+            // session and talking to the assistant are the same act to the wearer, so they must not
+            // be two different gestures. Consumed either way: falling through would arm a
             // notification reply or summon the assistant from inside a coding thread.
-            uiLog("RC: NUMPAD_3 (hold) ignored in thread; dictation is a tap")
+            val verdict = rcVoiceVerdict()
+            when {
+                rcVoice.active || rcVoice.pending ->
+                    uiLog("RC: hold ignored (dictating=${rcVoice.active} pending=${rcVoice.pending})")
+                verdict.allowed -> {
+                    uiLog("RC: hold -> start dictation")
+                    rcStartCapture()
+                }
+                else -> {
+                    uiLog("RC: hold refused (${verdict.hudText})")
+                    renderRcThreadChrome()
+                }
+            }
             return true
         }
         if (keyCode == KeyEvent.KEYCODE_NUMPAD_3) {
@@ -8597,26 +8608,34 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // needs the same exemption for the same reason -- a touchpad tap is how a dictation starts
         // on BOTH surfaces now, and without it the chat's tap handler is unreachable, making the
         // shared gesture a no-op for anyone actually wearing the glasses.
-        if (keyCode == KeyEvent.KEYCODE_NUMPAD_2 &&
-            focusState != FocusState.RC_THREAD_FOCUSED &&
-            focusState != FocusState.CHAT_FOCUSED
-        ) {
+        if (keyCode == KeyEvent.KEYCODE_NUMPAD_2) {
             val now = SystemClock.uptimeMillis()
             val dt = now - lastNumpad2Ms
-            if (focusState == FocusState.TAB_NAV &&
-                lastNumpad2Ms != 0L &&
-                dt in DOUBLE_TAP_NUMPAD2_MIN_MS..DOUBLE_TAP_NUMPAD2_MAX_MS) {
+            val isDouble = lastNumpad2Ms != 0L &&
+                dt in DOUBLE_TAP_NUMPAD2_MIN_MS..DOUBLE_TAP_NUMPAD2_MAX_MS
+            if (focusState == FocusState.TAB_NAV && isDouble) {
                 uiLog("NUMPAD_2 doubletap in TAB_NAV -> screen off")
                 turnScreenOff()
                 lastNumpad2Ms = 0L
-            } else {
-                lastNumpad2Ms = now
+                return true
             }
-            return true
+            lastNumpad2Ms = now
+            // The chain is RECORDED on every tap but CONSUMED only in TAB_NAV. Skipping this whole
+            // branch on the dictation surfaces -- the previous shape -- dropped the timestamp, so a
+            // double tap that began on one of them and finished in TAB_NAV never registered and the
+            // screen stopped turning off. Returning here instead would swallow the tap that starts
+            // a capture, which is what the exclusion was added for. Record, then fall through.
+            if (focusState != FocusState.RC_THREAD_FOCUSED &&
+                focusState != FocusState.CHAT_FOCUSED
+            ) {
+                return true
+            }
         }
         // Any non-NUMPAD_2 key (including the scroll remaps below) breaks the
-        // doubletap chain.
-        lastNumpad2Ms = 0L
+        // doubletap chain. NUMPAD_2 now reaches here on the dictation surfaces, where it was just
+        // recorded above -- clearing it unconditionally would erase the first half of every double
+        // tap that starts in a thread.
+        if (keyCode != KeyEvent.KEYCODE_NUMPAD_2) lastNumpad2Ms = 0L
         // Swipe-to-cancel during a notification reply: a horizontal swipe
         // (NUMPAD_0/1 from the daemon) while LISTENING cancels the reply instead
         // of scrolling. Consume so it never reaches the scroll remap below.
@@ -8951,9 +8970,9 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             // branch, because an RC dictation puts serviceState in LISTENING and that branch would
             // otherwise swallow the confirm. Nothing is left for this dispatch to do.
             FocusState.RC_THREAD_FOCUSED -> {
-                // Same model as a Telegram chat: a tap starts dictation, a tap stops it. Kept
-                // deliberately identical -- one gesture to learn for "say something into this
-                // conversation", whichever conversation it is.
+                // The HOLD starts dictation (handled with the other NUMPAD_3 paths above), the
+                // same gesture the AI chat uses. What is left here is the withdraw: a double tap
+                // inside the send window takes the sentence back.
                 when (keyCode) {
                     // NUMPAD_2 is what a touchpad TAP actually delivers here. Only NUMPAD_0/1 are
                     // remapped to DPAD above, so listening for DPAD_CENTER alone -- as the Telegram
@@ -8990,24 +9009,12 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                             DictationUx.TapAction.IGNORE ->
                                 uiLog("RC: tap ignored (dictating=${rcVoice.active} " +
                                     "pending=${rcVoice.pending}); the VAD ends the utterance")
-                            DictationUx.TapAction.START -> {
-                                // The tail of the double tap that just cancelled is NOT a request
-                                // to dictate again. Measured 25 ms apart on the device; without
-                                // this the cancelled dictation reappeared in the next frame.
-                                if (rcTapAfterCancel.swallows(SystemClock.uptimeMillis())) {
-                                    uiLog("RC: tap swallowed (tail of the cancelling double tap)")
-                                    return true
-                                }
-                                val verdict = rcVoiceVerdict()
-                                if (verdict.allowed) {
-                                    uiLog("RC: tap -> start dictation")
-                                    rcStartCapture()
-                                } else {
-                                    // Never silently swallowed: the wearer believes they dictated.
-                                    uiLog("RC: tap refused (${verdict.hudText})")
-                                    renderRcThreadChrome()
-                                }
-                            }
+                            // Dictation starts on the HOLD, matching the AI chat, so a tap on an
+                            // idle thread does nothing. This also retires the swallow guard the
+                            // pad needed: the stray release at the tail of a cancelling double
+                            // tap can no longer restart anything, because no tap ever starts.
+                            DictationUx.TapAction.START ->
+                                uiLog("RC: tap on an idle thread ignored; hold to dictate")
                         }
                         return true
                     }

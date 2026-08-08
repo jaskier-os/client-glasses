@@ -159,7 +159,6 @@ class RcFontPropagationTest {
             "rcThreadMicGlyph",
             "rcThreadFooterHint",
             "rcThreadVoiceText",
-            "rcThreadVoiceMicGlyph",
             // The countdown's own hint and seconds label moved into SendCountdownBar, which is
             // shared with the AI chat. MainActivity must still poke it, and BOTH instances of it.
             "rcSendCountdown",
