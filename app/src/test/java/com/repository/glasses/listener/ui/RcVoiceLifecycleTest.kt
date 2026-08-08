@@ -221,8 +221,16 @@ class RcVoiceLifecycleTest {
     fun aForeignTranscriptCannotBeAdoptedByTheNextRcCapture() {
         val r = Recorder()
         r.lifecycle.start()
-        // Another feature takes the microphone; our capture is handed over.
+        // Another feature takes the microphone; our capture is handed over. The debt is recorded
+        // HERE, before the wearer has spoken a word of their notification reply.
         r.lifecycle.forgetCaptureWithoutStopping()
+
+        // Times measured from that instant, not from the end of the reply: an ordinary spoken
+        // reply, the phone's VAD silence window, and transcription. The debt must still be owed
+        // when that final lands -- with the ABANDON ttl (4 s) it would have expired mid-reply.
+        r.elapse(8)   // the wearer speaks their reply
+        r.elapse(2)   // VAD end-of-speech + transcription
+
         // The wearer returns to the thread and starts a new dictation...
         r.lifecycle.start()
         // ...and the OTHER feature's final lands first.
@@ -295,13 +303,38 @@ class RcVoiceLifecycleTest {
         r.lifecycle.start()
         r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
 
-        // The wearer gives up, does something else, and comes back well after any in-flight
-        // transcript could still be arriving.
-        r.elapse(RcVoiceLifecycle.DISCARD_TTL_MS / 1000 + 5)
+        // Absolute seconds, deliberately NOT derived from DISCARD_TTL_MS. A test that elapses
+        // `TTL + n` scales with the constant and therefore cannot fail on a wrong one -- which is
+        // exactly how a 15 s TTL survived a round of auditing.
+        r.elapse(10)
         r.lifecycle.start()
         assertTrue(
             "a stale debt ate a dictation made long after any in-flight final could arrive; " +
                 "that eaten capture then hangs to its watchdog, which owes again, forever",
+            r.lifecycle.acceptTranscript()
+        )
+    }
+
+    /**
+     * THE upper bound, at the fastest speed a human can actually produce: an instant re-hold, a
+     * one-word utterance, and the phone's fixed tail. If a debt survives this, it eats a
+     * legitimate dictation and the self-sustaining loop is back.
+     */
+    @Test
+    fun aDebtExpiresBeforeEvenTheFastestPossibleRedictation() {
+        val r = Recorder()
+        r.lifecycle.start()
+        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.BACK)
+
+        r.now += 500    // the wearer re-holds almost immediately
+        r.lifecycle.start()
+        r.now += 1_000  // one word
+        r.now += 1_500  // the phone's VAD silence window
+        r.now += 1_500  // transcription
+
+        assertTrue(
+            "the debt outlived the fastest realistic re-dictation (4.5 s) and ate it; the " +
+                "abandon TTL must be below that, not merely below a comfortable pause",
             r.lifecycle.acceptTranscript()
         )
     }
@@ -337,18 +370,57 @@ class RcVoiceLifecycleTest {
         }
     }
 
-    /** The expiry must not be so eager that it opens the race it exists to close. */
+    /**
+     * THE lower bound, again in absolute seconds. The wearer has stopped speaking by the time an
+     * abandon fires, so what is left is the phone's VAD silence window plus transcription -- about
+     * 3.5 s. A debt that expires inside that lets the abandoned words reach the coding agent.
+     */
     @Test
-    fun aDiscardIsStillOwedWithinTheRaceWindow() {
+    fun aDiscardIsStillOwedWhileALateFinalCanStillArrive() {
         val r = Recorder()
         r.lifecycle.start()
         r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
-        r.elapse(RcVoiceLifecycle.DISCARD_TTL_MS / 1000 - 1)
+
+        r.now += 1_500  // the phone's VAD silence window
+        r.now += 2_000  // transcription
+
         r.lifecycle.start()
         assertFalse(
-            "the debt expired inside the window where a late final can still arrive; those words " +
-                "would be sent to the coding agent",
+            "the debt expired inside the window where the abandoned utterance's final can still " +
+                "arrive; those words would be sent to the coding agent, which acts on them",
             r.lifecycle.acceptTranscript()
+        )
+    }
+
+    /**
+     * The two TTLs measure from different instants and must not be collapsed into one.
+     *
+     * An abandon is recorded after the wearer stopped speaking, so only the pipeline tail is left.
+     * A handover is recorded before the new owner has said a word, so their whole utterance is
+     * still to come. One number cannot be right for both: short enough for the abandon bound is
+     * far too short for the handover, and long enough for the handover eats re-dictations.
+     */
+    @Test
+    fun theHandoverDebtOutlastsAWholeForeignUtterance() {
+        val handover = Recorder()
+        handover.lifecycle.start()
+        handover.lifecycle.forgetCaptureWithoutStopping()
+        handover.elapse(12)  // a long-ish reply, then VAD and transcription
+        handover.lifecycle.start()
+        assertFalse(
+            "the handover debt expired mid-reply; the reply's final would be adopted by this " +
+                "capture and sent to the coding agent",
+            handover.lifecycle.acceptTranscript()
+        )
+
+        val abandon = Recorder()
+        abandon.lifecycle.start()
+        abandon.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.BACK)
+        abandon.elapse(12)
+        abandon.lifecycle.start()
+        assertTrue(
+            "the abandon debt is as long as the handover one; it will eat re-dictations",
+            abandon.lifecycle.acceptTranscript()
         )
     }
 
@@ -362,9 +434,18 @@ class RcVoiceLifecycleTest {
         r.lifecycle.start()
         r.lifecycle.forgetCaptureWithoutStopping()
 
+        // The handover debt is deliberately long (it must outlast a whole foreign utterance), so
+        // the FIRST dictation after one may legitimately be eaten. What must not happen is the
+        // LOOP: that eaten capture hangs to its watchdog, the watchdog owes again, and every
+        // dictation after it is eaten too.
+        r.elapse(30)
+        r.lifecycle.start()
+        r.lifecycle.acceptTranscript()
+        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
+
         repeat(6) { round ->
             // The wearer notices, and re-dictates -- but not instantly.
-            r.elapse(RcVoiceLifecycle.DISCARD_TTL_MS / 1000 + 5)
+            r.elapse(10)
             r.lifecycle.start()
             assertTrue(
                 "dictation ${round + 1} was swallowed; the discard debt is self-sustaining and " +

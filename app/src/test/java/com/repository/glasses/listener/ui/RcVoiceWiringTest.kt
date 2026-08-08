@@ -507,22 +507,38 @@ class RcVoiceWiringTest {
     }
 
     /**
-     * The TTL is squeezed between two real latencies -- long enough to cover a late final, short
-     * enough not to eat the next dictation -- so the reasoning has to travel with the number.
+     * The two TTLs measure from different instants -- an abandon after the wearer stopped
+     * speaking, a handover before the new owner started -- so one number cannot serve both, and
+     * each is only correct relative to latencies a later reader cannot guess. Both must carry
+     * their derivation, and they must stay distinct.
      */
     @Test
-    fun theDiscardTtlDocumentsBothOfItsBounds() {
+    fun bothDiscardTtlsExistAndCarryTheirDerivation() {
         val src = read("ui/RcVoiceGate.kt")
-        val doc = src.substringBefore("const val DEFAULT_DISCARD_TTL_MS", "")
-            .substringAfterLast("/**", "")
-        assertTrue("DEFAULT_DISCARD_TTL_MS has no kdoc", doc.isNotBlank())
-        for (bound in listOf("LOWER BOUND", "UPPER BOUND")) {
+        for (name in listOf("DEFAULT_DISCARD_TTL_MS", "HANDOVER_DISCARD_TTL_MS")) {
+            assertTrue("$name is missing", calls(src, "const val $name"))
+            val doc = src.substringBefore("const val $name", "").substringAfterLast("/**", "")
+            assertTrue("$name has no kdoc", doc.isNotBlank())
             assertTrue(
-                "the TTL's kdoc does not state its $bound; the number is only correct relative " +
-                    "to latencies a later reader cannot guess: $doc",
-                doc.contains(bound)
+                "$name's kdoc does not derive it from the latencies it sits between: $doc",
+                Regex("\\d+(\\.\\d+)? s").findAll(doc).count() >= 2
             )
         }
+        assertTrue(
+            "the handover TTL must not be defined as the abandon one; a handover debt is " +
+                "recorded before the new owner speaks and must outlast their whole utterance",
+            !src.contains("HANDOVER_DISCARD_TTL_MS = DEFAULT_DISCARD_TTL_MS")
+        )
+        // And the handover path must actually USE it.
+        val lifecycle = read("ui/RcVoiceLifecycle.kt")
+        val fn = lifecycle.substringAfter("fun forgetCaptureWithoutStopping()", "")
+            .substringBefore("\n    }")
+        assertTrue("could not locate forgetCaptureWithoutStopping", fn.isNotBlank())
+        assertTrue(
+            "the handover path still uses the ABANDON ttl, which expires mid-reply and lets the " +
+                "foreign final be adopted: $fn",
+            calls(fn, "HANDOVER_DISCARD_TTL_MS")
+        )
     }
 
     // --- The countdown cannot outlive its view ---

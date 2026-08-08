@@ -175,7 +175,10 @@ class RcVoiceLifecycle(
         // That is a dictation the wearer repeats. The alternative is words they never addressed to
         // the agent being executed by it, which they cannot take back. The recoverable failure is
         // the correct one to choose.
-        capture.cancel(clock(), DISCARD_TTL_MS)
+        // The HANDOVER ttl, not the abandon one. This debt is recorded before the new owner's
+        // wearer has said a word, so it must outlast their whole utterance, not just the tail of
+        // ours -- which is 4 s and would expire mid-reply, letting the reply's final be adopted.
+        capture.cancel(clock(), HANDOVER_DISCARD_TTL_MS)
         window.cancel()
         voiceSessionOpen = false
     }
@@ -193,6 +196,12 @@ class RcVoiceLifecycle(
          * re-dictates, so a debt never eats an unrelated utterance.
          */
         const val DISCARD_TTL_MS = RcCapture.DEFAULT_DISCARD_TTL_MS
+
+        /**
+         * The same, for a capture handed to another feature. Far longer: that debt is recorded
+         * before the new owner has spoken, so it must outlast their whole utterance.
+         */
+        const val HANDOVER_DISCARD_TTL_MS = RcCapture.HANDOVER_DISCARD_TTL_MS
     }
 
     private fun closeSession(exit: Exit) {

@@ -147,25 +147,36 @@ class RcCapture {
         const val MAX_PENDING_DISCARDS = 3
 
         /**
-         * How long an abandoned capture's transcript may still be arriving.
+         * How long an ABANDONED capture's transcript may still be arriving.
          *
-         * This constant is squeezed between two real latencies and both bounds matter.
+         * For the ordinary exits -- BACK, the watchdog, a mid-flight abort. The wearer has already
+         * STOPPED SPEAKING by the time any of these fire, so only the tail of the pipeline is
+         * left: the phone's VAD silence window (1.5 s) plus transcription (~2 s), about 3.5 s.
          *
-         * LOWER BOUND -- it must outlast the race it exists for. The phone's VAD can end an
-         * utterance moments before we abandon the capture; the transcription that follows is a
-         * couple of seconds. A late final inside that window must be discarded, or an utterance
-         * the wearer abandoned is sent to a coding agent that acts on it.
+         * The upper bound is the fastest their NEXT final can arrive: an instant re-hold (~0.5 s)
+         * plus a one-word utterance (~1 s) plus that same ~3 s tail, about 4.5 s. A debt still
+         * owed then eats a legitimate dictation, whose capture waits for a final it has already
+         * consumed, hangs to the 30 s watchdog, and the watchdog owes again -- the loop.
          *
-         * UPPER BOUND -- it must expire before the wearer's NEXT final can arrive, which is the
-         * re-hold reaction (~2 s) plus a short utterance (~4 s) plus transcription (~2 s), so
-         * about 8 s at the fastest. A debt still owed then eats a legitimate dictation; that
-         * capture keeps listening for a final it has already consumed, hangs until the 30 s
-         * watchdog, and the watchdog owes a fresh debt -- the loop, just at a slower cadence.
-         *
-         * 5 s sits inside both: comfortably past transcription latency, comfortably short of the
-         * fastest possible re-dictation. Do not raise it towards 8 s without re-measuring both.
+         * 4 s is the only comfortable point between 3.5 and 4.5. The window really is that narrow;
+         * do not move this without re-deriving both numbers.
          */
-        const val DEFAULT_DISCARD_TTL_MS = 5_000L
+        const val DEFAULT_DISCARD_TTL_MS = 4_000L
+
+        /**
+         * How long a HANDED-OVER capture's transcript may still be arriving.
+         *
+         * Much longer, because the clock starts somewhere completely different. A handover is
+         * recorded the instant another feature takes the microphone -- BEFORE the wearer has
+         * spoken a word of their notification reply. What remains is the whole foreign utterance
+         * (5-10 s is ordinary) plus the same ~3.5 s tail.
+         *
+         * Being long is also SAFE here in a way it is not for an abandon. A handover happens
+         * because the wearer left the thread for something else, so they are not standing there
+         * re-dictating into it. And if the debt does cost them a repeat, that is recoverable,
+         * whereas a notification reply delivered to a coding agent that acts on it is not.
+         */
+        const val HANDOVER_DISCARD_TTL_MS = 20_000L
     }
 }
 
