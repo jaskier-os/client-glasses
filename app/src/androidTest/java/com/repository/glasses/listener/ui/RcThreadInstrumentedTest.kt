@@ -391,6 +391,37 @@ class RcThreadInstrumentedTest {
         SystemClock.sleep(500)
     }
 
+    /**
+     * The send-window steps read the countdown BAR's visibility, and that bar shows itself in
+     * start() and hides itself when its animation ends. With the animator duration scaled to zero
+     * -- the usual advice for instrumented runs, and one tap in Developer Options -- it is GONE
+     * within a frame of opening.
+     *
+     * Steps 13, 13c and 17b would then fail spuriously. Step 13b is worse: it asserts the bar is
+     * GONE to prove a stale transcript was NOT adopted, and with animations off an ADOPTED one
+     * reads GONE too -- so the discard regression it exists to catch becomes invisible. Its own
+     * comment says it was written to avoid exactly that vacuity.
+     *
+     * The send itself is a posted runnable and unaffected; this is about what the test can SEE.
+     * Fail loudly rather than silently inverting.
+     */
+    @Before
+    fun requireAnimationsEnabled() {
+        val scale = runCatching {
+            android.provider.Settings.Global.getFloat(
+                instr.targetContext.contentResolver,
+                android.provider.Settings.Global.ANIMATOR_DURATION_SCALE
+            )
+        }.getOrDefault(1f)
+        assertTrue(
+            "animator duration scale is $scale. The send-window steps observe the countdown " +
+                "bar's own visibility, which its animation drives, so with animations off step " +
+                "13b would pass whether or not the stale transcript was adopted. Run: " +
+                "adb shell settings put global animator_duration_scale 1",
+            scale > 0f && android.animation.ValueAnimator.areAnimatorsEnabled()
+        )
+    }
+
     @After
     fun releaseScreen() {
         runCatching { instr.uiAutomation.executeShellCommand("svc power stayon false") }
