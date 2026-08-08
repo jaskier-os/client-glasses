@@ -202,6 +202,43 @@ class RcVoiceLifecycleTest {
         )
     }
 
+    /**
+     * Handing the microphone over must NOT owe a discard.
+     *
+     * The new owner's transcript is routed by focus state and never passes through
+     * acceptTranscript(), so a debt taken here is never paid by the utterance that caused it --
+     * it is paid by the wearer's NEXT legitimate dictation, which is then dropped as "a transcript
+     * from an abandoned capture", hanging the voice bar until the watchdog gives up.
+     */
+    @Test
+    fun forgettingACaptureDoesNotOweADiscardAgainstTheNextDictation() {
+        val r = Recorder()
+        r.lifecycle.start()
+        r.lifecycle.forgetCaptureWithoutStopping()
+
+        // The wearer comes back and dictates again.
+        r.lifecycle.start()
+        assertTrue(
+            "the next dictation's own transcript was thrown away to pay a debt the handover " +
+                "should never have taken",
+            r.lifecycle.acceptTranscript()
+        )
+    }
+
+    /** A genuine abandonment still owes its discard -- the distinction must not be flattened. */
+    @Test
+    fun aGenuineCancelStillOwesItsDiscard() {
+        val r = Recorder()
+        r.lifecycle.start()
+        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.CANCEL)
+        r.lifecycle.start()
+        assertFalse(
+            "the abandoned capture's late transcript must still be refused, or words the wearer " +
+                "cancelled would be sent as the new capture's message",
+            r.lifecycle.acceptTranscript()
+        )
+    }
+
     @Test
     fun aCaptureStartedAfterForgettingIsANormalSessionAgain() {
         val r = Recorder()

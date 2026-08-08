@@ -7271,7 +7271,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         rcThreadVoiceText.setPadding(0, 0, 0, 0)
         rcThreadVoiceBar.visibility = View.VISIBLE
         rcShowListeningChrome(true)
-        rcShowCountdown(false)
+        rcHideCountdown()
         renderRcThreadChrome()
         // The existing dictation pipeline, unchanged: glasses mic -> phone STT -> final user text.
         sendBroadcast(Intent(ListenerService.ACTION_TG_VOICE_STOP).apply { setPackage(packageName) })
@@ -7307,7 +7307,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 // and with the footer already hidden by the last render, the wearer gets neither
                 // an affordance nor an explanation. That is the original complaint, verbatim.
                 rcShowListeningChrome(false)
-                rcShowCountdown(false)
+                rcHideCountdown()
                 rcThreadVoiceBar.visibility = View.GONE
                 renderRcThreadChrome()
                 return@Runnable
@@ -7336,7 +7336,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         rcClearCaptureWatchdog()
         rcShowListeningChrome(false)
         rcClearSendCallbacks()
-        rcShowCountdown(false)
+        rcHideCountdown()
         // The abandoned utterance is remembered even if no capture was running locally, so a
         // transcript still in flight on the phone can never be adopted after this point.
         val was = rcVoice.cancelCapture(exit)
@@ -7370,7 +7370,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         }
         rcThreadVoiceText.setPadding(pad, padV, pad, padV)
         rcThreadVoiceBar.visibility = View.VISIBLE
-        rcShowCountdown(true)
         rcStartSendCountdown()
         renderRcThreadChrome()
     }
@@ -7407,8 +7406,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         rcThreadVoiceMeter.visibility = if (show) View.VISIBLE else View.GONE
     }
 
-    private fun rcShowCountdown(show: Boolean) {
-        if (!show) rcSendCountdown?.stop()
+    /**
+     * Takes the countdown down. There is deliberately no "show" here: the bar makes itself visible
+     * in [SendCountdownBar.start], so a show flag would have been a parameter that did nothing --
+     * which is what it was, silently, at every `rcShowCountdown(true)` call site.
+     */
+    private fun rcHideCountdown() {
+        rcSendCountdown?.stop()
     }
 
     /**
@@ -7438,7 +7442,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     ) {
         rcClearSendCallbacks()
         rcVoice.cancelSendWindow(exit)
-        rcShowCountdown(false)
+        rcHideCountdown()
         rcShowListeningChrome(false)
         rcThreadVoiceBar.visibility = View.GONE
     }
@@ -7468,7 +7472,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // posted runnable), which is the door the original leak came through.
         val text = rcVoice.commit() ?: run {
             rcShowListeningChrome(false)
-            rcShowCountdown(false)
+            rcHideCountdown()
             rcThreadVoiceBar.visibility = View.GONE
             return
         }
@@ -7476,7 +7480,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         if (session == null) {
             uiLog("RC: send dropped, thread already closed")
             rcShowListeningChrome(false)
-            rcShowCountdown(false)
+            rcHideCountdown()
             rcThreadVoiceBar.visibility = View.GONE
             return
         }
@@ -7492,7 +7496,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // The recording chrome comes down with the send, not eventually: leaving it up is exactly
         // what the wearer reported as "recording never wears off".
         rcShowListeningChrome(false)
-        rcShowCountdown(false)
+        rcHideCountdown()
         rcThreadVoiceBar.visibility = View.GONE
         renderRcThreadChrome()
         uiLog("RC: sent ${text.take(40)} to ${session.id}")
@@ -8839,7 +8843,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                                 // tapCancel already withdrew the send and closed the session;
                                 // only the chrome is left to take down.
                                 rcClearSendCallbacks()
-                                rcShowCountdown(false)
+                                rcHideCountdown()
                                 rcShowListeningChrome(false)
                                 rcThreadVoiceBar.visibility = View.GONE
                                 renderRcThreadChrome()
@@ -8997,12 +9001,23 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                             // touchpad is the whole point: without this the hint was a lie off the
                             // remote, because the global cancel branch below matches only
                             // DPAD_CENTER/ENTER and never the NUMPAD_2 a real tap delivers.
-                            if (chatSendCountdown?.visibility == View.VISIBLE) {
-                                uiLog("KEY: CHAT_FOCUSED double-tap in send window -> withdraw")
+                            // A live session is cancelled, whether the pre-send bar is up yet or
+                            // not. The global double-tap-to-cancel branch sits ABOVE this one and
+                            // matches only DPAD_CENTER/ENTER, so a touchpad tap -- which arrives
+                            // as NUMPAD_2 -- never reaches it. Before the chat was exempted from
+                            // the NUMPAD_2 consumer the tap simply died and nothing happened;
+                            // without this it would instead LEAVE for TAB_NAV while the session
+                            // kept listening under a hint that says it was cancelled.
+                            if (chatSendCountdown?.visibility == View.VISIBLE ||
+                                serviceState in listOf("LISTENING", "RESPONDING")
+                            ) {
+                                uiLog("KEY: CHAT_FOCUSED double-tap -> cancel session " +
+                                    "(state=$serviceState)")
                                 chatSendCountdown?.stop()
                                 sendBroadcast(Intent(ListenerService.ACTION_CANCEL_SESSION).apply {
                                     setPackage(packageName)
                                 })
+                                hideDoubleTapHint()
                                 lastCenterPressTime = 0L
                                 return true
                             }
@@ -9020,14 +9035,19 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                         // single tap in CHAT_FOCUSED previously did nothing at all, and the double
                         // tap that leaves for TAB_NAV is handled above and unchanged.
                         //
-                        // A live session is left alone: the tap-during-LISTENING/RESPONDING
-                        // double-tap-to-cancel branch further down owns those states, and starting
-                        // a second dictation over a running one is what the RC path also refuses.
-                        if (serviceState == "IDLE" &&
-                            DictationUx.onTap(
-                                dictating = false, sendPending = false, doubleTap = false
-                            ) == DictationUx.TapAction.START
-                        ) {
+                        //
+                        // The decision goes through the SHARED table with the chat's REAL state,
+                        // not with constants: while the service is LISTENING the wearer is already
+                        // dictating, and while the pre-send bar is up a transcript is pending --
+                        // both of which the table answers IGNORE for, exactly as in a thread.
+                        // (Passing literals here made the call a compile-time constant and the
+                        // shared table decorative.)
+                        val action = DictationUx.onTap(
+                            dictating = serviceState == "LISTENING",
+                            sendPending = chatSendCountdown?.visibility == View.VISIBLE,
+                            doubleTap = false,
+                        )
+                        if (serviceState == "IDLE" && action == DictationUx.TapAction.START) {
                             // DEFERRED past the double-tap window: firing immediately would start
                             // a dictation on the first half of the leave-to-TAB_NAV gesture.
                             runAfterTapWindow(Runnable {

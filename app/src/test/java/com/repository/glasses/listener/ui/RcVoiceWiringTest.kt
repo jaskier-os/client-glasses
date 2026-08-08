@@ -413,6 +413,53 @@ class RcVoiceWiringTest {
     }
 
     /**
+     * Exempting the chat from the NUMPAD_2 consumer let touchpad taps through for the first time,
+     * which means the chat's double tap now REACHES this branch during a live session. The global
+     * double-tap-to-cancel branch matches only DPAD_CENTER/ENTER, so without a cancel here the tap
+     * would leave for TAB_NAV while the session kept listening under a hint saying it was
+     * cancelled -- the same "the hint is a lie" defect, one state earlier.
+     */
+    @Test
+    fun theChatDoubleTapCancelsALiveSessionBeforeItLeaves() {
+        val main = read("MainActivity.kt")
+        val chat = main.substringAfter("FocusState.CHAT_FOCUSED -> {", "")
+            .substringBefore("FocusState.LIST_FOCUSED -> {", "")
+        assertTrue("could not locate the CHAT_FOCUSED key branch", chat.isNotBlank())
+        val doubleTap = chat.substringAfter("if (isDoubleTap()) {", "")
+            .substringBefore("KEY: CHAT_FOCUSED double-tap -> TAB_NAV", "")
+        assertTrue("could not locate the chat's double-tap branch: $chat", doubleTap.isNotBlank())
+        assertTrue(
+            "the chat's double tap leaves for TAB_NAV without cancelling a LISTENING/RESPONDING " +
+                "session; a touchpad tap never reaches the global cancel branch, which matches " +
+                "only DPAD_CENTER/ENTER: $doubleTap",
+            calls(doubleTap, "\"LISTENING\"") && calls(doubleTap, "ACTION_CANCEL_SESSION")
+        )
+    }
+
+    /**
+     * The shared decision table must be consulted with the chat's REAL state. Passing literals
+     * folds the call to a compile-time constant and the "shared" table decides nothing -- the
+     * unification would be a comment rather than a mechanism.
+     */
+    @Test
+    fun theChatConsultsTheSharedTableWithRealStateNotConstants() {
+        val main = read("MainActivity.kt")
+        val chat = main.substringAfter("FocusState.CHAT_FOCUSED -> {", "")
+            .substringBefore("FocusState.LIST_FOCUSED -> {", "")
+        val call = chat.substringAfter("DictationUx.onTap(", "").substringBefore(")", "")
+        assertTrue("the chat never consults DictationUx.onTap: $chat", call.isNotBlank())
+        assertTrue(
+            "DictationUx.onTap is called with literals, so it folds to a constant and decides " +
+                "nothing: $call",
+            !call.contains("dictating = false") || !call.contains("sendPending = false")
+        )
+        assertTrue(
+            "the 'dictating' argument must come from the chat's actual service state: $call",
+            call.contains("serviceState")
+        )
+    }
+
+    /**
      * A pending tap must be CANCELLED when a new one replaces it. Merely overwriting the field
      * leaves the old runnable posted, so two taps the wearer meant as one gesture apiece both fire.
      */

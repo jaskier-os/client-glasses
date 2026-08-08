@@ -145,7 +145,12 @@ class RcVoiceLifecycle(
      * leave the session to its new owner, who will close it.
      */
     fun forgetCaptureWithoutStopping() {
-        capture.cancel()
+        // cancelSilently, NOT cancel: a cancel owes a discard, and nothing here will ever pay it.
+        // The new owner's transcript is routed by focus state and never passes through
+        // acceptTranscript(), so the debt would instead be paid by the wearer's NEXT legitimate RC
+        // dictation -- which would be dropped as "a transcript from an abandoned capture", hang
+        // the voice bar, and cost them another watchdog timeout.
+        capture.cancelSilently()
         window.cancel()
         voiceSessionOpen = false
     }
