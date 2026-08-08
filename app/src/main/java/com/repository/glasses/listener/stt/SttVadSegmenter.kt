@@ -300,7 +300,11 @@ class SttVadSegmenter {
         // different fixes. Printing the peak and RMS of the exact samples handed to the recogniser
         // settles it from the log alone -- the live incident could not, and cost a whole round of
         // debugging aimed at the wrong layer.
-        t("vad segment levels ${levels(out)}")
+        //
+        // Guarded on the trace being wired at all: the string is built BEFORE t() is entered, so
+        // t()'s never-throws wrapper does not cover this, and it is a full pass over up to 192 000
+        // samples on the STT worker to produce a line nobody may be listening for.
+        if (trace != null) t("vad segment levels ${levels(out)}")
         return Segment(out, naturalEnd)
     }
 

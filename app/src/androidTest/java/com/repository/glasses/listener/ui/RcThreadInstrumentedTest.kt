@@ -589,8 +589,7 @@ class RcThreadInstrumentedTest {
         SystemClock.sleep(700)
         // Asserted BEFORE the screenshot: PNG compression costs time the 3 s window is spending,
         // and the BACK below must land while the send is still pending to mean what it claims.
-        assertEquals(View.VISIBLE, view(R_rcThreadCountdownRow()).visibility)
-        assertEquals(View.VISIBLE, view(R_rcThreadCountdownFill()).visibility)
+        assertEquals(View.VISIBLE, view(R_rcThreadSendCountdown()).visibility)
         shoot("13_send_window")
         key(KeyEvent.KEYCODE_BACK)
         SystemClock.sleep(500)
@@ -629,7 +628,7 @@ class RcThreadInstrumentedTest {
         // Asserted BEFORE the screenshot, for the same reason step 13 is: a PNG compress costs
         // over a second, which is a third of the window this assertion must land inside.
         assertEquals("the abandoned utterance must not arm the new capture's window",
-            View.GONE, view(R_rcThreadCountdownRow()).visibility)
+            View.GONE, view(R_rcThreadSendCountdown()).visibility)
         shoot("13b_stale_transcript_dropped")
         // A dropped transcript is not consumed: the fresh capture is still listening for its own.
         assertEquals("dropping the stale transcript must not tear down the running capture",
@@ -650,7 +649,7 @@ class RcThreadInstrumentedTest {
         assertEquals("the capture that survived the discard must still accept its own transcript",
             View.VISIBLE, view(R_rcThreadVoiceBar()).visibility)
         assertEquals("and open the send window, so step 14 has something to cancel",
-            View.VISIBLE, view(R_rcThreadCountdownRow()).visibility)
+            View.VISIBLE, view(R_rcThreadSendCountdown()).visibility)
 
         // 14. A DOUBLE tap inside the window cancels it. A single tap must not.
         //
@@ -732,7 +731,7 @@ class RcThreadInstrumentedTest {
         key(KeyEvent.KEYCODE_NUMPAD_3)
         pushFinalTranscript("run the whole suite")
         SystemClock.sleep(800)
-        assertEquals(View.VISIBLE, view(R_rcThreadCountdownRow()).visibility)
+        assertEquals(View.VISIBLE, view(R_rcThreadSendCountdown()).visibility)
         pushRows(rowsFrame(
             """{"q":9,"r":"prompt","x":"Allow Bash?","o":["Yes","No"],"i":"req-2"}""", lastSeq = 9))
         SystemClock.sleep(HOLD_MS)
@@ -854,6 +853,11 @@ class RcThreadInstrumentedTest {
     private fun R_rcThreadFooterHint() = com.repository.glasses.listener.R.id.rcThreadFooterHint
     private fun R_rcThreadVoiceBar() = com.repository.glasses.listener.R.id.rcThreadVoiceBar
     private fun R_rcThreadVoiceText() = com.repository.glasses.listener.R.id.rcThreadVoiceText
-    private fun R_rcThreadCountdownRow() = com.repository.glasses.listener.R.id.rcThreadCountdownRow
-    private fun R_rcThreadCountdownFill() = com.repository.glasses.listener.R.id.rcThreadCountdownFill
+    /**
+     * The 3 s withdraw countdown. It used to be a track + fill + row trio in the layout; it is now
+     * one shared [SendCountdownBar], the same view class the AI chat draws, which makes ITSELF
+     * visible in start() and hides itself in stop(). So its own visibility is the assertion these
+     * steps always wanted: "is the send window on screen".
+     */
+    private fun R_rcThreadSendCountdown() = com.repository.glasses.listener.R.id.rcThreadSendCountdown
 }
