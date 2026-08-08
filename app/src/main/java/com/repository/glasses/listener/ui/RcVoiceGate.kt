@@ -110,16 +110,16 @@ class RcCapture {
         active = false
         expire(now)
         owed.addLast(now + ttlMs)
-        // Over the cap, the debt with the EARLIEST deadline is evicted -- never the incoming one.
-        // Refusing the newcomer dropped whichever debt happened to arrive last, and if that was a
-        // handover it re-opened the worst failure this class exists to prevent: a notification
-        // reply's words delivered to a coding agent that acts on them. The oldest debt is both the
-        // least likely to still be redeemed and the cheapest to be wrong about.
-        while (owed.size > MAX_PENDING_DISCARDS) {
-            val earliest = owed.minOrNull() ?: break
-            owed.remove(earliest)
-        }
-    return true
+        // Over the cap, the OLDEST-RECORDED debt is evicted -- by insertion order, which is the
+        // head, NOT by earliest deadline.
+        //
+        // Evicting the earliest deadline looks equivalent and is not: the two TTLs differ by a
+        // factor of five, so a freshly-recorded 4 s abandon has an earlier deadline than three
+        // handovers recorded seconds before it and would evict ITSELF the moment it was added,
+        // leaving that abandoned capture owing nothing and its late final adoptable. Insertion
+        // order cannot do that -- the incoming debt is always the newest.
+        while (owed.size > MAX_PENDING_DISCARDS) owed.removeFirst()
+        return true
     }
 
     /**

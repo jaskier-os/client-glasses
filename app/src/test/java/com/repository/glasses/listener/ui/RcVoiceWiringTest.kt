@@ -543,6 +543,58 @@ class RcVoiceWiringTest {
 
     // --- The countdown cannot outlive its view ---
 
+    /**
+     * The bar hides itself when the window elapses. On the chat surface its VISIBILITY is the
+     * pending state, so a bar that waits to be told would latch tap-to-dictate into IGNORE forever
+     * if the phone's follow-up broadcast never landed. It is also simply a lie: the window is over.
+     */
+    @Test
+    fun theCountdownBarHidesItselfWhenTheWindowElapses() {
+        val bar = read("ui/SendCountdownBar.kt")
+        val fn = body(bar, "fun start(durationMs")
+        assertTrue(
+            "SendCountdownBar.start does not hide the bar when the animation ends; on the chat " +
+                "surface visibility IS the pending state, so a dropped follow-up broadcast would " +
+                "latch tap-to-dictate off: $fn",
+            calls(fn, "onAnimationEnd")
+        )
+        assertTrue(
+            "the end listener must guard against a newer run owning the bar; stop() cancels, " +
+                "which lands in the same callback: $fn",
+            calls(fn, "animator === a")
+        )
+    }
+
+    /**
+     * The chat's countdown is a contentFrame-level overlay and the RC thread lives in the same
+     * frame, so an unguarded start() painted it across the bottom of whatever surface the wearer
+     * was actually looking at.
+     */
+    @Test
+    fun theChatCountdownOnlyDrawsWhenTheChatIsOnScreen() {
+        val main = read("MainActivity.kt")
+        val line = main.lineSequence()
+            .filter { it.contains("chatSendCountdown?.start(") }
+            .toList()
+        assertTrue("the chat countdown is never started", line.isNotEmpty())
+        val guard = main.substringBefore("chatSendCountdown?.start(", "")
+            .substringAfterLast("if (requestId == \"pending\"", "")
+        assertTrue(
+            "chatSendCountdown is started without checking the chat is the visible surface; it " +
+                "would paint over the RC thread, which shares the same contentFrame: $guard",
+            guard.contains("rcThreadContainer.visibility") ||
+                guard.contains("chatContainer.visibility")
+        )
+        // ...and opening a thread must take any bar already up back down.
+        val open = main.substringBefore("rcThreadContainer.visibility = View.VISIBLE", "")
+            .let { main.substringAfter("rcThreadContainer.visibility = View.VISIBLE", "") }
+            .take(300)
+        assertTrue(
+            "opening an RC thread does not stop the chat's overlay bar: $open",
+            calls(open, "chatSendCountdown?.stop()")
+        )
+    }
+
     @Test
     fun theCountdownBarStopsItsAnimatorOnDetach() {
         val bar = read("ui/SendCountdownBar.kt")

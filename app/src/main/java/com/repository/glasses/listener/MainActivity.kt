@@ -1472,7 +1472,14 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 // moment the RC thread shows its countdown over, so the chat now shows the SAME
                 // bar ([SendCountdownBar]) instead of leaving the wearer to guess. A real
                 // requestId means the message is already gone -- the bar comes down.
-                if (requestId == "pending") {
+                // Only when the CHAT is the surface on screen. The bar is a contentFrame-level
+                // overlay and the RC thread lives in the same frame, so an unguarded start()
+                // painted the chat's countdown across the bottom of whatever tab the wearer was
+                // actually looking at -- including a coding thread, where a bar saying
+                // "DOUBLE-TAP TO CANCEL" means something else entirely.
+                if (requestId == "pending" && chatContainer.visibility == View.VISIBLE &&
+                    rcThreadContainer.visibility != View.VISIBLE
+                ) {
                     // The PHONE's window, not ours: it owns the chat's confirm timer and we only
                     // draw over it. Animating our own 3 s here would leave the bar a third full
                     // after the message had already gone.
@@ -7111,6 +7118,9 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         focusState = FocusState.RC_THREAD_FOCUSED
         chatListRecycler.visibility = View.GONE
         rcThreadContainer.visibility = View.VISIBLE
+        // The chat's overlay bar shares this contentFrame and would otherwise draw across the
+        // bottom of the thread.
+        chatSendCountdown?.stop()
         renderRcThreadChrome()
         // Asking for the rows IS the read acknowledgement; seenSeq is -1 because nothing is held.
         requestRcMessages(row.id)

@@ -566,6 +566,42 @@ class RcVoiceLifecycleTest {
     }
 
     /**
+     * The cap must never evict the debt being recorded.
+     *
+     * Evicting by earliest DEADLINE looks equivalent to evicting the oldest and is not: a freshly
+     * recorded 4 s abandon has an earlier deadline than three handovers recorded seconds earlier,
+     * so it evicted ITSELF the instant it was added -- leaving that abandoned capture owing
+     * nothing, and its late final adoptable by the next one.
+     */
+    @Test
+    fun theCapNeverEvictsTheDebtBeingRecorded() {
+        val r = Recorder()
+        // Fill the cap with long-lived handover debts.
+        repeat(RcCapture.MAX_PENDING_DISCARDS) {
+            r.lifecycle.start()
+            r.lifecycle.forgetCaptureWithoutStopping()
+            r.elapse(1)
+        }
+        val beforeAbandon = r.lifecycle.owedDiscards()
+
+        // Now an ordinary abandon, whose SHORT deadline is the EARLIEST in the deque.
+        r.lifecycle.start()
+        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.BACK)
+        assertEquals("the cap must hold", beforeAbandon, r.lifecycle.owedDiscards())
+
+        // Past the abandon's deadline, well short of the handovers'. If the abandon debt was
+        // RECORDED, exactly one debt expires here. If it evicted itself on the way in, nothing
+        // does -- the deque still holds three live handovers, and that abandoned capture's late
+        // final would have been adopted and sent to the coding agent.
+        r.elapse(RcCapture.DEFAULT_DISCARD_TTL_MS / 1000 + 1)
+        assertEquals(
+            "the incoming abandon debt evicted itself because its deadline was the earliest in " +
+                "the deque; the cap must evict the oldest RECORDED debt, never the new one",
+            beforeAbandon - 1, r.lifecycle.owedDiscards()
+        )
+    }
+
+    /**
      * Every exit, driven the way MainActivity drives it. Kept exhaustive with a `when` over the
      * enum (no `else`), so a new exit will not compile until it is driven here.
      */

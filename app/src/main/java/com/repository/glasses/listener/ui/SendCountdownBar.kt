@@ -102,16 +102,28 @@ class SendCountdownBar @JvmOverloads constructor(
         fill.pivotX = 0f
         fill.scaleX = 1f
         secs.text = RcCountdownLabel.of(durationMs)
-        animator = ValueAnimator.ofFloat(1f, 0f).apply {
-            duration = durationMs
-            interpolator = LinearInterpolator()
-            addUpdateListener { a ->
-                val fraction = a.animatedValue as Float
-                fill.scaleX = fraction
-                secs.text = RcCountdownLabel.of((fraction * durationMs).toLong())
-            }
-            start()
+        val a = ValueAnimator.ofFloat(1f, 0f)
+        animator = a
+        a.duration = durationMs
+        a.interpolator = LinearInterpolator()
+        a.addUpdateListener { anim ->
+            val fraction = anim.animatedValue as Float
+            fill.scaleX = fraction
+            secs.text = RcCountdownLabel.of((fraction * durationMs).toLong())
         }
+        // The bar takes ITSELF down when the window is over rather than waiting to be told. The
+        // window has elapsed by definition here -- there is nothing left to withdraw -- so leaving
+        // "0s / DOUBLE-TAP TO CANCEL" up is a lie; and on the chat surface, where this view's
+        // VISIBILITY is the pending state, a dropped follow-up broadcast would otherwise latch
+        // tap-to-dictate into answering IGNORE forever.
+        a.addListener(object : android.animation.AnimatorListenerAdapter() {
+            override fun onAnimationEnd(animation: android.animation.Animator) {
+                // Only when this is still the current run: stop() cancels, which also lands here,
+                // and by then a newer start() may already own the bar.
+                if (animator === a) stop()
+            }
+        })
+        a.start()
     }
 
     /** Cancel the animation and hide the bar. Idempotent. */
