@@ -17,9 +17,12 @@ import org.junit.Test
  */
 class RcVoiceLifecycleTest {
 
-    private class Recorder {
+    private class Recorder(var now: Long = 10_000L) {
         val stops = ArrayList<String>()
-        val lifecycle = RcVoiceLifecycle { reason -> stops.add(reason) }
+        val lifecycle = RcVoiceLifecycle(clock = { now }, stopVoiceSession = { stops.add(it) })
+
+        /** Advance the clock, in seconds, between steps of a scenario. */
+        fun elapse(seconds: Long) { now += seconds * 1000L }
     }
 
     // --- The enumerated-exit invariant ---
@@ -248,66 +251,93 @@ class RcVoiceLifecycleTest {
      * This walks that loop for real: one dictation per round, one final per dictation, as the wire
      * actually behaves.
      */
-    @Test
-    fun theDiscardDebtDoesNotSustainItselfAcrossDictations() {
-        val r = Recorder()
-        r.lifecycle.start()
-        r.lifecycle.forgetCaptureWithoutStopping()
-
-        // The wearer returns and dictates. The debt eats this final -- correctly: it might be the
-        // foreign one. But no SECOND final is coming for this capture (the handover's transcript
-        // never arrived), so it sits active until the watchdog gives up.
-        r.lifecycle.start()
-        assertFalse(r.lifecycle.acceptTranscript())
-        assertTrue("the capture is still live, waiting for a final that will not come",
-            r.lifecycle.active)
-        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
-
-        // THE LOOP. If the watchdog owed a discard, that debt would eat the next dictation, whose
-        // capture would then hang until the watchdog, which would owe again -- forever, with the
-        // debt oscillating 1 -> 0 -> 1 so MAX_PENDING_DISCARDS never engages. Every dictation from
-        // here must land.
-        repeat(5) { round ->
-            r.lifecycle.start()
-            assertTrue(
-                "dictation ${round + 2} was swallowed; the discard debt is self-sustaining and " +
-                    "the thread is permanently deaf",
-                r.lifecycle.acceptTranscript()
-            )
-            r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
-        }
-    }
-
     /**
-     * The watchdog specifically owes nothing: it fires BECAUSE no transcript arrived, so there is
-     * none in flight to discard. Every other cancel still owes one -- that distinction is the
-     * whole defence against an abandoned capture's words being sent by the next one.
+     * EVERY cancel owes a discard, the watchdog included.
+     *
+     * A watchdog timeout does not mean no transcript is coming -- only that none has come YET. The
+     * phone can already be committed to delivering one: its VAD ends the utterance a second before
+     * our 30 s expires, it launches transcription, and the final lands a few seconds later. If the
+     * wearer re-holds in between (the natural reaction to "no speech"), an unpaid watchdog would
+     * let those words be adopted by the new capture and sent to the coding agent.
      */
     @Test
-    fun theWatchdogOwesNoDiscardButEveryOtherCancelDoes() {
-        val watchdog = Recorder()
-        watchdog.lifecycle.start()
-        watchdog.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
-        watchdog.lifecycle.start()
-        assertTrue(
-            "a watchdog timeout must not cost the wearer their next dictation: nothing was in " +
-                "flight to discard, which is exactly why it fired",
-            watchdog.lifecycle.acceptTranscript()
-        )
-
+    fun everyCancelIncludingTheWatchdogOwesADiscard() {
         for (exit in RcVoiceLifecycle.Exit.values().filter {
-            it != RcVoiceLifecycle.Exit.WATCHDOG &&
-                it != RcVoiceLifecycle.Exit.FINAL_TRANSCRIPT &&
+            it != RcVoiceLifecycle.Exit.FINAL_TRANSCRIPT &&
                 it != RcVoiceLifecycle.Exit.SEND_COMMIT &&
                 it != RcVoiceLifecycle.Exit.SEND_WITHDRAWN
         }) {
             val r = Recorder()
             r.lifecycle.start()
             r.lifecycle.cancelCapture(exit)
+            // The abandoned utterance's final lands moments later, into the next capture.
+            r.elapse(2)
             r.lifecycle.start()
             assertFalse(
                 "$exit abandoned a capture whose transcript may still be in flight; without a " +
                     "discard those words would be sent as the NEXT capture's message",
+                r.lifecycle.acceptTranscript()
+            )
+        }
+    }
+
+    /**
+     * A discard EXPIRES. This is what stops the debt sustaining itself.
+     *
+     * The debt guards a real but SHORT race: the seconds between abandoning a capture and its
+     * in-flight final arriving. Held indefinitely, it instead eats a dictation the wearer makes
+     * minutes later -- and that eaten capture then hangs to its own watchdog, which owes a fresh
+     * debt, which eats the next one, forever. Expiry bounds the guard to the window it exists for.
+     */
+    @Test
+    fun aDiscardExpiresSoItCannotEatAMuchLaterDictation() {
+        val r = Recorder()
+        r.lifecycle.start()
+        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
+
+        // The wearer gives up, does something else, and comes back well after any in-flight
+        // transcript could still be arriving.
+        r.elapse(RcVoiceLifecycle.DISCARD_TTL_MS / 1000 + 5)
+        r.lifecycle.start()
+        assertTrue(
+            "a stale debt ate a dictation made long after any in-flight final could arrive; " +
+                "that eaten capture then hangs to its watchdog, which owes again, forever",
+            r.lifecycle.acceptTranscript()
+        )
+    }
+
+    /** The expiry must not be so eager that it opens the race it exists to close. */
+    @Test
+    fun aDiscardIsStillOwedWithinTheRaceWindow() {
+        val r = Recorder()
+        r.lifecycle.start()
+        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
+        r.elapse(RcVoiceLifecycle.DISCARD_TTL_MS / 1000 - 1)
+        r.lifecycle.start()
+        assertFalse(
+            "the debt expired inside the window where a late final can still arrive; those words " +
+                "would be sent to the coding agent",
+            r.lifecycle.acceptTranscript()
+        )
+    }
+
+    /**
+     * The loop R7 found, walked with expiry in place: one dictation per round, one final each, and
+     * a watchdog between them -- as the wire actually behaves.
+     */
+    @Test
+    fun theDiscardDebtCannotSustainItselfAcrossDictations() {
+        val r = Recorder()
+        r.lifecycle.start()
+        r.lifecycle.forgetCaptureWithoutStopping()
+
+        repeat(6) { round ->
+            // The wearer notices, and re-dictates -- but not instantly.
+            r.elapse(RcVoiceLifecycle.DISCARD_TTL_MS / 1000 + 5)
+            r.lifecycle.start()
+            assertTrue(
+                "dictation ${round + 1} was swallowed; the discard debt is self-sustaining and " +
+                    "the thread is permanently deaf",
                 r.lifecycle.acceptTranscript()
             )
         }

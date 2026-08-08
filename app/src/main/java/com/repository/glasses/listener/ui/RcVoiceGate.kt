@@ -68,14 +68,24 @@ class RcCapture {
         private set
 
     /**
-     * How many transcripts belong to captures the user abandoned. The phone's finals carry no id
-     * of their own and arrive in order, so counting the abandoned ones is what tells them apart.
+     * When each abandoned capture's transcript is still worth discarding, newest last.
+     *
+     * The phone's finals carry no id of their own and arrive in order, so counting the abandoned
+     * ones is what tells them apart. Each debt also carries a DEADLINE, because it guards a short
+     * race -- the seconds between abandoning a capture and its in-flight final landing -- and a
+     * debt held past that eats a dictation the wearer makes much later instead.
      */
-    private var owedDiscards: Int = 0
+    private val owed = ArrayDeque<Long>()
+
+    /** Drop debts whose in-flight transcript can no longer be arriving. */
+    private fun expire(now: Long) {
+        while (owed.isNotEmpty() && owed.first() <= now) owed.removeFirst()
+    }
 
     /** Begins a capture. A still-running one is abandoned, and owes a discard like any other. */
-    fun start() {
-        if (active) cancel()
+    fun start(now: Long = 0L) {
+        if (active) cancel(now)
+        expire(now)
         active = true
     }
 
@@ -85,10 +95,11 @@ class RcCapture {
      *
      * @return true when a capture was actually running.
      */
-    fun cancel(): Boolean {
+    fun cancel(now: Long = 0L, ttlMs: Long = DEFAULT_DISCARD_TTL_MS): Boolean {
         if (!active) return false
         active = false
-        if (owedDiscards < MAX_PENDING_DISCARDS) owedDiscards++
+        expire(now)
+        if (owed.size < MAX_PENDING_DISCARDS) owed.addLast(now + ttlMs)
         return true
     }
 
@@ -103,6 +114,9 @@ class RcCapture {
         active = false
     }
 
+    /** Test/diagnostic view of the outstanding debt. */
+    fun owedDiscards(): Int = owed.size
+
     /**
      * A final transcript arrived.
      *
@@ -110,9 +124,10 @@ class RcCapture {
      *         False means it belonged to an abandoned capture, or to no capture at all, and must
      *         be dropped on the floor.
      */
-    fun acceptTranscript(): Boolean {
-        if (owedDiscards > 0) {
-            owedDiscards--
+    fun acceptTranscript(now: Long = 0L): Boolean {
+        expire(now)
+        if (owed.isNotEmpty()) {
+            owed.removeFirst()
             // The running capture stays ACTIVE. It is a different capture from the abandoned one
             // whose final this was, and its own final is still to come -- so tearing it down here
             // would deafen a capture the wearer is actively speaking into.
@@ -130,6 +145,16 @@ class RcCapture {
          * is far more likely to be wrong than right.
          */
         const val MAX_PENDING_DISCARDS = 3
+
+        /**
+         * How long an abandoned capture's transcript may still be arriving.
+         *
+         * The phone's VAD can end an utterance a moment before we give up on it, and the
+         * transcription that follows takes seconds. This is the window a debt guards. Past it a
+         * debt is not protection, it is an unrelated dictation being eaten -- which then hangs to
+         * its own watchdog and owes again, forever.
+         */
+        const val DEFAULT_DISCARD_TTL_MS = 15_000L
     }
 }
 

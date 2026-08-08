@@ -16,6 +16,11 @@ package com.repository.glasses.listener.ui
  */
 class RcVoiceLifecycle(
     /**
+     * Monotonic time source, injected so the discard EXPIRY can be driven in a test without
+     * sleeping. Defaults to the same clock the rest of the activity's timing uses.
+     */
+    private val clock: () -> Long = { android.os.SystemClock.uptimeMillis() },
+    /**
      * Broadcasts ACTION_RC_VOICE_STOP. Invoked at most once per opened session, never for a
      * session that is not open -- a stray stop would tear down a Telegram or notification-reply
      * capture that a different feature owns.
@@ -73,7 +78,7 @@ class RcVoiceLifecycle(
 
     /** Opens a capture and, with it, the phone-side voice session. */
     fun start() {
-        capture.start()
+        capture.start(clock())
         voiceSessionOpen = true
     }
 
@@ -92,7 +97,7 @@ class RcVoiceLifecycle(
     }
 
     /** @return true when the arriving transcript belongs to the capture that is running. */
-    fun acceptTranscript(): Boolean = capture.acceptTranscript()
+    fun acceptTranscript(): Boolean = capture.acceptTranscript(clock())
 
     /**
      * Stops a capture without sending, and closes the session. Safe when none is running.
@@ -100,18 +105,16 @@ class RcVoiceLifecycle(
      * @return true when a capture was actually cancelled.
      */
     fun cancelCapture(exit: Exit): Boolean {
-        // The WATCHDOG owes no discard. Every other cancel abandons a capture whose transcript may
-        // still be in flight, so a debt is right. The watchdog fires precisely BECAUSE no
-        // transcript arrived in 30 s -- there is nothing left to discard, and owing anyway made
-        // the debt self-sustaining: a debt eats a dictation, the eaten capture stays live (its own
-        // final was consumed) until the watchdog, the watchdog owes a fresh debt, and the next
-        // dictation is eaten too. The debt oscillated 1 -> 0 -> 1 forever and the thread went
-        // permanently deaf, with MAX_PENDING_DISCARDS never engaging because it never grew.
-        val was = if (exit == Exit.WATCHDOG) {
-            capture.active.also { capture.cancelSilently() }
-        } else {
-            capture.cancel()
-        }
+        // EVERY cancel owes a discard, the watchdog included. A timeout does not mean no
+        // transcript is coming -- only that none has come YET: the phone's VAD can end the
+        // utterance a moment before we give up, and the transcription that follows takes seconds.
+        // If the wearer re-holds in between (the natural reaction to "no speech"), an unpaid debt
+        // would let those words be adopted by the new capture and sent to the coding agent.
+        //
+        // The debt EXPIRES instead. That is what stops it sustaining itself: held indefinitely it
+        // eats a dictation made much later, which then hangs to its own watchdog, which owes
+        // again, forever.
+        val was = capture.cancel(clock(), DISCARD_TTL_MS)
         // Cleared alongside: a cancel that left a pending send behind would keep the countdown
         // running over a dictation the user just abandoned.
         window.cancel()
@@ -168,13 +171,25 @@ class RcVoiceLifecycle(
         // That is a dictation the wearer repeats. The alternative is words they never addressed to
         // the agent being executed by it, which they cannot take back. The recoverable failure is
         // the correct one to choose.
-        capture.cancel()
+        capture.cancel(clock(), DISCARD_TTL_MS)
         window.cancel()
         voiceSessionOpen = false
     }
 
     /** Test hook: arm the window without a capture, to exercise the stale-send path. */
     fun armForTest(text: String): Boolean = window.arm(text)
+
+    companion object {
+        /**
+         * How long an abandoned capture's transcript may still be arriving, and therefore how long
+         * a discard is owed for it.
+         *
+         * Comfortably longer than the phone's end-of-speech plus transcription latency, so the
+         * race it guards is fully covered; comfortably shorter than the pause before a wearer
+         * re-dictates, so a debt never eats an unrelated utterance.
+         */
+        const val DISCARD_TTL_MS = RcCapture.DEFAULT_DISCARD_TTL_MS
+    }
 
     private fun closeSession(exit: Exit) {
         if (!voiceSessionOpen) return
