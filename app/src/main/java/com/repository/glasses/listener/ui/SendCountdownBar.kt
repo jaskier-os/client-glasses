@@ -121,6 +121,17 @@ class SendCountdownBar @JvmOverloads constructor(
         visibility = GONE
     }
 
+    /**
+     * A running ValueAnimator is held by the process-global AnimationHandler and its update
+     * listener captures this view's children, so an animator left running past detach keeps
+     * ticking against a dead hierarchy and pins the Activity. Nothing outside can be relied on to
+     * remember; the view cleans up after itself.
+     */
+    override fun onDetachedFromWindow() {
+        stop()
+        super.onDetachedFromWindow()
+    }
+
     companion object {
         const val CANCEL_HINT = "DOUBLE-TAP TO CANCEL"
         private const val HINT_SP = 9f

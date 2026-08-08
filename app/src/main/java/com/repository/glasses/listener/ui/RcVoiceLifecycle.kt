@@ -136,6 +136,20 @@ class RcVoiceLifecycle(
         return true
     }
 
+    /**
+     * Drop our capture WITHOUT closing the phone-side voice session.
+     *
+     * For the one case where another feature (a notification reply, a Telegram voice message) has
+     * taken the microphone over on the SAME tag and the SAME channels. Stopping there would tear
+     * down THEIR live capture and their transcript would never arrive -- so we forget ours and
+     * leave the session to its new owner, who will close it.
+     */
+    fun forgetCaptureWithoutStopping() {
+        capture.cancel()
+        window.cancel()
+        voiceSessionOpen = false
+    }
+
     /** Test hook: arm the window without a capture, to exercise the stale-send path. */
     fun armForTest(text: String): Boolean = window.arm(text)
 

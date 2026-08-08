@@ -166,6 +166,53 @@ class RcVoiceLifecycleTest {
         assertEquals(0, r.stops.size)
     }
 
+    // --- Handing the microphone to another feature ---
+
+    /**
+     * A notification reply or a Telegram voice message takes the microphone over on the SAME tag
+     * and the SAME channels. Our watchdog must NOT broadcast a stop then: it would tear down their
+     * live capture and their transcript would never arrive.
+     */
+    @Test
+    fun forgettingACaptureForAnotherOwnerBroadcastsNoStop() {
+        val r = Recorder()
+        r.lifecycle.start()
+        r.lifecycle.forgetCaptureWithoutStopping()
+        assertEquals(
+            "stopping here would tear down the feature that now owns the microphone",
+            0, r.stops.size
+        )
+        assertFalse(r.lifecycle.active)
+        assertFalse(r.lifecycle.pending)
+        assertFalse(
+            "the session must be considered gone, so a LATER exit cannot stop it either",
+            r.lifecycle.voiceSessionOpen
+        )
+    }
+
+    @Test
+    fun aLaterExitAfterForgettingStillBroadcastsNothing() {
+        val r = Recorder()
+        r.lifecycle.start()
+        r.lifecycle.forgetCaptureWithoutStopping()
+        for (exit in RcVoiceLifecycle.Exit.values()) driveTo(r.lifecycle, exit)
+        assertEquals(
+            "no exit may resurrect a stop for a session handed to another owner",
+            0, r.stops.size
+        )
+    }
+
+    @Test
+    fun aCaptureStartedAfterForgettingIsANormalSessionAgain() {
+        val r = Recorder()
+        r.lifecycle.start()
+        r.lifecycle.forgetCaptureWithoutStopping()
+        r.lifecycle.start()
+        assertTrue(r.lifecycle.voiceSessionOpen)
+        r.lifecycle.cancelCapture(RcVoiceLifecycle.Exit.CANCEL)
+        assertEquals(listOf("CANCEL"), r.stops)
+    }
+
     /**
      * Every exit, driven the way MainActivity drives it. Kept exhaustive with a `when` over the
      * enum (no `else`), so a new exit will not compile until it is driven here.

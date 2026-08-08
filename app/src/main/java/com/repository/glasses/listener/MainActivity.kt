@@ -390,6 +390,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     /** The 3 s withdraw countdown inside a thread. Same class as the AI chat's. */
     private var rcSendCountdown: com.repository.glasses.listener.ui.SendCountdownBar? = null
 
+    /**
+     * True while an RC dictation is the thing driving the SHARED listening chrome (statusArea,
+     * the visualizer, the double-tap hint). Without it, an RC teardown that lands while the AI
+     * chat is itself LISTENING would tear down the chat's chrome as well.
+     */
+    private var rcOwnsListeningChrome = false
+
     /** Merges CH_RC_MESSAGES_RESP frames. Empty until a session is opened. */
     private val rcThread = RcThreadModel()
 
@@ -7256,6 +7263,19 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         val r = Runnable {
             rcCaptureWatchdog = null
             if (!rcVoice.active) return@Runnable
+            // A notification reply takes the microphone over with the SAME tag and the SAME
+            // channels. Broadcasting RC_VOICE_STOP now would tear down the REPLY's live capture,
+            // and its transcript would never arrive. Forget our own capture silently and leave
+            // the session to the feature that now owns it.
+            if (focusState == FocusState.NOTIFICATION_REPLY ||
+                focusState == FocusState.TELEGRAM_RECORDING) {
+                uiLog("RC: watchdog fired but $focusState owns the microphone now; " +
+                    "dropping the capture without stopping the session")
+                rcVoice.forgetCaptureWithoutStopping()
+                rcShowCountdown(false)
+                rcThreadVoiceBar.visibility = View.GONE
+                return@Runnable
+            }
             uiLog("RC: capture produced nothing within ${RC_CAPTURE_TIMEOUT_MS}ms -> giving up")
             rcCancelCapture(RcVoiceLifecycle.Exit.WATCHDOG)
             dbg("no speech")
@@ -7330,14 +7350,21 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      */
     private fun rcShowListeningChrome(show: Boolean) {
         if (show) {
+            rcOwnsListeningChrome = true
             statusArea.visibility = View.VISIBLE
             setStatus(LISTENING_STATUS_TEXT, R.drawable.ic_mic, Lum.GLOW)
             showAudioVisualizer()
             showDoubleTapHintPersistent()
         } else {
-            hideAudioVisualizer()
-            hideDoubleTapHint()
-            statusArea.visibility = View.INVISIBLE
+            // Hide ONLY what this path put up. These are the AI chat's shared views, and an RC
+            // teardown that fires while the chat is itself LISTENING would otherwise strip the
+            // chat's chrome with nothing to restore it until the next state broadcast.
+            if (rcOwnsListeningChrome) {
+                rcOwnsListeningChrome = false
+                hideAudioVisualizer()
+                hideDoubleTapHint()
+                statusArea.visibility = View.INVISIBLE
+            }
         }
         // The thread's own in-bar mic glyph tracks the same flag, so the bar does not keep an
         // orphan microphone lit under a torn-down capture.
@@ -9822,6 +9849,16 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
 
     override fun onStop() = GT.section("ui.onStop") {
         activityLog("onStop isFinishing=${isFinishing} isChangingConfigurations=${isChangingConfigurations}")
+        // The UI that was going to show the transcript and offer the 3 s undo is gone. Leaving the
+        // dictation running would keep the phone-side voice session open with nothing able to
+        // close it -- the same leak the send path had, reached by backgrounding instead.
+        //
+        // A configuration change is excluded: the Activity is coming straight back and the
+        // dictation is meant to survive it.
+        if (!isChangingConfigurations && rcVoice.busy) {
+            uiLog("RC: dictation abandoned, UI stopped")
+            rcCancelCapture(RcVoiceLifecycle.Exit.THREAD_CLOSED)
+        }
         super.onStop()
     }
 
@@ -10837,6 +10874,17 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             try { unregisterReceiver(it) } catch (_: Exception) {}
         }
         hideTelegramVoiceVisualizer()
+        // The RC dictation's own posted work and the shared ACTION_AUDIO_LEVELS receiver. Left
+        // behind, rcSendRunnable fires rcCommitSend() against dead views and ships a message the
+        // wearer can neither see nor withdraw; the receiver leaks and pins the Activity.
+        rcCancelCapture(RcVoiceLifecycle.Exit.THREAD_CLOSED)
+        rcCaptureWatchdog?.let { mainHandler.removeCallbacks(it) }
+        rcCaptureWatchdog = null
+        rcSendRunnable?.let { mainHandler.removeCallbacks(it) }
+        rcSendRunnable = null
+        rcSendCountdown?.stop()
+        chatSendCountdown?.stop()
+        hideAudioVisualizer()
         telegramSendRunnable?.let { mainHandler.removeCallbacks(it) }
         callKeyHandler.removeCallbacks(callDurationTick)
         pendingCallAccept?.let { callKeyHandler.removeCallbacks(it) }
