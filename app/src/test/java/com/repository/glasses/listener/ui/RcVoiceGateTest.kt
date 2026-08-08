@@ -109,7 +109,10 @@ class RcVoiceGateTest {
         assertEquals("busy", RcVoiceGate.Verdict.Busy.hudText)
         // Word-for-word what a Telegram chat says for the same gesture. Pinned literally: the
         // point is that the two surfaces read identically, so a divergence here is a defect.
-        assertEquals("Tap to record message", RcVoiceGate.Verdict.Allowed.hudText)
+        // Names the gesture that actually starts dictation here. Telegram's own hint still says
+        // "Tap" because its recording really does start on a tap; a shared string would make one
+        // of the two surfaces lie.
+        assertEquals("Hold to record message", RcVoiceGate.Verdict.Allowed.hudText)
         assertTrue(
             "every verdict must say something; a silently blocked tap is the worst failure here",
             RcVoiceGate.Verdict.values().all { it.hudText.isNotBlank() }

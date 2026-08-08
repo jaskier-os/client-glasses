@@ -11,10 +11,11 @@ object RcVoiceGate {
 
     enum class Verdict(val allowed: Boolean, val hudText: String) {
         /**
-         * The wording a Telegram chat uses for the same gesture on the same hardware. Icons alone
-         * did not teach it: the wearer could see a microphone but not learn how to reach it.
+         * Names the gesture the AI chat uses, because dictating into a coding session and
+         * dictating to the assistant are the same act. Telegram still says "Tap" and means it --
+         * its own recording really does start on a tap, so the two strings must not be shared.
          */
-        Allowed(true, "Tap to record message"),
+        Allowed(true, "Hold to record message"),
 
         /** The phone's orchestrator link is down. Reading stale rows is fine, dictating is not. */
         Offline(false, "agent offline"),
