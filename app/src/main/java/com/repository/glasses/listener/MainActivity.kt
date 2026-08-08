@@ -1467,7 +1467,14 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 // moment the RC thread shows its countdown over, so the chat now shows the SAME
                 // bar ([SendCountdownBar]) instead of leaving the wearer to guess. A real
                 // requestId means the message is already gone -- the bar comes down.
-                if (requestId == "pending") chatSendCountdown?.start() else chatSendCountdown?.stop()
+                if (requestId == "pending") {
+                    // The PHONE's window, not ours: it owns the chat's confirm timer and we only
+                    // draw over it. Animating our own 3 s here would leave the bar a third full
+                    // after the message had already gone.
+                    chatSendCountdown?.start(DictationUx.CHAT_WINDOW_MS)
+                } else {
+                    chatSendCountdown?.stop()
+                }
                 // Always display user text -- phone manages state and only sends valid messages.
                 hideAudioVisualizer()
                 stopLoading()
@@ -7738,6 +7745,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             runnable.run()
             return
         }
+        // The previous pending tap is CANCELLED, not merely forgotten. Overwriting the field left
+        // the old runnable posted, so a tap on one surface followed within the window by a tap on
+        // another fired BOTH -- e.g. opening a session from the list and then starting a dictation
+        // in the chat, from two taps the wearer meant as one gesture apiece.
+        pendingTapRunnable?.let { mainHandler.removeCallbacks(it) }
         pendingTapRunnable = runnable
         mainHandler.postDelayed(runnable, DOUBLE_TAP_THRESHOLD_MS)
     }
@@ -8444,10 +8456,16 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         }
         // NUMPAD_2 doubletap in TAB_NAV -> turn screen off. Any other non-
         // NUMPAD_2 key breaks the chain (scroll via NUMPAD_0/1 included).
-        // The RC thread is excluded because this branch consumes EVERY NUMPAD_2 and returns: with
-        // a thread open the tap died here and the focus dispatch below never ran, which is why
-        // dictation could not be started or stopped from inside a remote session.
-        if (keyCode == KeyEvent.KEYCODE_NUMPAD_2 && focusState != FocusState.RC_THREAD_FOCUSED) {
+        // The dictation surfaces are excluded because this branch consumes EVERY NUMPAD_2 and
+        // returns: with a thread open the tap died here and the focus dispatch below never ran,
+        // which is why dictation could not be started from inside a remote session. The AI chat
+        // needs the same exemption for the same reason -- a touchpad tap is how a dictation starts
+        // on BOTH surfaces now, and without it the chat's tap handler is unreachable, making the
+        // shared gesture a no-op for anyone actually wearing the glasses.
+        if (keyCode == KeyEvent.KEYCODE_NUMPAD_2 &&
+            focusState != FocusState.RC_THREAD_FOCUSED &&
+            focusState != FocusState.CHAT_FOCUSED
+        ) {
             val now = SystemClock.uptimeMillis()
             val dt = now - lastNumpad2Ms
             if (focusState == FocusState.TAB_NAV &&
@@ -8974,6 +8992,20 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                             // half of a leave gesture, not a request to speak.
                             pendingTapRunnable?.let { mainHandler.removeCallbacks(it) }
                             pendingTapRunnable = null
+                            // WITHDRAW takes priority over leaving. While the pre-send preview is
+                            // up the bar says "DOUBLE-TAP TO CANCEL", and honouring that on the
+                            // touchpad is the whole point: without this the hint was a lie off the
+                            // remote, because the global cancel branch below matches only
+                            // DPAD_CENTER/ENTER and never the NUMPAD_2 a real tap delivers.
+                            if (chatSendCountdown?.visibility == View.VISIBLE) {
+                                uiLog("KEY: CHAT_FOCUSED double-tap in send window -> withdraw")
+                                chatSendCountdown?.stop()
+                                sendBroadcast(Intent(ListenerService.ACTION_CANCEL_SESSION).apply {
+                                    setPackage(packageName)
+                                })
+                                lastCenterPressTime = 0L
+                                return true
+                            }
                             uiLog("KEY: CHAT_FOCUSED double-tap -> TAB_NAV")
                             chatAdapter.clearSelection()
                             focusState = FocusState.TAB_NAV

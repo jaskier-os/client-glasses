@@ -35,8 +35,26 @@ object DictationUx {
      */
     const val HOLD_STARTS_DICTATION = false
 
-    /** How long the wearer has to change their mind, on both surfaces. */
+    /**
+     * How long the wearer has to change their mind in an RC thread. The glasses own this window,
+     * so the countdown and the send are timed from the same number.
+     */
     const val WINDOW_MS = RcSendWindow.WINDOW_MS
+
+    /**
+     * How long the wearer has to change their mind in the regular AI chat.
+     *
+     * This one is NOT ours: the PHONE owns the chat's pre-send confirm window (`confirmRunnable`,
+     * posted at 2000 ms in the phone's ListenerService) and the glasses only draw over it. The bar
+     * must therefore animate the phone's duration, not the RC one -- at 3000 ms it would still be
+     * a third full when the message had already gone, and a "cancel" made at 2.4 s while the bar
+     * still said there was time would land after the send.
+     *
+     * Kept as its own constant rather than folded into [WINDOW_MS] precisely because the two are
+     * owned by different sides and must be changed independently. If the phone's window changes,
+     * change this to match.
+     */
+    const val CHAT_WINDOW_MS = 2000L
 
     fun onTap(dictating: Boolean, sendPending: Boolean, doubleTap: Boolean): TapAction = when {
         // The countdown is checked first: a transcript is in hand and it is the only state where

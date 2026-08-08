@@ -312,18 +312,26 @@ class SttVadSegmenter {
         if (pcm.isEmpty()) return "samples=0 (empty)"
         var peak = 0
         var sumSq = 0.0
+        // The gained RMS is accumulated from PER-SAMPLE clipped values, exactly as accept() does.
+        // Scaling the unclipped RMS afterwards is NOT the same number once any sample saturates
+        // -- and with 24x gain that is most of a real utterance -- so the printed value could not
+        // then be compared against the printed threshold, which is the one thing it is for.
+        var gainedSumSq = 0.0
         for (s in pcm) {
-            val a = if (s.toInt() == Short.MIN_VALUE.toInt()) 32768 else kotlin.math.abs(s.toInt())
+            // abs() on the WIDENED Int, not the Short: -32768 has no positive Short, but as an Int
+            // it is simply 32768, which is the full-scale magnitude we want.
+            val a = kotlin.math.abs(s.toInt())
             if (a > peak) peak = a
             val v = s.toFloat() / 32768.0f
             sumSq += (v * v).toDouble()
+            var g = v * MIC_GAIN
+            if (g > 1f) g = 1f else if (g < -1f) g = -1f
+            gainedSumSq += (g * g).toDouble()
         }
         val rms = sqrt(sumSq / pcm.size).toFloat()
         val peakF = peak / 32768.0f
-        // Gain is applied to the MEASUREMENT, clipped exactly as accept() clips it, so the two
-        // numbers describe the same signal the threshold was compared against.
         val gainedPeak = minOf(1.0f, peakF * MIC_GAIN)
-        val gainedRms = minOf(1.0f, rms * MIC_GAIN)
+        val gainedRms = sqrt(gainedSumSq / pcm.size).toFloat()
         return "samples=${pcm.size} (${pcm.size * 1000 / SAMPLE_RATE}ms) " +
             "peak=${"%.5f".format(peakF)} rms=${"%.5f".format(rms)} " +
             "gainedPeak=${"%.5f".format(gainedPeak)} gainedRms=${"%.5f".format(gainedRms)} " +

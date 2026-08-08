@@ -344,6 +344,88 @@ class RcVoiceWiringTest {
         )
     }
 
+    // --- The unification actually reaches the wearer ---
+
+    /**
+     * A touchpad tap delivers NUMPAD_2, and an early branch consumes EVERY NUMPAD_2 and returns
+     * before the focus dispatch runs. Both dictation surfaces must be exempted from it or their
+     * tap handler is unreachable and the shared gesture is a no-op for anyone wearing the glasses.
+     * (The RC thread was exempted; the AI chat was not, so bug 4 shipped dead.)
+     */
+    @Test
+    fun bothDictationSurfacesAreExemptFromTheNumpad2Consumer() {
+        val main = read("MainActivity.kt")
+        val branch = main.substringAfter("if (keyCode == KeyEvent.KEYCODE_NUMPAD_2 &&", "")
+            .substringBefore("val now = SystemClock.uptimeMillis()", "")
+        assertTrue("could not locate the NUMPAD_2 screen-off branch", branch.isNotBlank())
+        for (surface in listOf("FocusState.RC_THREAD_FOCUSED", "FocusState.CHAT_FOCUSED")) {
+            assertTrue(
+                "$surface is not exempt from the NUMPAD_2 consumer, so a touchpad tap there is " +
+                    "swallowed before the focus dispatch and dictation can never start: $branch",
+                calls(branch, surface)
+            )
+        }
+    }
+
+    /**
+     * The countdown bar renders "DOUBLE-TAP TO CANCEL". On the chat surface a real tap arrives as
+     * NUMPAD_2, which the global cancel branch does not match, so without a handler here the hint
+     * is a lie off the remote.
+     */
+    @Test
+    fun theChatCountdownHasAWithdrawHandler() {
+        val main = read("MainActivity.kt")
+        val chat = main.substringAfter("FocusState.CHAT_FOCUSED -> {", "")
+            .substringBefore("FocusState.LIST_FOCUSED -> {", "")
+        assertTrue("could not locate the CHAT_FOCUSED key branch", chat.isNotBlank())
+        assertTrue(
+            "the chat draws a countdown that says DOUBLE-TAP TO CANCEL but wires no withdrawal " +
+                "to a touchpad tap: $chat",
+            calls(chat, "chatSendCountdown") && calls(chat, "ACTION_CANCEL_SESSION")
+        )
+        assertTrue(
+            "a touchpad tap (NUMPAD_2) must reach the chat's tap handler, not only DPAD/ENTER",
+            calls(chat, "KeyEvent.KEYCODE_NUMPAD_2")
+        )
+    }
+
+    /**
+     * The chat's pre-send window is owned by the PHONE, and the glasses only draw over it. A bar
+     * animating our own longer window would still be a third full after the message had gone, and
+     * a "cancel" made while it still showed time left would land after the send.
+     */
+    @Test
+    fun theChatCountdownAnimatesThePhonesWindowNotTheRcOne() {
+        val main = read("MainActivity.kt")
+        assertTrue(
+            "the chat bar must be started with CHAT_WINDOW_MS (the phone's confirm window), not " +
+                "the RC window or the bar's own default",
+            calls(main, "chatSendCountdown?.start(DictationUx.CHAT_WINDOW_MS)")
+        )
+        val ux = read("ui/DictationUx.kt")
+        assertTrue("DictationUx has no CHAT_WINDOW_MS", calls(ux, "CHAT_WINDOW_MS"))
+        assertTrue(
+            "the two windows must be distinct constants: they are owned by different sides and " +
+                "collapsing them re-introduces the mismatch",
+            !ux.contains("CHAT_WINDOW_MS = RcSendWindow.WINDOW_MS") &&
+                !ux.contains("CHAT_WINDOW_MS = WINDOW_MS")
+        )
+    }
+
+    /**
+     * A pending tap must be CANCELLED when a new one replaces it. Merely overwriting the field
+     * leaves the old runnable posted, so two taps the wearer meant as one gesture apiece both fire.
+     */
+    @Test
+    fun armingANewDeferredTapCancelsThePreviousOne() {
+        val fn = body(read("MainActivity.kt"), "private fun runAfterTapWindow(")
+        assertTrue(
+            "runAfterTapWindow overwrites pendingTapRunnable without removing the old callback: $fn",
+            fn.contains("removeCallbacks") &&
+                fn.indexOf("removeCallbacks") < fn.indexOf("pendingTapRunnable = runnable")
+        )
+    }
+
     // --- The countdown cannot outlive its view ---
 
     @Test
