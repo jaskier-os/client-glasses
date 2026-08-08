@@ -119,12 +119,27 @@ class GigaAmStt(private val context: Context) {
      * cannot succeed at all when the SoC is what mismatched.
      */
     fun isAvailable(): Boolean {
-        val m = manifest ?: return false
-        val f = ctxFile() ?: return false
-        if (!f.isFile) return false
+        // Availability is the single most common reason the router picks REMOTE,
+        // and every failure below used to be either silent or indistinguishable
+        // from the others. Each now names the exact thing that was wrong.
+        val m = manifest
+        if (m == null) {
+            SttTrace.w("isAvailable=false: no model manifest in assets")
+            return false
+        }
+        val f = ctxFile()
+        if (f == null) {
+            SttTrace.w("isAvailable=false: no context-binary path (no external files dir)")
+            return false
+        }
+        if (!f.isFile) {
+            SttTrace.w("isAvailable=false: context binary missing at ${f.absolutePath}")
+            return false
+        }
         val size = f.length()
         if (size != m.ctxSizeBytes) {
             Log.w(TAG, "context binary size $size != manifest ${m.ctxSizeBytes}")
+            SttTrace.w("isAvailable=false: context binary size=$size != manifest ${m.ctxSizeBytes}")
             return false
         }
         val stamp = size to f.lastModified()
@@ -144,7 +159,17 @@ class GigaAmStt(private val context: Context) {
         )
         verifiedResult = ok
         verifiedStamp = stamp
-        if (!ok) Log.w(TAG, "context binary does not match the manifest; local STT off")
+        if (!ok) {
+            Log.w(TAG, "context binary does not match the manifest; local STT off")
+            // socId and QNN version are printed because a context binary is
+            // built for one specific SoC and runtime: a mismatch here means the
+            // wrong .bin shipped, not that the file is corrupt.
+            SttTrace.w(
+                "isAvailable=false: manifest mismatch (socId=$SOC_ID qnn=$QNN_VERSION sha=${sha.take(12)})"
+            )
+        } else {
+            SttTrace.i("isAvailable=true: context binary verified (${size}B)")
+        }
         return ok
     }
 
@@ -154,22 +179,33 @@ class GigaAmStt(private val context: Context) {
      * in which case the caller routes remotely.
      */
     fun ensureLoaded(): Boolean = lock.withLock {
-        if (GigaAmNative.isLoaded() && decoder != null) return true
+        // "Resident" vs "cold" is the difference between a ~1 s utterance and a
+        // ~21 s one, i.e. between a transcript and a Binder timeout. Whether the
+        // model was already loaded is therefore the first thing to know when an
+        // utterance times out.
+        if (GigaAmNative.isLoaded() && decoder != null) {
+            SttTrace.i("model RESIDENT (no load needed)")
+            return true
+        }
         if (!isAvailable()) return false
         val f = ctxFile() ?: return false
         return try {
             val t0 = SystemClock.elapsedRealtime()
+            SttTrace.i("model COLD: load start from ${f.name}")
             val ok = GigaAmNative.load(
                 context.applicationInfo.nativeLibraryDir, f.absolutePath, loadMelFb()
             )
             if (!ok) {
                 Log.w(TAG, "encoder init returned 0; local STT unavailable")
+                SttTrace.w("model load FAILED: encoder init returned 0 after ${SystemClock.elapsedRealtime() - t0}ms")
                 return false
             }
             if (decoder == null) decoder = buildDecoder()
             Log.i(TAG, "stt loaded in ${SystemClock.elapsedRealtime() - t0}ms")
+            SttTrace.i("model LOADED in ${SystemClock.elapsedRealtime() - t0}ms")
             true
         } catch (t: Throwable) {
+            SttTrace.w("model load THREW ${t.javaClass.simpleName}: ${t.message}")
             // Catch Throwable, not Exception: a 203 MB allocation on a 1.7 GB
             // device fails as OutOfMemoryError, and an optional feature must not
             // take the camera process with it.
@@ -265,23 +301,38 @@ class GigaAmStt(private val context: Context) {
      *   back to the remote transcriber.
      */
     fun transcribe(pcm16leMono16k: ByteArray?, lang: String?, utteranceId: Long): String? {
-        if (pcm16leMono16k == null) return null
+        val tEntry = SystemClock.elapsedRealtime()
+        if (pcm16leMono16k == null) {
+            SttTrace.w("u$utteranceId AIDL entry with null pcm; returning null")
+            return null
+        }
+        SttTrace.i("u$utteranceId AIDL entry bytes=${pcm16leMono16k.size} lang=$lang")
         if (!isRussian(lang)) {
             Log.i(TAG, "utt=$utteranceId lang=$lang not supported locally")
+            SttTrace.i("u$utteranceId REFUSED: lang=$lang not supported locally -> null")
             return null
         }
         if (UtteranceChunker.isTooLarge(pcm16leMono16k.size)) {
             // Refused, not truncated: truncating would silently drop the end of
             // what the user said and hand back a confident partial sentence.
             Log.w(TAG, "utt=$utteranceId payload ${pcm16leMono16k.size}B over limit")
+            SttTrace.w("u$utteranceId REFUSED: payload ${pcm16leMono16k.size}B over limit -> null")
             return null
         }
         // Availability is checked BEFORE the empty-payload shortcut: a device with
         // no model must answer "unavailable", not "the model heard nothing".
         // Answering "" there would be read as a deliberate cancel.
-        if (!isAvailable()) return null
+        if (!isAvailable()) {
+            SttTrace.i("u$utteranceId REFUSED: model unavailable -> null (caller falls back to remote)")
+            return null
+        }
         val windows = UtteranceChunker.windows(pcm16leMono16k.size)
-        if (windows.isEmpty()) return ""
+        if (windows.isEmpty()) {
+            // "" not null: the model exists and simply had nothing to chew on.
+            // The caller reads "" as the wearer cancelling, which is correct here.
+            SttTrace.i("u$utteranceId no windows for ${pcm16leMono16k.size}B -> empty final (intentional)")
+            return ""
+        }
 
         // Busy-reject rather than queue. Each utterance holds the NPU for
         // 1-3.4 s (21 s on a cold load), and transcribeUtterance runs on a
@@ -290,29 +341,60 @@ class GigaAmStt(private val context: Context) {
         // ended. The contract already allows null for "NPU busy".
         if (!lock.tryLock()) {
             Log.i(TAG, "utt=$utteranceId refused: recogniser busy")
+            SttTrace.i("u$utteranceId REFUSED: recogniser busy (NPU held by another utterance) -> null")
             return null
         }
         try {
-            if (!ensureLoaded()) return null
-            val dec = decoder ?: return null
+            val tLoad = SystemClock.elapsedRealtime()
+            if (!ensureLoaded()) {
+                SttTrace.w("u$utteranceId ensureLoaded failed after ${SystemClock.elapsedRealtime() - tLoad}ms -> null")
+                return null
+            }
+            val loadMs = SystemClock.elapsedRealtime() - tLoad
+            val dec = decoder ?: run {
+                SttTrace.w("u$utteranceId decoder null after load -> null")
+                return null
+            }
             transcribing = true
             val wl = acquireWakeLock()
             try {
                 val t0 = SystemClock.elapsedRealtime()
                 val texts = ArrayList<String?>(windows.size)
-                for ((start, end) in windows) {
-                    texts += encodeAndDecodeWindow(dec, pcm16leMono16k, start, end)
+                var encodeMsTotal = 0L
+                var decodeMsTotal = 0L
+                windows.forEachIndexed { i, (start, end) ->
+                    val tw = SystemClock.elapsedRealtime()
+                    val r = encodeAndDecodeWindow(dec, pcm16leMono16k, start, end)
+                    // Per-window timing is what localises a hang: an utterance
+                    // that dies inside window 2 of 3 is an encoder problem, one
+                    // that never prints window 1 never reached the NPU at all.
+                    SttTrace.i(
+                        "u$utteranceId window ${i + 1}/${windows.size} " +
+                            "ms=${SystemClock.elapsedRealtime() - tw} " +
+                            (if (r == null) "FAILED" else "chars=${r.length}")
+                    )
+                    encodeMsTotal += lastEncodeMs
+                    decodeMsTotal += lastDecodeMs
+                    texts += r
                 }
                 val out = UtteranceChunker.bankOrNull(texts)
+                val totalMs = SystemClock.elapsedRealtime() - t0
                 Log.i(
                     TAG,
                     "utt=$utteranceId windows=${windows.size} " +
-                        "ms=${SystemClock.elapsedRealtime() - t0} " +
+                        "ms=$totalMs " +
                         (if (out == null) "FAILED" else "chars=${out.length}")
+                )
+                SttTrace.i(
+                    "u$utteranceId SUMMARY windows=${windows.size} loadMs=$loadMs " +
+                        "encodeMs=$encodeMsTotal decodeMs=$decodeMsTotal inferMs=$totalMs " +
+                        "aidlMs=${SystemClock.elapsedRealtime() - tEntry} " +
+                        (if (out == null) "chars=0 outcome=fail" else "chars=${out.length} outcome=ok")
                 )
                 return out
             } catch (t: Throwable) {
                 Log.w(TAG, "utt=$utteranceId transcribe failed: ${t.message}")
+                SttTrace.w("u$utteranceId transcribe THREW ${t.javaClass.simpleName}: ${t.message} -> null")
                 return null
             } finally {
                 // Released here, not at service scope: a service-lifetime wake
@@ -326,20 +408,39 @@ class GigaAmStt(private val context: Context) {
         }
     }
 
+    /**
+     * Split encoder vs decoder time for the last window. Two very different
+     * subsystems (Hexagon NPU vs the ONNX LSTM on CPU) whose costs a single
+     * total would conflate -- and they fail for unrelated reasons.
+     */
+    @Volatile private var lastEncodeMs = 0L
+    @Volatile private var lastDecodeMs = 0L
+
     /** @return the window's text, or null when the encode failed (poisons the utterance). */
     private fun encodeAndDecodeWindow(
         dec: RnntDecoder, pcm: ByteArray, start: Int, end: Int,
     ): String? {
+        lastEncodeMs = 0L
+        lastDecodeMs = 0L
         val samples = (end - start) / UtteranceChunker.BYTES_PER_SAMPLE
         val buf = ByteBuffer.wrap(pcm, start, end - start).order(ByteOrder.LITTLE_ENDIAN)
         val f = FloatArray(samples)
         for (i in 0 until samples) f[i] = buf.short / 32768f
-        val enc = GigaAmNative.encode(f) ?: return null
+        val tEnc = SystemClock.elapsedRealtime()
+        val enc = GigaAmNative.encode(f)
+        lastEncodeMs = SystemClock.elapsedRealtime() - tEnc
+        if (enc == null) {
+            SttTrace.w("encoder returned null after ${lastEncodeMs}ms (NPU encode failed)")
+            return null
+        }
         // The native contract is float[768*125 + 3]: encoded, then encodedLen,
         // featMs, execMs. A short array means the JNI contract drifted; treat it
         // as a failure rather than reading past the end.
         val expect = RnntDecoder.ENC_DIM * RnntDecoder.ENC_FRAMES
-        if (enc.size < expect + 3) return null
+        if (enc.size < expect + 3) {
+            SttTrace.w("encoder returned ${enc.size} floats, expected >= ${expect + 3}; JNI contract drifted")
+            return null
+        }
         val encodedLen = enc[expect].toInt()
         // A non-positive encodedLen is a native ANOMALY, not "the model heard
         // nothing": the encoder always emits frames for a non-empty window.
@@ -348,9 +449,17 @@ class GigaAmStt(private val context: Context) {
         // null sends the utterance to the remote transcriber instead.
         if (encodedLen <= 0) {
             Log.w(TAG, "encoder returned encodedLen=$encodedLen; treating as failure")
+            SttTrace.w("encoder returned encodedLen=$encodedLen after ${lastEncodeMs}ms; treating as failure -> null")
             return null
         }
-        return dec.decode(enc, encodedLen)
+        val tDec = SystemClock.elapsedRealtime()
+        val text = dec.decode(enc, encodedLen)
+        lastDecodeMs = SystemClock.elapsedRealtime() - tDec
+        SttTrace.i(
+            "encode ${lastEncodeMs}ms (encodedLen=$encodedLen featMs=${enc[expect + 1].toInt()} " +
+                "execMs=${enc[expect + 2].toInt()}) decode ${lastDecodeMs}ms chars=${text.length}"
+        )
+        return text
     }
 
     private fun loadMelFb(): FloatArray {

@@ -23,6 +23,17 @@ import kotlin.math.sqrt
  */
 class SttVadSegmenter {
 
+    /**
+     * Where the trace lines go. A lambda rather than a direct SttTrace call so
+     * this class stays free of Android APIs and JVM-testable, which is the
+     * property the whole VAD test suite depends on.
+     */
+    var trace: ((String) -> Unit)? = null
+
+    private fun t(msg: String) {
+        try { trace?.invoke(msg) } catch (_: Throwable) {}
+    }
+
     companion object {
         const val SAMPLE_RATE = 16000
 
@@ -112,8 +123,21 @@ class SttVadSegmenter {
      */
     private var voicedBlocks = 0
 
+    /**
+     * Blocks fed since the last [reset]. Purely for the trace: it converts a
+     * "nothing happened" report into "the VAD saw N blocks and never
+     * calibrated", which are different bugs (no mic frames vs a stuck
+     * calibration).
+     */
+    private var blocksSeen = 0
+
+    /** Whole blocks -> milliseconds, for the trace's duration fields. */
+    private fun ms(blocks: Int): Int = blocks * BLOCK * 1000 / SAMPLE_RATE
+
     /** Discard all state so the next session recalibrates from scratch. */
     fun reset() {
+        t("vad reset after $blocksSeen blocks (${ms(blocksSeen)}ms), calibrated=$calibrated talking=$talking")
+        blocksSeen = 0
         settleBlocks = 0
         noise.clear()
         threshold = FLOOR
@@ -137,6 +161,11 @@ class SttVadSegmenter {
     fun accept(pcm: ShortArray): Segment? {
         val n = pcm.size
         if (n == 0) return null
+        blocksSeen++
+        // The FIRST block is the proof that audio is actually reaching the VAD.
+        // Without it, "no VAD lines" is ambiguous between a mic that never
+        // emitted and a VAD that never triggered.
+        if (blocksSeen == 1) t("vad first block: $n samples, settle=${ms(settleNeeded)}ms calib=${ms(calibNeeded)}ms")
 
         // Level after the same software gain the rest of the pipeline applies,
         // clipped to the full-scale range the model was trained on.
@@ -168,6 +197,11 @@ class SttVadSegmenter {
                 threshold = if (calibrationClamped) FLOOR * NOISE_MULT
                 else maxOf(FLOOR, floorV * NOISE_MULT)
                 calibrated = true
+                t(
+                    "vad calibrated: noiseFloor=${"%.5f".format(floorV)} " +
+                        "threshold=${"%.5f".format(threshold)} clamped=$calibrationClamped " +
+                        "(mult=$NOISE_MULT floor=$FLOOR calMax=$CAL_MAX_FLOOR)"
+                )
             }
             return null
         }
@@ -179,6 +213,7 @@ class SttVadSegmenter {
                 talking = true
                 quietBlocks = 0
                 voicedBlocks = 1
+                t("vad speech_start at ${ms(blocksSeen)}ms level=${"%.5f".format(level)} threshold=${"%.5f".format(threshold)}")
                 // Do NOT clear a carried tail from a forced split: that tail holds
                 // the word straddling the boundary.
                 if (speech.isEmpty()) speech.addAll(preroll)
@@ -223,20 +258,35 @@ class SttVadSegmenter {
         }
 
         val voiced = voicedBlocks
+        val quiet = quietBlocks
         speech.clear()
         quietBlocks = 0
         voicedBlocks = 0
         talking = false
+
+        t(
+            "vad speech_end natural=$naturalEnd voiced=${ms(voiced)}ms " +
+                "kept=${ms(blocks.size)}ms trimmedQuiet=${ms(quiet)}ms"
+        )
 
         if (naturalEnd) {
             preroll.clear()
             // Below MIN_SPEECH_S this is a blip (a cough, a door), not an
             // utterance. Measured against VOICED blocks only -- preroll and the
             // trailing detection window are not speech.
-            if (voiced < minSpeechBlocks) return null
+            if (voiced < minSpeechBlocks) {
+                t(
+                    "vad DISCARDED: voiced=${ms(voiced)}ms below MIN_SPEECH_S=${(MIN_SPEECH_S * 1000).toInt()}ms " +
+                        "(a blip, not an utterance)"
+                )
+                return null
+            }
         }
 
-        if (blocks.isEmpty()) return null
+        if (blocks.isEmpty()) {
+            t("vad DISCARDED: no blocks accumulated")
+            return null
+        }
 
         val total = blocks.sumOf { it.size }
         val out = ShortArray(total)

@@ -94,6 +94,7 @@ class SttDispatcher(
             // per-process and shared, the throw can land on an unrelated camera
             // callback instead of on us.
             logw("utt=$utteranceId ${bytes.size}B over the transaction limit")
+            SttTrace.w("u$utteranceId binder REFUSED locally: ${bytes.size}B > $MAX_UTTERANCE_BYTES -> fallback to remote")
             return Result(Status.FAIL, "")
         }
 
@@ -101,6 +102,11 @@ class SttDispatcher(
         // here would silently ignore any override and make the timeout untestable.
         val timeoutMs =
             if (bytes.size <= SHORT_UTTERANCE_BYTES) shortTimeoutMs else longTimeoutMs
+        val t0 = System.currentTimeMillis()
+        SttTrace.i(
+            "u$utteranceId binder CALL transcribeUtterance bytes=${bytes.size} " +
+                "lang=$language timeoutMs=$timeoutMs"
+        )
         val future = callPool.submit<String?> {
             val text = bridge.transcribeUtterance(bytes, language, utteranceId)
             // If this utterance was already retired by a timeout, the result is
@@ -108,18 +114,32 @@ class SttDispatcher(
             // it belonged to is over.
             if (retired.remove(utteranceId)) {
                 logw("utt=$utteranceId result arrived after its deadline; dropped")
+                SttTrace.w(
+                    "u$utteranceId binder LATE result after ${SttTrace.since(t0)}ms " +
+                        "(already retired); dropped"
+                )
                 synchronized(lateResults) { lateResults += utteranceId }
             }
             text
         }
         return try {
             val text = future.get(timeoutMs, TimeUnit.MILLISECONDS)
+            val ms = SttTrace.since(t0)
             if (text == null) {
                 logi("utt=$utteranceId local STT unavailable; falling back to remote")
+                // null and "" are DIFFERENT answers and the distinction is the
+                // whole contract: null means "capture cannot do this, you
+                // transcribe it", "" means "the wearer said nothing, cancel".
+                SttTrace.i("u$utteranceId binder RETURNED null in ${ms}ms -> local unavailable, FALLBACK TO REMOTE")
                 Result(Status.FAIL, "")
             } else {
                 // "" survives as "": it is an explicit empty final, and the phone
                 // reads it as the wearer cancelling.
+                if (text.isEmpty()) {
+                    SttTrace.i("u$utteranceId binder RETURNED empty string in ${ms}ms -> intentional CANCEL final, not a failure")
+                } else {
+                    SttTrace.i("u$utteranceId binder RETURNED chars=${text.length} in ${ms}ms")
+                }
                 Result(Status.OK, text)
             }
         } catch (e: TimeoutException) {
@@ -130,11 +150,19 @@ class SttDispatcher(
             // the call finish and be discarded on arrival.
             retired.add(utteranceId)
             logw("utt=$utteranceId timed out after ${timeoutMs}ms; falling back to remote")
+            SttTrace.w(
+                "u$utteranceId binder TIMEOUT after ${timeoutMs}ms (capture never answered) " +
+                    "-> retired, FALLBACK TO REMOTE"
+            )
             Result(Status.FAIL, "")
         } catch (t: Throwable) {
             // DeadObjectException when capture has been force-stopped. A remote
             // fallback, not a crash on the worker thread.
             logw("utt=$utteranceId call failed: ${t.javaClass.simpleName}: ${t.message}")
+            SttTrace.w(
+                "u$utteranceId binder EXCEPTION after ${SttTrace.since(t0)}ms: " +
+                    "${t.javaClass.simpleName}: ${t.message} -> FALLBACK TO REMOTE"
+            )
             Result(Status.FAIL, "")
         }
     }

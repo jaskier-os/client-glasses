@@ -61,6 +61,17 @@ class SttRouter(private val state: State) {
     private var latched: Mode = Mode.REMOTE
 
     /**
+     * WHY the last decision came out the way it did, in the form the trace
+     * prints. A bare LOCAL/REMOTE is not debuggable: four independent inputs can
+     * each force REMOTE, and the live incident could not distinguish "wrong
+     * language" from "model missing" from "capture process dead". Kept as state
+     * rather than logged inside [decide] so the decision table stays pure and
+     * JVM-testable.
+     */
+    var lastReason: String = "no decision yet"
+        private set
+
+    /**
      * Open a session and latch its mode.
      *
      * Idempotent while a session is open: a duplicate begin (racing triggers,
@@ -68,7 +79,10 @@ class SttRouter(private val state: State) {
      * decision rather than re-deciding underneath a live session.
      */
     fun beginSession(tag: String): Mode {
-        if (sessionTag != null) return latched
+        if (sessionTag != null) {
+            lastReason = "kept latched=$latched: session '$sessionTag' already open"
+            return latched
+        }
         sessionTag = tag
         latched = decide(tag)
         return latched
@@ -82,11 +96,34 @@ class SttRouter(private val state: State) {
         latched = Mode.REMOTE
     }
 
+    /**
+     * Each rejection records the INPUT that caused it, not just which rule
+     * fired: "lang" alone still leaves you guessing whether the phone pushed
+     * "en" or the config was never populated at all.
+     */
     private fun decide(tag: String): Mode {
-        if (tag !in IN_SCOPE) return Mode.REMOTE
-        if (!isRussian(state.sttLanguage)) return Mode.REMOTE
-        if (!state.sttAvailable) return Mode.REMOTE
-        if (state.videoActive || state.denoiseActive) return Mode.REMOTE
+        if (tag !in IN_SCOPE) {
+            lastReason = "tag '$tag' out of scope (in-scope: ${IN_SCOPE.joinToString(",")})"
+            return Mode.REMOTE
+        }
+        val lang = state.sttLanguage
+        if (!isRussian(lang)) {
+            lastReason = "sttLanguage='$lang' is not '$LANG_RU'"
+            return Mode.REMOTE
+        }
+        if (!state.sttAvailable) {
+            lastReason = "sttAvailable=false (capture reports no usable model)"
+            return Mode.REMOTE
+        }
+        if (state.videoActive) {
+            lastReason = "videoActive=true (recording owns the NPU)"
+            return Mode.REMOTE
+        }
+        if (state.denoiseActive) {
+            lastReason = "denoiseActive=true (denoise owns the NPU)"
+            return Mode.REMOTE
+        }
+        lastReason = "tag='$tag' lang='$lang' available=true npu=free"
         return Mode.LOCAL
     }
 }

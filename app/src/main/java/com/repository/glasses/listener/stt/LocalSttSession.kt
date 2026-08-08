@@ -56,8 +56,17 @@ class LocalSttSession(
 
     private val utteranceIds = AtomicLong(0L)
 
+    /**
+     * Session counter. Successive sessions (a wake word, then a hold gesture
+     * seconds later) otherwise produce identical-looking traces, and a stale
+     * final from the previous one reads as a bug in the current one.
+     */
+    private val sessionIds = AtomicLong(0L)
+
     @Volatile private var collector: SttPcmCollector? = null
     @Volatile private var tag: String? = null
+    @Volatile private var sessionId: Long = 0L
+    @Volatile private var sessionStartMs: Long = 0L
 
     /**
      * Open a session. Announces the mode either way -- the phone needs to hear
@@ -71,25 +80,51 @@ class LocalSttSession(
         // START, both reach here -- and without this the old collector stays
         // subscribed to MicBus forever, VADs independently, and fires a second,
         // stale final into the live session. Its worker thread leaks too.
+        val id = sessionIds.incrementAndGet()
+        sessionId = id
+        sessionStartMs = System.currentTimeMillis()
+        val sid = "s$id"
+        SttTrace.i("$sid BEGIN tag=$sessionTag")
+
         if (collector != null) {
             logi("begin($sessionTag) with a session already open; closing the old one")
+            SttTrace.w("$sid begin with session '$tag' still open; closing the old one first")
             end()
         }
         val mode = router.beginSession(sessionTag)
         val local = mode == SttRouter.Mode.LOCAL
+        // The REASON is the point. A bare mode leaves four possible causes of a
+        // REMOTE decision indistinguishable, which is exactly the ambiguity that
+        // made the live incident undiagnosable.
+        SttTrace.i("$sid router decision=$mode reason=${router.lastReason}")
+
         // Announced BEFORE subscribing to the mic, so the phone has already
         // decided what to do by the time the first frame exists.
-        transport.sendSttMode(
-            if (local) SttModeWire.MODE_LOCAL else SttModeWire.MODE_REMOTE, sessionTag
-        )
-        if (!local) return false
+        val wire = if (local) SttModeWire.MODE_LOCAL else SttModeWire.MODE_REMOTE
+        transport.sendSttMode(wire, sessionTag)
+        SttTrace.i("$sid sent CH_STT_MODE mode=$wire tag=$sessionTag (+${SttTrace.since(sessionStartMs)}ms)")
+
+        if (!local) {
+            SttTrace.i("$sid END immediately: REMOTE path, phone owns transcription")
+            return false
+        }
 
         tag = sessionTag
         val c = SttPcmCollector(segmenter, object : SttPcmCollector.Sink {
             override fun onUtterance(pcm: ShortArray) = onUtteranceReady(pcm)
-        })
+        }, id)
         collector = c
+        // Subscriber count BEFORE and AFTER: a previous defect left this at 2
+        // when it should have been 3, and nothing in the log made that visible.
+        // The delta must always be exactly 1.
+        val before = MicBus.subscriberCount()
         MicBus.subscribe(c)
+        val after = MicBus.subscriberCount()
+        SttTrace.i("$sid MicBus.subscribe: subs $before -> $after (expect +1)")
+        if (after != before + 1) {
+            SttTrace.w("$sid MicBus subscribe did NOT add a subscriber ($before -> $after); no audio will reach the VAD")
+        }
+        SttTrace.i("$sid LOCAL session armed, waiting for mic frames (+${SttTrace.since(sessionStartMs)}ms)")
         return true
     }
 
@@ -102,10 +137,18 @@ class LocalSttSession(
      * exists.
      */
     fun end() {
+        val sid = "s$sessionId"
         collector?.let {
+            val before = MicBus.subscriberCount()
             MicBus.unsubscribe(it)
+            val after = MicBus.subscriberCount()
+            SttTrace.i("$sid MicBus.unsubscribe: subs $before -> $after (expect -1)")
+            if (after != before - 1) {
+                SttTrace.w("$sid MicBus unsubscribe did NOT remove a subscriber ($before -> $after); LEAKED subscription")
+            }
             it.stop()
         }
+        SttTrace.i("$sid END tag=$tag lived=${SttTrace.since(sessionStartMs)}ms")
         collector = null
         tag = null
         router.endSession()
@@ -137,17 +180,39 @@ class LocalSttSession(
 
     /** Runs on the collector's worker thread, never the mic thread. */
     private fun onUtteranceReady(pcm: ShortArray) {
-        val sessionTag = tag ?: return
+        val sessionTag = tag
+        if (sessionTag == null) {
+            SttTrace.w("s$sessionId utterance arrived with no open session; dropped")
+            return
+        }
         val id = utteranceIds.incrementAndGet()
+        val uid = "s$sessionId/u$id"
+        val audioMs = pcm.size * 1000 / 16000
+        val t0 = System.currentTimeMillis()
+        SttTrace.i("$uid dispatch: ${pcm.size} samples (${audioMs}ms audio) -> capture")
         val result = dispatcher.transcribe(pcm, id)
+        val binderMs = SttTrace.since(t0)
         when (result.status) {
             SttDispatcher.Status.OK ->
                 // Includes text == "": an explicit empty final, which the phone
                 // reads as the wearer cancelling. It must go out as "ok" with an
                 // empty string, NOT as a failure.
+            {
                 transport.sendLocalTranscript(
                     sessionTag, LocalTranscriptWire.STATUS_OK, result.text
                 )
+                // The empty case is called out explicitly and marked INTENTIONAL:
+                // "" is the wearer's cancel signal, not a failure, and reading it
+                // as a failure in the log sends the next debugger down the wrong
+                // path entirely.
+                val kind = if (result.text.isEmpty()) "EMPTY (intentional cancel signal)"
+                else "chars=${result.text.length}"
+                SttTrace.i("$uid sent CH_LOCAL_TRANSCRIPT status=ok $kind tag=$sessionTag")
+                SttTrace.i(
+                    "$uid SUMMARY path=local audioMs=$audioMs binderMs=$binderMs " +
+                        "totalMs=${SttTrace.since(t0)} chars=${result.text.length} outcome=ok"
+                )
+            }
 
             SttDispatcher.Status.FAIL -> {
                 // Sent BEFORE anything else can throw. Every path out of this
@@ -163,6 +228,11 @@ class LocalSttSession(
                     logi("utt=$id local recognition failed; phone will transcribe")
                 } catch (_: Throwable) {
                 }
+                SttTrace.w("$uid sent CH_LOCAL_TRANSCRIPT status=fail -> FALLBACK TO REMOTE (phone batch-transcribes its buffer)")
+                SttTrace.i(
+                    "$uid SUMMARY path=local->remote audioMs=$audioMs binderMs=$binderMs " +
+                        "totalMs=${SttTrace.since(t0)} chars=0 outcome=fail"
+                )
             }
         }
     }

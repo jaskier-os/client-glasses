@@ -59,6 +59,7 @@ import com.repository.glasses.listener.stt.LocalSttSession
 import com.repository.glasses.listener.stt.SttDispatcher
 import com.repository.glasses.listener.stt.SttPcmCollector
 import com.repository.glasses.listener.stt.SttRouter
+import com.repository.glasses.listener.stt.SttTrace
 import com.repository.glasses.listener.stt.SttVadSegmenter
 import com.repository.glasses.listener.capture.AudioRecorder
 import com.repository.glasses.listener.capture.BeamformController
@@ -1360,8 +1361,10 @@ class ListenerService : LifecycleService(),
         // Refused by capture while video owns the NPU, and dropped again after
         // 90 s idle, so an unfold that leads to nothing costs nothing lasting.
         if (!folded && SttRouter.isRussian(GlassesConfig.sttLanguage)) {
+            SttTrace.i("unfold -> prepareStt (warm the model; cold load is ~21s) bound=${captureBridge.isBound}")
             try { captureBridge.prepareStt() } catch (e: Exception) {
                 btErr("prepareStt failed: ${e.message}")
+                SttTrace.w("prepareStt threw ${e.javaClass.simpleName}: ${e.message}")
             }
         }
         reconcileWakeWord(reason)
@@ -2279,6 +2282,11 @@ class ListenerService : LifecycleService(),
             } catch (_: Exception) {}
             defaultHandler?.uncaughtException(thread, throwable)
         }
+
+        // Mirror the STT trace into the persistent glasses log too. Logcat is
+        // unreachable when the glasses are on Bluetooth only, which is the normal
+        // wearing condition and therefore exactly when this path needs debugging.
+        SttTrace.mirror = { LogCollector.writeExternal(it) }
 
         // Foreground service required -- Android kills background services without startForeground().
         // Use IMPORTANCE_MIN channel so no icon/popup appears on the waveguide display.
@@ -5256,7 +5264,9 @@ class ListenerService : LifecycleService(),
                 override val denoiseActive: Boolean get() = false
             }),
             segmenter = object : SttPcmCollector.Segmenter {
-                private val vad = SttVadSegmenter()
+                // The VAD is pure Kotlin so it stays JVM-testable; the trace sink
+                // is injected here rather than called inside it.
+                private val vad = SttVadSegmenter().apply { trace = { SttTrace.i(it) } }
                 override fun accept(pcm: ShortArray, offset: Int, length: Int): ShortArray? =
                     vad.accept(pcm.copyOfRange(offset, offset + length))?.pcm
                 override fun reset() = vad.reset()
@@ -5287,10 +5297,21 @@ class ListenerService : LifecycleService(),
      */
     private fun beginLocalSttSession(tag: String) {
         try {
+            // Everything the router is about to read, printed BEFORE it decides.
+            // A decision line alone cannot be checked against reality; these are
+            // the inputs, so a wrong decision is attributable to a wrong input.
+            SttTrace.i(
+                "inputs tag=$tag sttLanguage='${GlassesConfig.sttLanguage}' " +
+                    "captureBound=${captureBridge.isBound} " +
+                    "sttAvailable=${captureBridge.isSttAvailable()} " +
+                    "videoActive=${captureBridge.isRecordingActive()} " +
+                    "micStreaming=$micStreaming micSubs=${MicBus.subscriberCount()}"
+            )
             val local = localStt.begin(tag)
             btLog("STT session tag=$tag local=$local lang=${GlassesConfig.sttLanguage}")
         } catch (e: Exception) {
             btErr("STT session start failed (staying remote): ${e.message}")
+            SttTrace.w("session start THREW ${e.javaClass.simpleName}: ${e.message}; staying remote")
         }
     }
 

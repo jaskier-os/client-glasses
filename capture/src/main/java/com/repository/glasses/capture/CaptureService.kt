@@ -346,6 +346,7 @@ class CaptureService : Service() {
             // queueing it behind a recording of unknown length.
             if (isRecordingForCapture()) {
                 Log.i(TAG, "AIDL transcribeUtterance utt=$utteranceId refused: recording")
+                SttTrace.i("u$utteranceId AIDL REFUSED: camera is recording (video owns the NPU) -> null")
                 return null
             }
             return stt.transcribe(pcm16leMono16k, lang, utteranceId)
@@ -355,6 +356,7 @@ class CaptureService : Service() {
             stt.isAvailable()
         } catch (t: Throwable) {
             Log.w(TAG, "isSttAvailable failed: ${t.message}")
+            SttTrace.w("isSttAvailable THREW ${t.javaClass.simpleName}: ${t.message} -> false")
             false
         }
 
@@ -362,18 +364,25 @@ class CaptureService : Service() {
             // oneway, so this returns immediately to the listener; the 21 s cold
             // load runs on the worker. Refused during recording for the same
             // reason as transcribeUtterance.
-            if (isRecordingForCapture()) return
+            if (isRecordingForCapture()) {
+                SttTrace.i("prepareStt REFUSED: camera is recording")
+                return
+            }
+            SttTrace.i("prepareStt accepted; warming on the stt worker")
             sttPool.execute {
                 try { stt.ensureLoaded() } catch (t: Throwable) {
                     Log.w(TAG, "prepareStt failed: ${t.message}")
+                    SttTrace.w("prepareStt worker THREW ${t.javaClass.simpleName}: ${t.message}")
                 }
             }
         }
 
         override fun releaseStt(reason: String?) {
+            SttTrace.i("releaseStt reason='${reason ?: "listener request"}'")
             sttPool.execute {
                 try { stt.release(reason ?: "listener request") } catch (t: Throwable) {
                     Log.w(TAG, "releaseStt failed: ${t.message}")
+                    SttTrace.w("releaseStt worker THREW ${t.javaClass.simpleName}: ${t.message}")
                 }
             }
         }

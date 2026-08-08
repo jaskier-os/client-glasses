@@ -28,6 +28,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SttPcmCollector(
     private val segmenter: Segmenter,
     private val sink: Sink,
+    /** Session id, so every line here can be matched to the session that opened it. */
+    private val sessionId: Long = 0L,
 ) : MicSubscriber {
 
     /**
@@ -61,6 +63,20 @@ class SttPcmCollector(
     private val queue = LinkedBlockingQueue<ShortArray>(MAX_QUEUED_FRAMES)
     private val running = AtomicBoolean(true)
 
+    /**
+     * Frames received from MicBus. The FIRST one is the single most valuable
+     * line in this whole trace: it is the only direct proof that the mic
+     * subscription is actually delivering audio. The live incident could not
+     * distinguish "never subscribed" from "subscribed but the producer was not
+     * running", and those have completely different fixes.
+     */
+    private var framesIn = 0L
+    private var framesDropped = 0L
+    private var utterancesOut = 0L
+    private val createdMs = System.currentTimeMillis()
+
+    private fun sid() = "s$sessionId"
+
     private val worker = Thread({ workerLoop() }, "SttWorker").apply {
         // Below the mic thread: a late transcript is recoverable, dropped audio
         // is not.
@@ -71,26 +87,45 @@ class SttPcmCollector(
 
     override fun onPcmFrame(pcmMono16k: ShortArray, offset: Int, length: Int, epochNanos: Long) {
         if (!running.get() || length <= 0) return
+        framesIn++
+        // Never let a logging failure propagate onto the mic thread: it would
+        // take down every other mic consumer with it. Hence the wrapping, and
+        // hence only milestone frames are logged -- one line per second per
+        // session would drown the trace it is meant to make readable.
+        if (framesIn == 1L) {
+            SttTrace.i("${sid()} collector first mic frame after ${SttTrace.since(createdMs)}ms, $length samples")
+        } else if (framesIn % 10L == 0L) {
+            SttTrace.i("${sid()} collector frames=$framesIn dropped=$framesDropped queue=${queue.size}")
+        }
         // Copy on the mic thread -- unavoidable, because the array is re-used the
         // moment we return. It is a memcpy of one second of 16 kHz mono.
         val copy = pcmMono16k.copyOfRange(offset, offset + length)
         if (!queue.offer(copy)) {
-            // Never let a logging failure propagate onto the mic thread: it would
-            // take down every other mic consumer with it.
+            framesDropped++
             try { Log.w(TAG, "worker behind; dropping a mic frame") } catch (_: Throwable) {}
+            SttTrace.w("${sid()} collector queue full (${MAX_QUEUED_FRAMES}); dropped frame #$framesDropped -- worker is wedged")
         }
+    }
+
+    override fun onStreamStart() {
+        SttTrace.i("${sid()} collector mic stream START")
     }
 
     override fun onStreamStop() {
         // The mic went away mid-utterance: whatever was accumulated can never be
         // completed, and holding it would splice it onto the NEXT session's
         // speech.
+        SttTrace.i("${sid()} collector mic stream STOP after frames=$framesIn; resetting VAD")
         segmenter.reset()
     }
 
     /** Stop delivering. Idempotent. The worker exits on its next poll. */
     fun stop() {
         if (!running.compareAndSet(true, false)) return
+        SttTrace.i(
+            "${sid()} collector stop: frames=$framesIn dropped=$framesDropped " +
+                "utterances=$utterancesOut lived=${SttTrace.since(createdMs)}ms"
+        )
         queue.clear()
         worker.interrupt()
     }
@@ -104,8 +139,16 @@ class SttPcmCollector(
             }
             try {
                 val utterance = segmenter.accept(frame, 0, frame.size)
-                if (utterance != null && running.get()) sink.onUtterance(utterance)
+                if (utterance != null && running.get()) {
+                    utterancesOut++
+                    SttTrace.i(
+                        "${sid()} collector utterance #$utterancesOut ready: " +
+                            "${utterance.size} samples (${utterance.size * 1000 / 16000}ms) -> dispatching"
+                    )
+                    sink.onUtterance(utterance)
+                }
             } catch (t: Throwable) {
+                SttTrace.w("${sid()} collector utterance handling threw ${t.javaClass.simpleName}: ${t.message}")
                 // The worker is created once. Letting it die here would silently
                 // drop every LATER utterance with nothing to show for it.
                 //
