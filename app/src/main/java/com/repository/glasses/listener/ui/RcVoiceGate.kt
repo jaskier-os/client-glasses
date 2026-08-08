@@ -10,7 +10,12 @@ package com.repository.glasses.listener.ui
 object RcVoiceGate {
 
     enum class Verdict(val allowed: Boolean, val hudText: String) {
-        Allowed(true, ""),
+        /**
+         * The only verdict carrying an instruction rather than a reason. A bare microphone glyph
+         * said dictation existed but not how to reach it, and since every refusal already prints
+         * something, an empty allowed state read as "nothing to do here".
+         */
+        Allowed(true, "Tap to dictate"),
 
         /** The phone's orchestrator link is down. Reading stale rows is fine, dictating is not. */
         Offline(false, "agent offline"),

@@ -7155,8 +7155,10 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         val voiceBarUp = rcCapture.active || rcSendWindow.pending
         rcThreadFooter.visibility = if (voiceBarUp) View.GONE else View.VISIBLE
         rcThreadMicGlyph.visibility = if (verdict.allowed) View.VISIBLE else View.GONE
+        // Always shown: allowed carries the instruction, every other verdict the reason. Hiding it
+        // when allowed left the mic glyph standing alone with no way to learn the gesture.
         rcThreadFooterHint.text = verdict.hudText
-        rcThreadFooterHint.visibility = if (verdict.allowed) View.GONE else View.VISIBLE
+        rcThreadFooterHint.visibility = View.VISIBLE
     }
 
     private fun renderRcThreadRows() {
@@ -8261,11 +8263,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // would silently open an assistant chat instead of dictating to the coding agent. The
         // in-flight guard mirrors the [NREPLY] one: a second hold must not start a second capture.
         if (keyCode == KeyEvent.KEYCODE_NUMPAD_3 && focusState == FocusState.RC_THREAD_FOCUSED) {
-            if (rcCapture.active) {
-                uiLog("RC: NUMPAD_3 ignored, capture already running")
-            } else {
-                rcStartCapture()
-            }
+            // Dictation moved to a single tap (NUMPAD_2 below). The hold is swallowed here rather
+            // than left to fall through: the branches after this one would otherwise treat it as a
+            // notification reply arm or an assistant summon while the user is inside a coding
+            // thread, which is precisely the confusion moving the gesture was meant to end.
+            uiLog("RC: NUMPAD_3 (hold) ignored in thread; dictation is a single tap")
             return true
         }
         if (keyCode == KeyEvent.KEYCODE_NUMPAD_3) {
@@ -8324,10 +8326,26 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         if (keyCode == KeyEvent.KEYCODE_NUMPAD_2 && focusState == FocusState.RC_THREAD_FOCUSED) {
             // Hands-free, exactly like the notification reply: the finger release during a capture
             // is a no-op, and the phone's VAD decides when the utterance ended.
-            if (rcSendWindow.pending && rcSendWindow.tapCancel(SystemClock.uptimeMillis())) {
-                uiLog("RC: double-tap in send window -> cancel")
-                rcClearSendWindow()
-                renderRcThreadChrome()
+            if (rcSendWindow.pending) {
+                // The send window owns the tap: a DOUBLE-tap cancels, a single one is ignored.
+                // Starting a new capture here would discard the sentence still waiting to go.
+                if (rcSendWindow.tapCancel(SystemClock.uptimeMillis())) {
+                    uiLog("RC: double-tap in send window -> cancel")
+                    rcClearSendWindow()
+                    renderRcThreadChrome()
+                }
+            } else if (rcCapture.active) {
+                uiLog("RC: tap ignored, capture already running")
+            } else {
+                val verdict = rcVoiceVerdict()
+                if (verdict.allowed) {
+                    uiLog("RC: tap -> start capture")
+                    rcStartCapture()
+                } else {
+                    // Never silently swallow it: the user believes they are dictating.
+                    uiLog("RC: tap refused (${verdict.hudText})")
+                    renderRcThreadChrome()
+                }
             }
             // Consumed either way, so a tap in a thread can never fall through to screen-off.
             lastNumpad2Ms = 0L

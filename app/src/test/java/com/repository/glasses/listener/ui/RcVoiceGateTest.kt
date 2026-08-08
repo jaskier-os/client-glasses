@@ -97,7 +97,14 @@ class RcVoiceGateTest {
         assertEquals("working", RcVoiceGate.Verdict.Turning.hudText)
         assertEquals("answer the prompt", RcVoiceGate.Verdict.PromptOpen.hudText)
         assertEquals("busy", RcVoiceGate.Verdict.Busy.hudText)
-        assertEquals("", RcVoiceGate.Verdict.Allowed.hudText)
+        // Allowed carries the INSTRUCTION, not a reason. It was empty, which left the mic
+        // glyph standing alone with no way to learn the gesture; the footer now always renders,
+        // so an empty string here would show as a blank line rather than nothing.
+        assertEquals("Tap to dictate", RcVoiceGate.Verdict.Allowed.hudText)
+        assertTrue(
+            "every verdict must say something; the footer is always visible",
+            RcVoiceGate.Verdict.values().all { it.hudText.isNotBlank() }
+        )
     }
 
     @Test
