@@ -26,6 +26,7 @@ interface IBtManager {
     String getActiveConnectionsJson();
 
     String getCallSnapshotJson();
+    String getScoHealthJson();
     boolean acceptCall(String deviceAddress, int flag);
     boolean rejectCall(String deviceAddress);
     boolean terminateCall(String deviceAddress, int callId);

@@ -43,6 +43,7 @@ class BtManagerService : Service() {
     private lateinit var a2dpSink: A2dpSinkController
     private lateinit var foldGate: FoldGate
     private lateinit var profileAutoConnector: ProfileAutoConnector
+    private lateinit var scoSlotGuard: ScoSlotGuard
 
     private val adapterReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -206,6 +207,11 @@ class BtManagerService : Service() {
         override fun getActiveConnectionsJson(): String {
             Log.d(TAG, "event=binder.getActiveConnectionsJson")
             return rfcommManager.getActiveConnectionsJson()
+        }
+
+        override fun getScoHealthJson(): String {
+            Log.d(TAG, "event=binder.getScoHealthJson")
+            return scoSlotGuard.healthJson()
         }
 
         override fun getCallSnapshotJson(): String {
@@ -447,6 +453,14 @@ class BtManagerService : Service() {
             applicationContext, adapter, hfpClient, a2dpSink, foldGate
         ) { msg -> Log.i(TAG, msg) }
         profileAutoConnector.start()
+        // Watchdog for the Fluoride SCO control-block leak that otherwise leaves
+        // PC call audio flickering (and then silent) until a reboot. Armed only
+        // while SCO is claimed up, so it costs nothing at idle.
+        scoSlotGuard = ScoSlotGuard(
+            adapter, hfpClient, profileAutoConnector, foldGate
+        ) { msg -> Log.i(TAG, msg) }
+        hfpClient.scoGuard = scoSlotGuard
+        scoSlotGuard.start()
         // FoldGate tracks fold state (vendor.rkd.glasses.is_spread +
         // ACTION_LEG_STATUS_CHANGED). On fold, ProfileAutoConnector drops A2DP +
         // HFP so the BT stack releases hal_bluetooth_lock and the power daemon
@@ -455,6 +469,9 @@ class BtManagerService : Service() {
             override fun onFoldChanged(folded: Boolean) {
                 Log.i(TAG, "event=fold.changed folded=$folded")
                 profileAutoConnector.onFold(folded)
+                // A folded device has HFP intentionally down; the guard must not
+                // diagnose that as the leak.
+                scoSlotGuard.onFold(folded)
             }
         })
 
@@ -481,6 +498,7 @@ class BtManagerService : Service() {
             try { bleWakeService.stop() } catch (_: Exception) {}
             bleAdvertiser.stopAll()
             rfcommManager.closeAll()
+            try { scoSlotGuard.stop() } catch (_: Exception) {}
             try { profileAutoConnector.stop() } catch (_: Exception) {}
             try { foldGate.stop() } catch (_: Exception) {}
             try { a2dpSink.release() } catch (_: Exception) {}

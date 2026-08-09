@@ -44,4 +44,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-service:2.7.0")
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:4.3")
     implementation(project(":glasses-tracing"))
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20231013")
 }
