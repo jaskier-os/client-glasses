@@ -238,12 +238,26 @@ class RemoteInputRouter(
                     // Sharing a budget lets an action flood starve a source's own keepalives, which
                     // expires the user's session -- a denial of service driven by the victim's
                     // own traffic.
-                    if (!admitLifecycleRateLocked(state, now)) {
+                    if (admitLifecycleRateLocked(state, now)) {
+                        handleLifecycleLocked(state, frame, now)
+                    } else {
                         state.dropped++
                         rejectLocked(state, "lifecycle rate limit exceeded", now)
-                        return
                     }
-                    handleLifecycleLocked(state, frame, now)
+                    // Set on BOTH paths, including for a keepalive refused before it was
+                    // even examined. This channel is the source's ONLY way to learn its
+                    // session is gone -- a restart leaves the durable id in place while
+                    // the live session is not, and the source's own sends keep
+                    // succeeding, so it has no local symptom to notice. Going silent
+                    // under the throttle would make a source that pings slightly too fast
+                    // indistinguishable from the deadlock. It cannot flood in the other
+                    // direction: the budget that rejected the frame is the same thing
+                    // that bounds how often this is reached.
+                    //
+                    // if/else rather than an early `return`, and that is not style: this
+                    // runs inside the synchronized block, so a `return` leaves the whole
+                    // function and skips the publish at the bottom -- producing exactly
+                    // the silence this assignment exists to prevent.
                     statusTarget = state.source
                 }
                 is RemoteInputFrame.Action -> {

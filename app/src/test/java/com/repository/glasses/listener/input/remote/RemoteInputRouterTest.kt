@@ -944,6 +944,134 @@ class RemoteInputRouterTest {
         assertFalse(routerAfterRestart!!.anyOpenSession())
     }
 
+    /**
+     * The deadlock that shipped, stated as a regression test.
+     *
+     * After a restart the store still holds the source's session id, but the LIVE
+     * session is memory-only and therefore gone. `highestSid` is a replay high-water
+     * mark -- "the newest id ever accepted" -- not evidence of liveness, so the router
+     * correctly rejects the source's keepalive for an id it holds no OPEN for.
+     *
+     * The source cannot discover that on its own: its sends keep succeeding, so its own
+     * silence-based re-announce trigger never fires. The ONLY thing that breaks the
+     * deadlock is this rejection being REPORTED, which is what this pins. Before the
+     * fix the report was produced here, carried over two hops, and then discarded one
+     * line from its destination on the phone.
+     */
+    @Test
+    fun `a keepalive for a session lost to a restart is reported as no open session`() {
+        val store = InMemorySessionStore()
+        // Establish and use a session, so the store holds both a sid and a real floor.
+        val src1 = restart(store, RecordingSink())
+        src1.open(sid = 789)
+        src1.scroll(sid = 789, steps = 1, seqOverride = 2)
+        flush()
+        assertEquals(789L, store.highestSid("watch"))
+
+        // Restart the receiver. The store survives; the live session does not.
+        val src2 = restart(store, RecordingSink())
+        src2.statuses.clear()
+
+        // The source, which knows nothing of the restart, keeps pinging its session.
+        src2.ping(sid = 789)
+        flush()
+
+        assertTrue("the rejection must publish a status at all", src2.statuses.isNotEmpty())
+        assertFalse(
+            "the receiver holds no session for 789, and must SAY so: this bit is the " +
+                "source's only way to learn it has to re-announce",
+            src2.statuses.last().sessionOpen,
+        )
+        // And the reason recovery must mint a NEW id rather than re-announce 789: the
+        // durable floor sits well above where a restarted source's counter would be, so
+        // resuming the same id would reject everything as stale while reporting healthy.
+        assertTrue(
+            "the retained floor must sit above a restarted source's counter, which is " +
+                "why recovery mints a fresh session id instead of resuming this one",
+            store.seqFloor("watch") > 2L,
+        )
+    }
+
+    /**
+     * A keepalive dropped by the lifecycle budget must STILL report the lost session.
+     *
+     * The status channel is the source's only route to discovering it has to
+     * re-announce, so the one thing this branch must not do is go quiet. A source
+     * pinging slightly too fast -- or one pinging at exactly the budget while sharing it
+     * with a retry -- would otherwise be dropped into silence by the very throttle, and
+     * the throttle would be indistinguishable from the deadlock.
+     *
+     * This cannot become a flood in the other direction: the budget that rejects the
+     * frame is the same thing that bounds how often the branch is reached.
+     */
+    @Test
+    fun `a keepalive refused by the lifecycle budget still reports the lost session`() {
+        val store = InMemorySessionStore()
+        restart(store, RecordingSink()).open(sid = 789)
+        flush()
+
+        val src = restart(store, RecordingSink())
+        // Exhaust the lifecycle budget inside one window, so later pings are refused
+        // before they are ever examined.
+        repeat(RemoteInputRouter.MAX_LIFECYCLE_PER_SECOND) { src.ping(sid = 789) }
+        src.statuses.clear()
+
+        src.ping(sid = 789)
+        flush()
+
+        assertTrue(
+            "a throttled keepalive must still publish: silence here is indistinguishable " +
+                "from the deadlock, and this channel is the source's only way out of it",
+            src.statuses.isNotEmpty(),
+        )
+        assertFalse(src.statuses.last().sessionOpen)
+    }
+
+    /**
+     * The other half of the regression: once the source re-announces with a FRESH id,
+     * the receiver adopts it, resets the floor, and reports itself open again.
+     *
+     * A fix that only made the receiver say "no session" would leave the source
+     * re-announcing into a permanent refusal, which is the same deadlock one hop later.
+     */
+    @Test
+    fun `re-announcing with a fresh session id after a restart recovers fully`() {
+        val store = InMemorySessionStore()
+        val src1 = restart(store, RecordingSink())
+        src1.open(sid = 789)
+        src1.scroll(sid = 789, steps = 1, seqOverride = 2)
+        flush()
+        val floorBefore = store.seqFloor("watch")
+
+        val sink = RecordingSink()
+        val src2 = restart(store, sink)
+        src2.ping(sid = 789)
+        flush()
+        assertFalse(src2.statuses.last().sessionOpen)
+
+        // Recovery: a NEW id, and a sequence counter restarted from scratch -- exactly
+        // what a source that has itself restarted produces.
+        src2.emit(RemoteInputFrame.Lifecycle(1, "watch", 790L, 1L, now, RemoteLifecycle.OPEN))
+        // Checked HERE, between the OPEN and the first action. Adopting must pull the
+        // durable floor back DOWN to the new session's own baseline; the retained 258
+        // would reject every one of the fresh session's low sequence numbers. Asserting
+        // this after an action instead would prove nothing -- the write-ahead
+        // reservation immediately pushes the floor back up to a similar value.
+        assertTrue(
+            "adopting a new session must reset the durable floor, or the retained one " +
+                "would keep rejecting the fresh session's low sequence numbers",
+            store.seqFloor("watch") < floorBefore,
+        )
+
+        src2.emit(
+            RemoteInputFrame.Action(1, "watch", 790L, 2L, now, RemoteAction.SCROLL_STEP, 1)
+        )
+        flush()
+
+        assertEquals("input must flow again after re-announcing", 1, sink.events.size)
+        assertTrue(src2.statuses.last().sessionOpen)
+    }
+
     @Test
     fun `a genuine new session after a restart works normally`() {
         // Fail-closed must not mean fail-always: the source's next real session must go through.
