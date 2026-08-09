@@ -90,7 +90,30 @@ if [ -n "$GLASSES_SERIAL" ]; then
 
         adb -s "$GLASSES_SERIAL" shell "mkdir -p $overlay_dir" >/dev/null
         adb -s "$GLASSES_SERIAL" push "$apk_local" "$stage" >/dev/null
+
+        # The overlay file and /system/priv-app/<pkg>/<apk> are the SAME INODE (the
+        # bind-mount targets it), and that inode is what ART has mmap'd in every
+        # running process of $pkg. Rewriting it in place under a live process
+        # invalidates the dex pages it has not faulted in yet, and the process dies
+        # with SIGBUS/BUS_ADRERR wherever it happens to be executing. Reproduced on
+        # device: an in-place rewrite killed :backend ~1s later. That presents as
+        # "the app randomly crashes / stops responding to taps", not as a deploy fault.
+        #
+        # `am force-stop` alone does NOT fix this: the package is revived ~136ms later
+        # by whatever is bound to it (MediaNotificationListener re-spawns :backend),
+        # and the revived process re-maps the same inode while the write is still in
+        # flight -- so it just moves the SIGBUS to a newer pid. Verified on device.
+        #
+        # Disabling the package makes PMS refuse to start any of its components, so
+        # nothing can map the inode until the write is done. The reboot that follows
+        # any priv-app push re-enables and rescans it.
+        adb -s "$GLASSES_SERIAL" shell "pm disable-user --user 0 $pkg" >/dev/null 2>&1 || true
+        adb -s "$GLASSES_SERIAL" shell "am force-stop $pkg" >/dev/null 2>&1 || true
         adb -s "$GLASSES_SERIAL" shell "cat $stage > $target && chmod 0644 $target && rm -f $stage"
+        # Re-enable immediately: the write is complete, so a process that starts now
+        # maps the new bytes cleanly. Leaving it disabled would strand the package if
+        # the deploy aborts before the reboot.
+        adb -s "$GLASSES_SERIAL" shell "pm enable --user 0 $pkg" >/dev/null 2>&1 || true
         local got
         got="$(adb -s "$GLASSES_SERIAL" shell "sha256sum $target" | cut -d' ' -f1 | tr -d '\r')"
         if [ "$local_hash" != "$got" ]; then
