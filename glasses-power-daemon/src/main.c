@@ -107,6 +107,13 @@ static int       fold_folded         = 0;
 static long long fold_change_ms         = 0;  // last time raw-state differed from debounced
 static long long suspend_armed_until_ms = 0;  // 0 = not armed; fires 1s after fold -> freeze
 static long long shutdown_armed_until_ms = 0; // 0 = not armed; fires power_timeout_s after fold -> shutdown
+// Time of the current fold edge (0 = unfolded). The unplug re-arm derives the
+// shutdown deadline from this so plug/unplug cycles can't defer power-off.
+static long long fold_since_ms       = 0;
+// One-shot guard for the unplug re-arm. The mp2724 `online` node flaps during
+// trickle charge at high SoC; without this, each flicker re-arms and the arm is
+// then thrown away by the suspend-loop USB guard 3 min later, forever.
+static int       charge_rearm_latched = 0;
 static long long config_loaded_ms    = 0;
 static unsigned  reload_counter      = 0;
 
@@ -619,15 +626,32 @@ static void apply_rkd_shutdown_timeout(int power_timeout_s) {
     log_line("rkd_shutdown_timeout set to %d min (power_timeout_s=%d)", minutes, power_timeout_s);
 }
 
+// Packages that receive ACTION_FOLD_CHANGED. Each needs its OWN am invocation:
+// `am broadcast -p <pkg>` sets Intent.setPackage(), which restricts delivery to
+// receivers in that ONE package, so a single -p can never fan out. bt-manager is
+// listed because its FoldGate must drop A2DP/HFP on fold -- while the SLIMbus TX
+// port stays open the kernel refuses s2idle ("Abort: Some devices failed to
+// suspend", btfm_num_ports_open: 1). Rokid's own ACTION_LEG_STATUS_CHANGED is not
+// a reliable substitute: it comes from PsensorObserver, which stock firmware ships
+// latched off via enforce_psensor.
+static const char *const FOLD_BROADCAST_PKGS[] = {
+    "com.repository.glasses.listener",
+    "com.repository.glasses.btmanager",
+};
+
 static void fold_broadcast(int folded) {
-    const char *argv[] = {
-        "/system/bin/am", "broadcast",
-        "-a", "com.repository.glasses.listener.ACTION_FOLD_CHANGED",
-        "-p", "com.repository.glasses.listener",
-        "--ez", "folded", folded ? "true" : "false",
-        NULL
-    };
-    run_cmd(argv);
+    for (size_t i = 0;
+         i < sizeof(FOLD_BROADCAST_PKGS) / sizeof(FOLD_BROADCAST_PKGS[0]);
+         ++i) {
+        const char *argv[] = {
+            "/system/bin/am", "broadcast",
+            "-a", "com.repository.glasses.listener.ACTION_FOLD_CHANGED",
+            "-p", FOLD_BROADCAST_PKGS[i],
+            "--ez", "folded", folded ? "true" : "false",
+            NULL
+        };
+        run_cmd(argv);
+    }
     log_line("fold broadcast folded=%d", folded);
 }
 
@@ -859,8 +883,17 @@ static int suspend_loop(void) {
     time_t shutdown_epoch = 0;
     if (shutdown_armed_until_ms > 0) {
         long long remain_ms = shutdown_armed_until_ms - now_ms();
-        if (remain_ms > 0)
+        if (remain_ms > 0) {
             shutdown_epoch = time(NULL) + (time_t)(remain_ms / 1000);
+        } else {
+            // Deadline already elapsed. Reachable via the unplug re-arm, which
+            // anchors the deadline to the original fold edge -- unplugging after
+            // power_timeout_s of folded-on-charger lands here. Set the epoch in
+            // the past (not 0, which means "no deadline") so the loop's
+            // remain_s <= 0 branch fires the shutdown immediately instead of
+            // freezing forever with the deadline silently dropped.
+            shutdown_epoch = time(NULL) - 1;
+        }
     }
 
     int consecutive_failures = 0;
@@ -1218,6 +1251,13 @@ int main(int argc, char **argv) {
         int sp = read_fold_from_spread();
         if (sp == 0 || sp == 1) {
             fold_folded = sp;
+            // Booting already folded produces NO fold edge (fold_raw_last is
+            // seeded equal to fold_folded below), so the edge handler never runs
+            // and never stamps fold_since_ms. Stamp it here to keep the
+            // invariant "fold_since_ms > 0 iff folded" -- the unplug re-arm
+            // derives the shutdown deadline from it and would otherwise disarm
+            // fold-shutdown entirely until a full unfold+refold cycle.
+            if (fold_folded) fold_since_ms = now_ms();
             log_line("fold initial=%d (is_spread)", fold_folded);
         } else {
             // is_spread is empty: glasses booted already-unfolded with no extcon
@@ -1431,11 +1471,19 @@ int main(int argc, char **argv) {
                     log_line("fold armed: suspend in %lldms, shutdown in %ds",
                              SUSPEND_DELAY_MS, g_cfg.power_timeout_s);
                 }
+                // Deadline for fold-shutdown, anchored to THIS fold edge. The
+                // unplug re-arm below restores shutdown_armed_until_ms from this
+                // instead of recomputing "now + power_timeout_s", so repeated
+                // plug/unplug cycles while folded cannot keep pushing power-off
+                // into the future. Cleared on unfold.
+                fold_since_ms = now;
                 PWR_TRACE_END();
             } else if (prev == 1 && fold_folded == 0) {
                 PWR_TRACE_BEGIN("pwr.event.fold_disarmed");
                 suspend_armed_until_ms = 0;
                 shutdown_armed_until_ms = 0;
+                fold_since_ms = 0;
+                charge_rearm_latched = 0;
                 fold_broadcast(0);
                 log_line("fold disarmed");
                 PWR_TRACE_END();
@@ -1461,6 +1509,60 @@ int main(int argc, char **argv) {
             // Avoid re-entering the lock branch until input arrives.
             last_activity_ms = now;
             PWR_TRACE_END();
+        }
+
+        // Re-arm when the charger is unplugged while already folded.
+        //
+        // The arm decision at the fold edge is made ONCE, and it deliberately
+        // skips arming while charging (freeze can never succeed with the cable
+        // in). Without this branch, "fold on the charger, then unplug" left the
+        // device armed for nothing and awake forever, because re-arming
+        // otherwise requires a fresh unfold->fold transition. Polling charge
+        // state here is what makes the unplug edge actionable.
+        // Both nodes are checked because they can disagree: read_is_charging()
+        // reads the mp2724 charger `online` node while usb_cable_connected()
+        // reads the USB extcon, and a data-only cable can show USB=1 with
+        // online=0. Re-arming on charger-state alone would then hand
+        // suspend_loop() a cable it must skip, and it would return immediately
+        // and re-arm every iteration -- a hot spin. Requiring both to agree that
+        // the cable is out keeps the re-arm a genuine one-shot per unplug.
+        //
+        // `== 0` (not `!= 1`) deliberately: an unreadable node returns -1, and
+        // this branch then declines to re-arm. That is the safe direction here --
+        // the fold-edge arm above remains the primary path and treats -1 as
+        // not-charging, so a broken node cannot cost us suspend entirely.
+        //
+        // This cannot busy-loop. suspend_loop() returns 0 only when (a) USB was
+        // present at entry, (b) USB appeared mid-loop, or (c) the device was
+        // genuinely unfolded. (c) clears fold_folded, and (a)/(b) are excluded by
+        // the usb_cable_connected() term -- so the branch stays quiet until an
+        // actual unplug, then fires exactly once (it sets suspend_armed_until_ms
+        // non-zero, which is its own guard).
+        // Only poll the charger/USB nodes while folded -- unfolded, the result is
+        // unused and this runs every second.
+        int cable_out = fold_folded &&
+                        (read_is_charging() == 0) && !usb_cable_connected();
+        // Re-latch as soon as the cable is back, so the next unplug re-arms.
+        if (!cable_out) charge_rearm_latched = 0;
+
+        if (fold_folded && suspend_armed_until_ms == 0 &&
+            cable_out && !charge_rearm_latched) {
+            charge_rearm_latched = 1;
+            suspend_armed_until_ms = now + SUSPEND_DELAY_MS;
+            // Anchor the shutdown deadline to the ORIGINAL fold edge, never to
+            // `now`. Recomputing it here would let a plug/unplug cycle restart
+            // the countdown and defer power-off indefinitely. A deadline already
+            // in the past stays armed (<= now) so the suspend loop fires the
+            // shutdown check immediately rather than skipping it.
+            if (g_cfg.power_timeout_s > 0 && fold_since_ms > 0)
+                shutdown_armed_until_ms =
+                    fold_since_ms + (long long)g_cfg.power_timeout_s * 1000LL;
+            else
+                shutdown_armed_until_ms = 0;
+            log_line("fold re-armed after unplug: suspend in %lldms, shutdown in %llds",
+                     SUSPEND_DELAY_MS,
+                     shutdown_armed_until_ms > 0
+                         ? (shutdown_armed_until_ms - now) / 1000LL : -1LL);
         }
 
         // Fold-triggered suspend (3 min after fold).
@@ -1492,6 +1594,14 @@ int main(int argc, char **argv) {
                     fold_folded = 0;
                     fold_raw_last = 0;
                     fold_change_ms = 0;
+                    // This path clears fold state directly instead of going
+                    // through the fold-disarm branch, so it must reset the
+                    // unplug-re-arm bookkeeping too. Leaving fold_since_ms set
+                    // would anchor the NEXT fold's shutdown deadline to this
+                    // stale, already-elapsed edge (immediate power-off); leaving
+                    // the latch set would suppress the next unplug re-arm.
+                    fold_since_ms = 0;
+                    charge_rearm_latched = 0;
                     last_activity_ms = now_ms();
                     // Real unfold: restore A2DP on the listener side and re-arm the
                     // idle screen-lock (screen_on was forced 0 at fold).
