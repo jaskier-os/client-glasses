@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import com.repository.glasses.tracing.GT
 import java.util.concurrent.ConcurrentHashMap
 
@@ -48,9 +49,19 @@ class ProfileAutoConnector(
         private const val ADAPTER_ON_DELAY_MS = 2_000L
         private const val BONDED_DELAY_MS = 1_500L
         private const val ACL_DELAY_MS = 800L
-        private const val PERIODIC_MS = 60_000L
+        // Timer cadence. Every tick re-checks devices that already have an ACL
+        // up, so a profile that drops on a present device is restored within 5s
+        // instead of up to a minute.
+        private const val PERIODIC_MS = 5_000L
+        // Absent (no ACL) devices are only swept every SLOW_TICK_EVERY'th tick,
+        // keeping their paging cadence at the original 60s.
+        private const val SLOW_TICK_EVERY = 12
+        // Minimum gap between two connect() attempts for the same profile on the
+        // same device. connect() is async and isConnected() lags it, so without
+        // this a device sitting in CONNECTING would be re-connected every tick.
+        private const val CONNECT_COOLDOWN_MS = 20_000L
         private const val STALE_THRESHOLD = 3
-        // Every UNSTALE_PROBE_INTERVAL periodic ticks, retry one stale device
+        // Every UNSTALE_PROBE_INTERVAL slow ticks, retry one stale device
         // to prevent permanent deadlock when Android doesn't auto-initiate ACL.
         private const val UNSTALE_PROBE_INTERVAL = 10 // ~10 minutes
         // If an ACL_CONNECTED arrives within this window of our own outbound
@@ -61,20 +72,41 @@ class ProfileAutoConnector(
 
     private var periodicTickCount = 0
 
+    @Volatile private var aclReflectionFailureLogged = false
+
+    // A2DP handoff that arrived while a call held the audio path. Replayed by the
+    // sweep once the call ends. Main-looper confined.
+    private var pendingSwapAddr: String? = null
+
+    // Last time we issued a connect() for an address, per profile. Gates the
+    // fast tick so an async connect that has not settled is not re-issued.
+    private val lastHfpAttemptMs = ConcurrentHashMap<String, Long>()
+    private val lastA2dpAttemptMs = ConcurrentHashMap<String, Long>()
+
+    private fun cooledDown(map: ConcurrentHashMap<String, Long>, addr: String): Boolean {
+        val at = map[addr] ?: return true
+        return SystemClock.elapsedRealtime() - at >= CONNECT_COOLDOWN_MS
+    }
+
     private val periodicTick = object : Runnable {
         override fun run() {
             periodicTickCount++
+            // The timer runs at the fast cadence; every SLOW_TICK_EVERY'th tick
+            // is additionally a slow one, which is the only kind that may page
+            // absent devices. Fast ticks only fix profile gaps on devices that
+            // already have an ACL up, so the paging cost is unchanged.
+            val slowTick = periodicTickCount % SLOW_TICK_EVERY == 0
             // Periodic un-stale probe: every ~10 min, reset one stale device
             // so the sweep retries it. Prevents permanent deadlock when Android
             // doesn't auto-initiate ACL reconnection for a returning device.
-            if (periodicTickCount % UNSTALE_PROBE_INTERVAL == 0) {
+            if (slowTick && periodicTickCount % (SLOW_TICK_EVERY * UNSTALE_PROBE_INTERVAL) == 0) {
                 val staleEntry = disconnectedSweeps.entries.firstOrNull { it.value >= STALE_THRESHOLD }
                 if (staleEntry != null) {
                     staleEntry.setValue(0)
                     log("autoconnect unstale_probe addr=${staleEntry.key} reset for retry (tick=$periodicTickCount)")
                 }
             }
-            try { tryConnect("periodic") } catch (e: Throwable) {
+            try { tryConnect(if (slowTick) "periodic" else "periodic_fast", slowTick) } catch (e: Throwable) {
                 log("autoconnect periodic threw: ${e.message}")
             }
             handler.postDelayed(this, PERIODIC_MS)
@@ -139,6 +171,25 @@ class ProfileAutoConnector(
                                 // source swaps whoever is in the A2DP Sink slot.
                                 handler.postDelayed({
                                     try {
+                                        // A device with SCO up is on a live call.
+                                        // Reassigning the A2DP slot makes the stack
+                                        // renegotiate the shared audio path and can
+                                        // drop that call's SCO, so a call outranks a
+                                        // music handoff: defer the swap until the
+                                        // call ends. Without a call, the slot is
+                                        // freely reassigned as before -- interrupting
+                                        // music costs the user nothing.
+                                        if (!hfp.noCallAudioExceptFor(addr)) {
+                                            // Remember it: dropping the swap
+                                            // outright would leave the sink slot
+                                            // shared between both sources once the
+                                            // sweep reconnects A2DP, which is the
+                                            // exact state connectExclusive prevents.
+                                            pendingSwapAddr = addr
+                                            log("autoconnect acl_connected.swap addr=$addr DEFERRED, call audio active")
+                                            return@postDelayed
+                                        }
+                                        pendingSwapAddr = null
                                         val currentA2dp = a2dp.connectedDevices()
                                         log("autoconnect acl_connected.swap addr=$addr current_a2dp=${currentA2dp.joinToString { "${it.address}(${it.name})" }.ifEmpty { "none" }}")
                                         a2dp.connectExclusive(addr)
@@ -219,6 +270,7 @@ class ProfileAutoConnector(
         try { if (receiverRegistered) appCtx.unregisterReceiver(receiver) } catch (_: Throwable) {}
         receiverRegistered = false
         handler.removeCallbacksAndMessages(null)
+        pendingSwapAddr = null
     }
 
     /**
@@ -260,13 +312,46 @@ class ProfileAutoConnector(
         }, delayMs)
     }
 
-    private fun tryConnect(reason: String) = GT.section("bt.autoconnect") {
+    /**
+     * True when [dev] currently has an ACL link up.
+     *
+     * BluetoothDevice.isConnected() is @hide, hence the reflection. Failing
+     * closed (false) on any error is the safe default: it only costs the device
+     * the slow cadence it had before, whereas failing open would page every
+     * absent bond every 5s.
+     */
+    private fun isAclConnected(dev: BluetoothDevice): Boolean = try {
+        val m = BluetoothDevice::class.java.getMethod("isConnected")
+        m.isAccessible = true
+        (m.invoke(dev) as? Boolean) ?: false
+    } catch (e: Throwable) {
+        // Log once, not per device per 5s tick. If this fires, every device
+        // looks absent and the fast path is silently dead -- which would
+        // otherwise be invisible, since the degraded behaviour is just the old
+        // 60s cadence.
+        if (!aclReflectionFailureLogged) {
+            aclReflectionFailureLogged = true
+            log("event=autoconnect.acl_reflection_failed err=${e.message} (fast path disabled)")
+        }
+        false
+    }
+
+    /**
+     * @param slowTick true on the 60s cadence, which is the only one allowed to
+     * page devices that have no ACL. Fast (5s) ticks act on present devices only.
+     */
+    private fun tryConnect(reason: String, slowTick: Boolean = true) = GT.section("bt.autoconnect") {
         val a = adapter ?: return@section
         if (!a.isEnabled) {
             log("autoconnect($reason): adapter off, skip")
             return@section
         }
         val folded = foldGate.folded
+        // Folded, the sweep connects nothing, so a fast tick can only burn
+        // binder calls and keep the main looper busy during exactly the idle
+        // window the fold teardown exists to create. Slow ticks still run so
+        // the stale bookkeeping stays live.
+        if (folded && !slowTick) return@section
         val bonded = try { a.bondedDevices } catch (e: Throwable) {
             log("autoconnect($reason): bondedDevices threw: ${e.message}")
             return@section
@@ -276,6 +361,30 @@ class ProfileAutoConnector(
             return@section
         }
         var needHfp = 0; var needA2dp = 0; var skippedStale = 0; var skippedLe = 0
+        var skippedFast = 0
+        // Replay a handoff that arrived during a call. Runs before the per-device
+        // work so the winner is decided before any A2DP connect is issued.
+        // Not while folded: connectExclusive() would bring A2DP back up and undo
+        // the fold teardown that releases hal_bluetooth_lock. The pending swap is
+        // kept, and unfold schedules a sweep that replays it.
+        pendingSwapAddr?.takeIf { !folded }?.let { want ->
+            // The device may have walked away during the call. Replaying then
+            // would page an absent device and evict whichever source legitimately
+            // owns the sink slot now, so drop the request instead.
+            val stillHere = bonded.any {
+                it.address.equals(want, true) && isAclConnected(it)
+            }
+            if (!stillHere) {
+                pendingSwapAddr = null
+                log("autoconnect($reason) dropping deferred swap addr=$want (no longer connected)")
+            } else if (hfp.noCallAudioExceptFor(want)) {
+                pendingSwapAddr = null
+                log("autoconnect($reason) replaying deferred swap addr=$want")
+                try { a2dp.connectExclusive(want) } catch (e: Throwable) {
+                    log("autoconnect($reason) deferred swap threw: ${e.message}")
+                }
+            }
+        }
         for (dev in bonded) {
             val addr = dev.address ?: continue
             // LE-only bonds can't carry HFP-HF / A2DP Sink. Skip before the stale
@@ -289,11 +398,30 @@ class ProfileAutoConnector(
                 disconnectedSweeps.remove(addr)
                 continue
             }
+            // An ACL-up device is present and awake: a connect() costs no paging
+            // and a missing profile is a real gap the user is feeling right now,
+            // so retry it on every fast tick and never let it go stale. Devices
+            // with no ACL are absent -- those keep the slow cadence and the
+            // stale counter, because each connect() there is a costly page.
+            // Checked BEFORE the isConnected() calls below so a skipped device
+            // costs one binder call per tick, not three.
+            val aclUp = isAclConnected(dev)
+            if (!aclUp && !slowTick) {
+                skippedFast++
+                continue
+            }
             val hfpUp = hfp.isConnected(addr)
             val a2dpUp = a2dp.isConnected(addr)
-            // Stale bond suppression: count consecutive sweeps where BOTH
-            // profiles are down. connect() return value is unreliable (async).
-            if (!hfpUp && !a2dpUp) {
+            // Clear the cooldown as soon as a profile is actually up: the attempt
+            // it was throttling has landed. Otherwise a profile that drops right
+            // after connecting would sit unrepaired for the rest of the window.
+            if (hfpUp) lastHfpAttemptMs.remove(addr)
+            if (a2dpUp) lastA2dpAttemptMs.remove(addr)
+            if (aclUp) {
+                disconnectedSweeps.remove(addr)
+            } else if (!hfpUp && !a2dpUp) {
+                // Stale bond suppression: count consecutive sweeps where BOTH
+                // profiles are down. connect() return value is unreliable (async).
                 val sweeps = (disconnectedSweeps[addr] ?: 0) + 1
                 disconnectedSweeps[addr] = sweeps
                 if (sweeps >= STALE_THRESHOLD) {
@@ -313,20 +441,37 @@ class ProfileAutoConnector(
             // sweep from bringing them back. Unfold reconnects both.
             val needsWork = !folded && (!hfpUp || !a2dpUp)
             if (!needsWork) continue
+            // connect() is async and isConnected() lags it, so a device sitting
+            // in CONNECTING still reads as down. Without a cooldown the 5s tick
+            // would re-issue connect() on top of an attempt already in flight.
+            // The listener app deliberately drops every A2DP source for the
+            // duration of a call (AudioRoutingController.disconnectForCall), so
+            // a2dpUp=false during a call is the intended state, not a gap to
+            // repair. Re-connecting it here would fight that and disturb the
+            // call's audio path. HFP is still repaired: that is the call itself.
+            val a2dpAllowed = hfp.noCallAudioExceptFor(addr)
+            val hfpDue = !hfpUp && cooledDown(lastHfpAttemptMs, addr)
+            val a2dpDue = !a2dpUp && a2dpAllowed && cooledDown(lastA2dpAttemptMs, addr)
+            if (!hfpDue && !a2dpDue) continue
             log("autoconnect($reason) addr=$addr name=${dev.name} hfp=$hfpUp a2dp=$a2dpUp folded=$folded sweeps=${disconnectedSweeps[addr] ?: 0}")
-            if (!hfpUp) {
+            if (hfpDue) {
                 needHfp++
+                lastHfpAttemptMs[addr] = SystemClock.elapsedRealtime()
                 val ok = hfp.connect(addr)
                 if (!ok) log("autoconnect($reason) hfp.connect FAILED addr=$addr")
             }
-            if (!a2dpUp) {
+            if (a2dpDue) {
                 needA2dp++
+                lastA2dpAttemptMs[addr] = SystemClock.elapsedRealtime()
                 val ok = a2dp.connect(addr)
                 if (!ok) log("autoconnect($reason) a2dp.connect FAILED addr=$addr")
             }
         }
+        // skippedFast is deliberately not a reason to log: it is non-zero on
+        // almost every fast tick, and logging it would put a line in the
+        // persistent log every 5s forever.
         if (needHfp > 0 || needA2dp > 0 || skippedStale > 0 || skippedLe > 0) {
-            log("autoconnect($reason) done bonded=${bonded.size} need_hfp=$needHfp need_a2dp=$needA2dp skipped_stale=$skippedStale skipped_le=$skippedLe folded=$folded")
+            log("autoconnect($reason) done bonded=${bonded.size} need_hfp=$needHfp need_a2dp=$needA2dp skipped_stale=$skippedStale skipped_le=$skippedLe skipped_fast=$skippedFast folded=$folded")
         }
     }
 }

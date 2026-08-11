@@ -68,6 +68,12 @@ class HfpClientController(
         //   STATE_AUDIO_CONNECTED    = 2
         // (Note: BluetoothProfile.STATE_* uses CONNECTED=2 too, but the
         // BluetoothHeadset / HF audio-state extras share these specific values.)
+        /**
+         * Returned by [scoActiveAddress] when the SCO owner could not be
+         * determined. Distinct from "" (= determined, nobody has SCO) so callers
+         * can fail closed instead of mistaking ignorance for an idle link.
+         */
+        const val SCO_STATE_UNKNOWN = "?"
         const val AUDIO_STATE_DISCONNECTED = 0
         const val AUDIO_STATE_CONNECTING = 1
         const val AUDIO_STATE_CONNECTED = 2
@@ -537,6 +543,50 @@ class HfpClientController(
             log("HfpClient.getAudioState failed: ${e.message}")
             -1
         }
+    }
+
+    /**
+     * Address of the device that currently holds the SCO link, or "" if none.
+     *
+     * SCO is physically single-occupancy: exactly one AG can own the speaker and
+     * mic at a time. That device is in a call right now, so it outranks every
+     * policy decision -- dropping its HFP would cut live call audio mid-sentence.
+     * Callers use this to leave it alone. A2DP has no such rule: its slot is
+     * freely reassigned, since interrupting music costs the user nothing.
+     */
+    fun scoActiveAddress(): String {
+        // No proxy means this app has no HFP-HF profile bound at all, so there is
+        // no device it could be holding a call for. That is a determinate "no
+        // call", NOT unknown -- returning unknown here would fail closed forever
+        // if the proxy never binds, permanently blocking every A2DP connect.
+        val p = proxy ?: return ""
+        return try {
+            val m = p.javaClass.methods.firstOrNull {
+                it.name == "getConnectedDevices" && it.parameterTypes.isEmpty()
+            } ?: return SCO_STATE_UNKNOWN
+            m.isAccessible = true
+            @Suppress("UNCHECKED_CAST")
+            val devs = (m.invoke(p) as? List<BluetoothDevice>).orEmpty()
+            devs.firstOrNull { liveAudioState(it.address) == AUDIO_STATE_CONNECTED }
+                ?.address ?: ""
+        } catch (e: Throwable) {
+            log("HfpClient.scoActiveAddress failed: ${e.message}")
+            SCO_STATE_UNKNOWN
+        }
+    }
+
+    /**
+     * True when it is safe to disturb the shared audio path -- i.e. we know for
+     * certain no device is on a call, and it is not [exceptFor].
+     *
+     * Deliberately fails CLOSED: if the proxy is missing or reflection throws we
+     * cannot prove there is no call, and wrongly disturbing a live call is much
+     * worse than briefly deferring a music handoff.
+     */
+    fun noCallAudioExceptFor(exceptFor: String): Boolean {
+        val owner = scoActiveAddress()
+        if (owner == SCO_STATE_UNKNOWN) return false
+        return owner.isEmpty() || owner.equals(exceptFor, true)
     }
 
     /**
