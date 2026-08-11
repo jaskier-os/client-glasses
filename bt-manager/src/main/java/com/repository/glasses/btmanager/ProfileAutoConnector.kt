@@ -9,7 +9,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import com.repository.glasses.tracing.GT
 import java.util.concurrent.ConcurrentHashMap
 
@@ -44,10 +43,6 @@ class ProfileAutoConnector(
     // When >= STALE_THRESHOLD, skip the device in periodic sweeps.
     private val disconnectedSweeps = ConcurrentHashMap<String, Int>()
 
-    // Last time a sweep issued a connect for an address (elapsedRealtime).
-    // Read by ScoSlotGuard so it can stay off addresses we just poked.
-    private val lastSweepTouchMs = ConcurrentHashMap<String, Long>()
-
     companion object {
         private const val INIT_DELAY_MS = 4_000L
         private const val ADAPTER_ON_DELAY_MS = 2_000L
@@ -62,9 +57,6 @@ class ProfileAutoConnector(
         // a2dp.connect() to the same device, the ACL was self-initiated (our
         // sweep poking an asleep device) -- not a user switch. Suppress the swap.
         private const val SELF_ACL_WINDOW_MS = 5_000L
-        // Delay before the post-tier-2 HFP reconnect, giving the stack time to
-        // finish the service close (and its SCO index release) first.
-        private const val HFP_RECONNECT_DELAY_MS = 1_500L
     }
 
     private var periodicTickCount = 0
@@ -230,31 +222,6 @@ class ProfileAutoConnector(
     }
 
     /**
-     * Bring HFP back for [addr] after ScoSlotGuard's tier 2 dropped it.
-     *
-     * Routed through here rather than calling hfp.connect() directly so every
-     * HFP connect attempt stays funnelled through one place: tier 2 and the 60s
-     * sweep would otherwise race and double-connect. Clearing the stale counter
-     * first stops the brief intentional HFP gap from pushing the device toward
-     * STALE.
-     */
-    fun requestHfpReconnect(addr: String) {
-        disconnectedSweeps.remove(addr)
-        log("event=autoconnect.sco_guard_reconnect addr=$addr")
-        schedule("sco_guard", HFP_RECONNECT_DELAY_MS)
-    }
-
-    /**
-     * Elapsed ms since a sweep last issued a connect for [addr], or Long.MAX_VALUE
-     * if never. ScoSlotGuard uses this to avoid mistaking the sweep's own connect
-     * churn for the SCO flapping it is looking for.
-     */
-    fun msSinceSweepTouched(addr: String): Long {
-        val at = lastSweepTouchMs[addr] ?: return Long.MAX_VALUE
-        return SystemClock.elapsedRealtime() - at
-    }
-
-    /**
      * True when [dev] can carry BR/EDR profiles at all. HFP-HF and A2DP Sink are
      * BR/EDR-only, so an LE-only bond can never satisfy them.
      *
@@ -347,7 +314,6 @@ class ProfileAutoConnector(
             val needsWork = !folded && (!hfpUp || !a2dpUp)
             if (!needsWork) continue
             log("autoconnect($reason) addr=$addr name=${dev.name} hfp=$hfpUp a2dp=$a2dpUp folded=$folded sweeps=${disconnectedSweeps[addr] ?: 0}")
-            lastSweepTouchMs[addr] = SystemClock.elapsedRealtime()
             if (!hfpUp) {
                 needHfp++
                 val ok = hfp.connect(addr)

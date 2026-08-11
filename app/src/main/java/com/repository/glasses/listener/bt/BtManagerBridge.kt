@@ -443,15 +443,6 @@ class BtManagerBridge(private val context: Context) {
         return try { manager?.primaryHfpDeviceAddress ?: "" } catch (_: Exception) { "" }
     }
 
-    /**
-     * ScoSlotGuard's per-device view (claim, flaps, attempt counts, unrecovered
-     * latch). Diagnostic surface for verifying the SCO slot leak recovery; not
-     * consumed by any UI.
-     */
-    fun getScoHealthJson(): String {
-        return try { manager?.scoHealthJson ?: "{}" } catch (_: Exception) { "{}" }
-    }
-
     fun setHfMicMute(deviceAddress: String, muted: Boolean): Boolean {
         return try {
             manager?.setHfMicMute(deviceAddress, muted) ?: false

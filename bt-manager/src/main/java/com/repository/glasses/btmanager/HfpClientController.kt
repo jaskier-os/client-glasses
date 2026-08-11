@@ -8,8 +8,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.Handler
-import android.os.Looper
 import android.os.Parcelable
 import android.util.Log
 import com.repository.glasses.tracing.GT
@@ -42,14 +40,6 @@ class HfpClientController(
 
         // Hidden constants
         private const val HEADSET_CLIENT_PROFILE_ID = 16
-
-        /**
-         * Grace period after an observed SCO teardown before forcing the close
-         * path. Long enough that an AG re-establishing SCO immediately (iPhone
-         * mid-call bounce) cancels it first, short enough that a leaked block is
-         * freed well before the AG's next retry ladder.
-         */
-        private const val REARM_DELAY_MS = 600L
 
         private const val ACTION_AG_CALL_CHANGED =
             "android.bluetooth.headsetclient.profile.action.AG_CALL_CHANGED"
@@ -158,15 +148,6 @@ class HfpClientController(
     private val deviceHfpStates = ConcurrentHashMap<String, Int>()
     private val deviceAudioStates = ConcurrentHashMap<String, Int>()
 
-    /** Set by BtManagerService once the guard exists. Null until then. */
-    @Volatile var scoGuard: ScoSlotGuard? = null
-
-    private val handler = Handler(Looper.getMainLooper())
-
-    // Pending post-teardown re-arm per address, so it can be cancelled if the
-    // same device brings SCO straight back up.
-    private val pendingRearm = ConcurrentHashMap<String, Runnable>()
-
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -267,12 +248,9 @@ class HfpClientController(
         }
         proxy = null
         listener = null
-        scoGuard = null
         callCache.clear()
         deviceHfpStates.clear()
         deviceAudioStates.clear()
-        pendingRearm.values.forEach { handler.removeCallbacks(it) }
-        pendingRearm.clear()
         log("HfpClient released")
     }
 
@@ -350,86 +328,6 @@ class HfpClientController(
             false
         }
     }
-
-    /**
-     * Tear down HFP-HF to [deviceAddress] WITHOUT touching the connection policy,
-     * so both our own sweep and the AG can immediately bring it back.
-     *
-     * This is the SCO-slot-leak recovery path (see ScoSlotPolicy): closing the HF
-     * service runs bta_hf_client_sco_shutdown, which force-releases every SCO
-     * index the scb owns even when the disconnect-complete was never mapped back
-     * onto sco_idx.
-     *
-     * Deliberately NOT reusing disconnect(): that forbids the connection policy,
-     * which is right for its one caller (fold teardown) and fatal here -- it
-     * would block the reconnect on both sides and ProfileAutoConnector's sweep
-     * would never bring HFP back.
-     */
-    fun disconnectTransient(deviceAddress: String): Boolean = GT.section("bt.hfp.disconnectTransient") {
-        val p = proxy ?: run {
-            log("HfpClient.disconnectTransient: proxy null addr=$deviceAddress")
-            return@section false
-        }
-        val dev = resolveDevice(deviceAddress) ?: return@section false
-        try {
-            val m = p.javaClass.methods.firstOrNull {
-                it.name == "disconnect" &&
-                    it.parameterTypes.size == 1 &&
-                    it.parameterTypes[0] == BluetoothDevice::class.java
-            }
-            if (m == null) {
-                log("HfpClient.disconnectTransient: no method addr=$deviceAddress")
-                return@section false
-            }
-            m.isAccessible = true
-            val ok = (m.invoke(p, dev) as? Boolean) ?: false
-            log("event=hfp.disconnectTransient addr=${dev.address} name=${dev.name} result=$ok")
-            ok
-        } catch (e: Throwable) {
-            log("HfpClient.disconnectTransient.error addr=$deviceAddress err=${e.message}")
-            false
-        }
-    }
-
-    /**
-     * Close the SCO audio link to [deviceAddress], leaving HFP itself connected.
-     *
-     * Drives the HF state machine AudioOn -> Connected, which runs
-     * BTA_HfClientAudioClose -> bta_hf_client_sco_close -> BTM_RemoveSco. That is
-     * what actually frees a leaked SCO control block and resets sco_idx, after
-     * which the HF client re-arms a LISTENING block on its own.
-     *
-     * Safe to call when the state machine is already in Connected: DISCONNECT_AUDIO
-     * is unhandled in that state and the call is a no-op.
-     */
-    fun disconnectAudio(deviceAddress: String): Boolean = GT.section("bt.hfp.disconnectAudio") {
-        val p = proxy ?: run {
-            log("HfpClient.disconnectAudio: proxy null addr=$deviceAddress")
-            return@section false
-        }
-        val dev = resolveDevice(deviceAddress) ?: return@section false
-        try {
-            val m = p.javaClass.methods.firstOrNull {
-                it.name == "disconnectAudio" &&
-                    it.parameterTypes.size == 1 &&
-                    it.parameterTypes[0] == BluetoothDevice::class.java
-            }
-            if (m == null) {
-                log("HfpClient.disconnectAudio: no method addr=$deviceAddress")
-                return@section false
-            }
-            m.isAccessible = true
-            val ok = (m.invoke(p, dev) as? Boolean) ?: false
-            log("event=hfp.disconnectAudio addr=${dev.address} name=${dev.name} result=$ok")
-            ok
-        } catch (e: Throwable) {
-            log("HfpClient.disconnectAudio.error addr=$deviceAddress err=${e.message}")
-            false
-        }
-    }
-
-    /** True while any AG call is live. The SCO guard must never act during one. */
-    fun hasActiveCall(): Boolean = callCache.isNotEmpty()
 
     private fun setConnectionPolicyForbidden(dev: BluetoothDevice) {
         val p = proxy ?: return
@@ -788,64 +686,11 @@ class HfpClientController(
             muteByAddr.remove(addr)
             clearAudioManagerMuteIfStale()
         }
-        if (addr.isNotEmpty()) {
-            when (newState) {
-                AUDIO_STATE_DISCONNECTED -> scheduleScoRearm(addr)
-                // The AG brought SCO straight back (e.g. an iPhone renegotiating
-                // mid-call) -- the link is alive, so never cut it.
-                AUDIO_STATE_CONNECTING, AUDIO_STATE_CONNECTED -> cancelScoRearm(addr)
-            }
-            scoGuard?.onAudioState(addr, newState)
-        }
         try {
             listener?.onCallAudioStateChanged(addr, newState)
         } catch (e: Throwable) {
             log("onCallAudioStateChanged listener threw: ${e.message}")
         }
-    }
-
-    /**
-     * Prevention half of the SCO slot leak fix: after an observed SCO teardown,
-     * force the close path to run to completion instead of trusting the stack to
-     * map the HCI Disconnection Complete back onto bta_hf_client_cb.scb.sco_idx.
-     * When that mapping is missed the block stays in state 4 and every later
-     * incoming SCO is rejected with 0x0d Limited Resources.
-     *
-     * Idempotent: if the state machine already left AudioOn, DISCONNECT_AUDIO is
-     * unhandled in that state and this is a no-op. The delay plus the cancel on
-     * reconnect is what keeps an AG that immediately re-establishes SCO from
-     * being cut.
-     *
-     * This only covers teardowns we actually SEE. The wedge's defining property
-     * is that the broadcast eventually stops arriving at all, which is why
-     * ScoSlotGuard exists on top of this.
-     */
-    private fun scheduleScoRearm(addr: String) {
-        cancelScoRearm(addr)
-        val r = Runnable {
-            pendingRearm.remove(addr)
-            // Never touch a live call: if the AG re-established SCO inside the
-            // grace window and the reflection read lags the state machine, this
-            // is the check that stops us cutting real call audio.
-            if (hasActiveCall()) {
-                log("event=hfp.sco_rearm_skipped addr=$addr reason=active_call")
-                return@Runnable
-            }
-            // Only if SCO is still down; a race could have reconnected it.
-            val live = liveAudioState(addr)
-            if (live == AUDIO_STATE_CONNECTED || live == AUDIO_STATE_CONNECTING) {
-                log("event=hfp.sco_rearm_skipped addr=$addr live=$live")
-                return@Runnable
-            }
-            val ok = disconnectAudio(addr)
-            log("event=hfp.sco_rearm addr=$addr result=$ok")
-        }
-        pendingRearm[addr] = r
-        handler.postDelayed(r, REARM_DELAY_MS)
-    }
-
-    private fun cancelScoRearm(addr: String) {
-        pendingRearm.remove(addr)?.let { handler.removeCallbacks(it) }
     }
 
     private fun handleConnectionStateChanged(intent: Intent) {
