@@ -190,6 +190,54 @@ adb logcat -s "GlassesListener:*" --pid=$(adb shell pidof com.repository.glasses
 adb shell screencap -p /sdcard/test.png && adb pull /sdcard/test.png /tmp/glasses_screenshot.png
 ```
 
+### UI debugging: dump the view hierarchy, do not infer it from logs
+
+**When a view is not appearing, or is appearing when it should not, DUMP THE HIERARCHY
+FIRST.** It answers in one command what log-reading answers wrongly over many iterations:
+whether a view is actually in the tree, and what bounds it was given.
+
+```bash
+adb shell uiautomator dump /sdcard/ui.xml && adb pull /sdcard/ui.xml /tmp/ui.xml
+# readable one-line-per-node summary (class / resource-id / bounds / text):
+python3 - <<'PY'
+import re
+x = open('/tmp/ui.xml').read()
+for n in re.findall(r'<node[^>]*>', x):
+    g = lambda k: re.search(k + r'="([^"]*)"', n).group(1)
+    print(f"{g('class').split('.')[-1]:22} {g('resource-id').split('/')[-1]:22} "
+          f"{g('bounds'):22} {g('text')[:30]}")
+PY
+```
+
+Complementary, when you need z-order and visibility flags rather than just bounds
+(`uiautomator` omits non-content views, and `V.`/`G.`/`I.` is the visible/gone/invisible
+flag):
+
+```bash
+adb shell dumpsys activity top | sed -n '/View Hierarchy:/,/^$/p'
+```
+
+Rules learned the hard way (a battery-indicator overlay cost ~6 wasted deploys before
+anyone dumped the tree):
+
+- **A log line saying "attached" is not evidence the view is on screen.** Check the dump.
+  Always confirm a UI claim with a dump or a screenshot before reporting it as working.
+- **Check the timestamp before believing a log line.** Lines prefixed `PREVIOUS CRASH:` in
+  `GlassesListenerSvc` are replayed from an EARLIER boot; they look identical to live ones
+  and will happily "confirm" a fix that never ran.
+- **`logcat -t N` truncates.** A too-small window reads as "the code never ran". Prefer
+  `logcat -c` before the action, then a plain `logcat -d`.
+- **`activityLog` is batched** and can lag or miss logcat entirely; `android.util.Log.i` is
+  immediate. Trace with `Log.i` when you need to prove control flow.
+- **`bringToFront()` only reorders a view among its OWN siblings.** It cannot lift a nested
+  view above an opaque cover attached higher in the tree. A backend
+  `TYPE_APPLICATION_OVERLAY` window also cannot occlude the activity window -- to render
+  ABOVE the activity's solo blackout, be an overlay window (see `BatterySoloOverlay`), and
+  to hide the activity, hide its own content root (see `MainActivity.hideForSolo`).
+- **`uiautomator dump` shows the FOCUSED window only**, so overlay windows
+  (notification card, battery solo, copilot cards) will not appear in it. Use a screenshot
+  to see those.
+
 ### LED Control
 
 RGB + White LEDs controlled via Rokid `lights_ctrl` service (`com.rokid.light.ILightsCtrl` AIDL).
