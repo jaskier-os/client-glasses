@@ -20,6 +20,11 @@ object RemoteInputCodec {
     const val TYPE_CLOSE = 5
     const val TYPE_PING = 6
 
+    /** Append-only: HOLD took the next free opcode rather than slotting beside the actions. */
+    const val TYPE_HOLD = 7
+    const val TYPE_PHOTO = 8
+    const val TYPE_VIDEO = 9
+
     const val PROTOCOL_VERSION = 1
 
     /**
@@ -102,6 +107,12 @@ object RemoteInputCodec {
                     RemoteInputFrame.Action(version, src, sid, seq, wms, RemoteAction.SELECT, 0)
                 TYPE_BACK ->
                     RemoteInputFrame.Action(version, src, sid, seq, wms, RemoteAction.BACK, 0)
+                TYPE_HOLD ->
+                    RemoteInputFrame.Action(version, src, sid, seq, wms, RemoteAction.HOLD, 0)
+                TYPE_PHOTO ->
+                    RemoteInputFrame.Action(version, src, sid, seq, wms, RemoteAction.PHOTO, 0)
+                TYPE_VIDEO ->
+                    RemoteInputFrame.Action(version, src, sid, seq, wms, RemoteAction.VIDEO, 0)
                 TYPE_OPEN ->
                     RemoteInputFrame.Lifecycle(version, src, sid, seq, wms, RemoteLifecycle.OPEN)
                 TYPE_CLOSE ->
@@ -128,7 +139,17 @@ object RemoteInputCodec {
         "OPEN" -> TYPE_OPEN
         "CLOSE" -> TYPE_CLOSE
         "PING" -> TYPE_PING
-        else -> raw.toIntOrNull()?.takeIf { it in TYPE_SCROLL..TYPE_PING }
+        "HOLD" -> TYPE_HOLD
+        "PHOTO" -> TYPE_PHOTO
+        "VIDEO" -> TYPE_VIDEO
+        // Range end is the highest opcode. A new opcode MUST extend this or its numeric
+        // form is silently rejected while its name still parses -- two renderings of the
+        // same frame disagreeing is exactly the class of bug the golden vectors catch.
+        //
+        // The numeric form is not a curiosity: it is how the phone renders an action it
+        // has never heard of, which is what lets a new action ship without touching the
+        // relay at all.
+        else -> raw.toIntOrNull()?.takeIf { it in TYPE_SCROLL..TYPE_VIDEO }
     }
 
     /**

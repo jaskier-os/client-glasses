@@ -1,6 +1,7 @@
 package com.repository.glasses.listener.input.remote;
 
 import com.repository.glasses.listener.input.remote.IRemoteInputSink;
+import com.repository.glasses.listener.arstream.IHudSurfaceSink;
 
 /**
  * The `:backend` end of the remote-input bridge, handed to the UI process from
@@ -41,4 +42,15 @@ interface IRemoteInputBridge {
      * @param reasonOrdinal ordinal of RemoteRefusalReason.
      */
     oneway void reportRefusal(int reasonOrdinal);
+
+    /**
+     * Attach `sink` as the live AR stream's HUD surface sink, replacing any previous one.
+     *
+     * Registered through this bridge because it is the binder the UI process already holds; a
+     * Surface must travel over binder rather than a broadcast to stay usable in the receiver.
+     */
+    void registerHudSurfaceSink(IHudSurfaceSink sink);
+
+    /** Detach `sink`, but only if it is still the current one (same rationale as unregisterSink). */
+    void unregisterHudSurfaceSink(IHudSurfaceSink sink);
 }

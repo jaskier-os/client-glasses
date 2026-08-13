@@ -71,6 +71,14 @@ class RemoteInputBridgeService(
 
     private var deathRecipient: IBinder.DeathRecipient? = null
 
+    /** The UI-process HUD surface sink for the live AR stream. Guarded by [lock]. */
+    private var hudSink: com.repository.glasses.listener.arstream.IHudSurfaceSink? = null
+
+    /** `hudSink.asBinder()`, cached for the same reason as [currentBinder]. Guarded by [lock]. */
+    private var hudBinder: IBinder? = null
+
+    private var hudDeathRecipient: IBinder.DeathRecipient? = null
+
     /**
      * Events that arrived with no UI sink attached.
      *
@@ -146,6 +154,85 @@ class RemoteInputBridgeService(
         router.reportRefusal(reason)
     }
 
+    override fun registerHudSurfaceSink(sink: com.repository.glasses.listener.arstream.IHudSurfaceSink?) {
+        if (sink == null) return
+        val binder = sink.asBinder() ?: return
+        synchronized(lock) {
+            if (binder == hudBinder) return
+            detachHudLocked("replaced")
+            val recipient = IBinder.DeathRecipient { onHudSinkDied(binder) }
+            try {
+                binder.linkToDeath(recipient, 0)
+            } catch (e: RemoteException) {
+                log("[ArStream] registerHudSurfaceSink: peer already dead (${e.message})")
+                return
+            }
+            hudSink = sink
+            hudBinder = binder
+            hudDeathRecipient = recipient
+            log("[ArStream] HUD surface sink attached (binder=${System.identityHashCode(binder)})")
+        }
+    }
+
+    override fun unregisterHudSurfaceSink(sink: com.repository.glasses.listener.arstream.IHudSurfaceSink?) {
+        val binder = sink?.asBinder() ?: return
+        synchronized(lock) {
+            if (binder != hudBinder) {
+                log("[ArStream] unregisterHudSurfaceSink ignored: not the current sink")
+                return
+            }
+            detachHudLocked("unregistered")
+        }
+    }
+
+    /**
+     * Push a compositor-owned Surface to the UI process. Returns false when no UI is attached or
+     * the transaction fails, so the caller can abandon the session instead of streaming a
+     * camera-only frame the user would mistake for a broken HUD.
+     */
+    fun pushHudSurface(surface: android.view.Surface, width: Int, height: Int): Boolean {
+        val sink = synchronized(lock) { hudSink } ?: run {
+            log("[ArStream] pushHudSurface: no UI sink attached")
+            return false
+        }
+        return try {
+            sink.setHudSurface(surface, width, height)
+            true
+        } catch (e: RemoteException) {
+            log("[ArStream] pushHudSurface failed: ${e.message}")
+            false
+        }
+    }
+
+    fun clearHudSurface() {
+        val sink = synchronized(lock) { hudSink } ?: return
+        try {
+            sink.clearHudSurface()
+        } catch (e: RemoteException) {
+            log("[ArStream] clearHudSurface failed: ${e.message}")
+        }
+    }
+
+    private fun onHudSinkDied(dead: IBinder) {
+        synchronized(lock) {
+            if (dead != hudBinder) {
+                log("[ArStream] death of a superseded HUD sink ignored")
+                return
+            }
+            detachHudLocked("died")
+        }
+    }
+
+    /** Must hold [lock]. Idempotent. */
+    private fun detachHudLocked(reason: String) {
+        val binder = hudBinder ?: return
+        hudDeathRecipient?.let { runCatching { binder.unlinkToDeath(it, 0) } }
+        hudSink = null
+        hudBinder = null
+        hudDeathRecipient = null
+        log("[ArStream] HUD surface sink detached ($reason)")
+    }
+
     private fun onSinkDied(dead: IBinder) {
         synchronized(lock) {
             // Only act if the dead binder is STILL the current one. A late death callback for a
@@ -185,7 +272,10 @@ class RemoteInputBridgeService(
      * router is being torn down anyway and calling back into it would be pointless.
      */
     fun shutdown() {
-        synchronized(lock) { detachCurrentLocked("shutdown") }
+        synchronized(lock) {
+            detachCurrentLocked("shutdown")
+            detachHudLocked("shutdown")
+        }
         announceSinkState()
         router.clearSink(this)
     }

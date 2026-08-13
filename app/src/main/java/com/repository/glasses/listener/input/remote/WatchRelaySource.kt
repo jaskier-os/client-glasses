@@ -98,6 +98,11 @@ class WatchRelaySource(
                 status.droppedTotal.toString(),
                 refusal?.reason?.name ?: "",
                 (refusal?.total ?: 0L).toString(),
+                // Appended for the same reason as the refusal fields: a phone build that
+                // reads only the first five args keeps working against a build that
+                // sends six.
+                status.holdMs.toString(),
+                status.deviceState.toString(),
             )
         } catch (e: Exception) {
             log("watch input: status publish failed: ${e.javaClass.simpleName}")

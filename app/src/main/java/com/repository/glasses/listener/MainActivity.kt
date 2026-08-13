@@ -360,7 +360,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
      * knows a process boundary exists.
      */
     private val remoteInputBridge by lazy {
-        RemoteInputBridgeClient(mainHandler, this) { uiLog(it) }
+        RemoteInputBridgeClient(
+            mainHandler,
+            this,
+            { uiLog(it) },
+            // The live AR stream composites this window's content as its overlay layer.
+            hudRootView = { window?.decorView?.rootView }
+        )
     }
 
     // --- Views ---
@@ -1201,10 +1207,22 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     @Volatile private var soloScreenOff = false
     private val soloHandler = android.os.Handler(android.os.Looper.getMainLooper())
     // Hard cap: even if every other reveal trigger is missed, restore the UI after this.
-    private val soloBlackoutTimeoutMs = 20000L
+    // MUST stay clear of the longest card window (the 20s low-battery alert) plus the
+    // +500ms screen-off that follows it. If it fires first the cover fades out on a
+    // still-lit panel -- exactly the flash the screen-off-driven removal exists to avoid.
+    private val soloBlackoutTimeoutMs = 30000L
     private val soloRevealFailsafe = Runnable {
+        // A low-battery solo is a PINNED state, not a transient card: it must persist
+        // until the user interacts. The failsafe exists so a notification blackout can
+        // never get stuck, which is a different situation -- applying it here tore the
+        // blackout down after 30s and left the full UI on a pinned screen.
+        if (lowBatteryActive) {
+            android.util.Log.i("MainActivityUI", "[NSOLO] timeout failsafe skipped: low-battery solo is pinned")
+            return@Runnable
+        }
         if (soloContentHidden) {
             activityLog("[NSOLO] blackout timeout failsafe -> force reveal")
+            android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via TIMEOUT failsafe")
             revealFromSolo("timeout")
         }
     }
@@ -1275,6 +1293,25 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         }
     }
 
+
+    /**
+     * True while the battery is low enough that the indicator must survive a blackout.
+     *
+     * Pushed from `:backend`, which owns the thresholds and the hysteresis
+     * ([LowBatteryAlerter]) -- duplicating the comparison here would give the two
+     * processes independent opinions about what "low" means, and they would drift.
+     */
+    @Volatile private var lowBatteryActive = false
+
+    private val lowBatteryStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val low = intent?.getBooleanExtra(ListenerService.EXTRA_LOW_BATTERY, false) ?: false
+            if (low == lowBatteryActive) return
+            lowBatteryActive = low
+            activityLog("[LowBat] lowBatteryActive=$low")
+        }
+    }
+
     /** Fade the black cover out over 300ms then remove it. Idempotent; never leaves it stuck. */
     private fun revealFromSolo(reason: String) {
         runOnUiThread {
@@ -1323,7 +1360,13 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private val notificationSoloShowReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             notifSoloArmed = true
-            uiLog("[NSOLO] SOLO_SHOW received -- armed + blacking out content")
+            // A low-battery solo states so on the intent itself, so the exemption is
+            // known BEFORE the blackout rather than depending on a separate broadcast
+            // having won a race with it.
+            if (intent.getBooleanExtra(ListenerService.EXTRA_LOW_BATTERY, false)) {
+                lowBatteryActive = true
+            }
+            uiLog("[NSOLO] SOLO_SHOW received -- armed + blacking out content (lowBattery=$lowBatteryActive)")
             hideForSolo()
         }
     }
@@ -1342,8 +1385,18 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
                 uiLog("[NSOLO] SOLO_END received -- user already revealed, noop")
                 return
             }
+            // The low-battery pin is taking the panel over: the screen-off this
+            // branch waits for will never come, so reveal now. A fade on a lit
+            // panel is the lesser evil against ~30s of black UI.
+            if (intent.getBooleanExtra(ListenerService.EXTRA_SOLO_FORCE_REVEAL, false)) {
+                uiLog("[NSOLO] SOLO_END received with force-reveal -- revealing now")
+                android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via SOLO_END force-reveal")
+                revealFromSolo("SOLO_END force-reveal")
+                return
+            }
             if (soloScreenOff) {
                 uiLog("[NSOLO] SOLO_END received (no-touch, screen already off) -- removing instantly")
+                android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via SOLO_END screen-off")
                 removeSoloCoverInstant("SOLO_END screen-off -> cover removed instantly (no flash)")
             } else {
                 uiLog("[NSOLO] SOLO_END received (no-touch, screen still lit) -- holding cover until screen-off")
@@ -1359,6 +1412,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             // sets notifSoloArmed=false but also tears the cover down, so soloContentHidden
             // will be false there and we won't fight it.
             if (soloContentHidden) {
+                android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via SCREEN_OFF receiver")
                 removeSoloCoverInstant("screen-off -> cover removed instantly (no flash)")
             }
         }
@@ -4368,6 +4422,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             registerReceiver(notificationShownReceiver, IntentFilter(ListenerService.ACTION_NOTIFICATION_SHOWN))
             registerReceiver(notificationHiddenReceiver, IntentFilter(ListenerService.ACTION_NOTIFICATION_HIDDEN))
             registerReceiver(notificationSoloShowReceiver, IntentFilter(ListenerService.ACTION_NOTIFICATION_SOLO_SHOW))
+            registerReceiver(lowBatteryStateReceiver, IntentFilter(ListenerService.ACTION_LOW_BATTERY_STATE))
             registerReceiver(notificationSoloEndReceiver, IntentFilter(ListenerService.ACTION_NOTIFICATION_SOLO_END))
             registerReceiver(soloScreenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
             registerReceiver(soloScreenOnReceiver, IntentFilter(Intent.ACTION_SCREEN_ON))
@@ -7736,6 +7791,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         if (notifSoloArmed && event.action == android.view.KeyEvent.ACTION_DOWN) {
             notifSoloArmed = false
             activityLog("[NSOLO] key DOWN while armed -> revealing content (not consuming)")
+            android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via KEY-PRESS")
             revealFromSolo("key-press")
             sendBroadcast(Intent(ListenerService.ACTION_NOTIFICATION_SOLO_REVEAL).apply {
                 setPackage(packageName)
@@ -8230,6 +8286,26 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
     private fun consumeForScreenWake(e: RemoteInputEvent): Boolean {
         if (!panelIsOff()) return false
 
+        // CAPTURE IS NEVER SPENT ON A WAKE. The rule below exists to stop the user
+        // committing to something they cannot SEE, and that reasoning does not reach
+        // photo or video: the button states its own outcome, and what it captures is the
+        // world in front of the wearer, not anything on the panel. There is nothing to
+        // read before pressing and therefore nothing to protect them from.
+        //
+        // Swallowing it is actively wrong here in a way it is not for SELECT: the moment
+        // worth photographing is the moment they pressed, and "press it twice when the
+        // screen happens to be off" is not a rule anyone can be expected to learn. The
+        // panel is still woken -- the capture feedback has to be visible -- but the
+        // event is dispatched rather than consumed.
+        if (e.action == RemoteAction.PHOTO || e.action == RemoteAction.VIDEO) {
+            if (!foldedState) {
+                lastRemoteWakeMs = SystemClock.elapsedRealtime()
+                holdPanelForRemoteActivity(causeWakeup = true)
+                uiLog("[RemoteInput] ${e.action} woke the panel AND dispatched (capture is never spent on a wake)")
+            }
+            return false
+        }
+
         if (foldedState) {
             uiLog("[RemoteInput] ${e.action} consumed: panel off and folded, not waking")
             reportRemoteRefusal(RemoteActionGate.Denial.REFUSED_FOLDED)
@@ -8342,6 +8418,23 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             // of onKeyDown and never reaches the focus dispatch at all, so it selects nothing.
             RemoteAction.SELECT -> dispatchRemoteAction(e.action, KeyEvent.KEYCODE_DPAD_CENTER)
             RemoteAction.BACK -> dispatchRemoteAction(e.action, KeyEvent.KEYCODE_BACK)
+            // NUMPAD_3 is exactly what the touchpad daemon emits when a press reaches its
+            // long-press threshold, so a remote hold lands on every hold handler the temple
+            // already drives -- RC dictation, AI listening, notification reply -- with no
+            // second code path to keep in step.
+            //
+            // Unlike SELECT, NUMPAD_3 is NOT swallowed by the branches at the top of
+            // onKeyDown: those consume NUMPAD_2 (release/double-tap), not NUMPAD_3.
+            RemoteAction.HOLD -> dispatchRemoteAction(e.action, KeyEvent.KEYCODE_NUMPAD_3)
+            // Capture goes through the FN-button state machine rather than calling
+            // CaptureBridge directly, because CaptureBridge lives in :backend and, more
+            // importantly, that state machine is where "short press = photo, long press =
+            // video toggle" is already decided. Driving it means a remote capture is the
+            // SAME operation as a temple press -- including the shutter overlay, the LED,
+            // the phone-recording interrupt, and the fold suppression -- with no second
+            // implementation to keep in step.
+            RemoteAction.PHOTO -> dispatchRemoteCapture(e.action, longPress = false)
+            RemoteAction.VIDEO -> dispatchRemoteCapture(e.action, longPress = true)
         }
         if (acted) showRemoteActiveGlyph()
     }
@@ -8382,6 +8475,57 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             RemoteActionGate.Denial.ALLOWED -> return
         }
         remoteInputBridge.reportRefusal(reason)
+    }
+
+    /**
+     * Drive the function-button state machine from a remote capture action.
+     *
+     * Synthesizes the FN broadcasts the temple button produces: DOWN, then UP either
+     * immediately (short press -> photo) or after the handler's long-press threshold has
+     * elapsed (long press -> start/stop video). The delay is real rather than a flag
+     * because the threshold lives inside FunctionButtonHandler, and adding a "pretend this
+     * was long" parameter would be a second way to express the same thing that could drift
+     * from the first.
+     *
+     * The UP is posted rather than sent inline so the caller is not blocked for the length
+     * of the press.
+     */
+    private fun dispatchRemoteCapture(action: RemoteAction, longPress: Boolean): Boolean {
+        val verdict = RemoteActionGate.evaluate(remoteInputSnapshot(), action)
+        if (verdict != RemoteActionGate.Denial.ALLOWED) {
+            uiLog("[RemoteInput] refused $action in $focusState: $verdict")
+            reportRemoteRefusal(verdict)
+            return false
+        }
+        fun fn(event: String) {
+            sendBroadcast(
+                Intent(com.repository.glasses.listener.service.ScreenOffAccessibilityService.ACTION_FN_KEY).apply {
+                    setPackage(packageName)
+                    putExtra(
+                        com.repository.glasses.listener.service.ScreenOffAccessibilityService.EXTRA_EVENT_ACTION,
+                        event,
+                    )
+                    putExtra(
+                        com.repository.glasses.listener.service.ScreenOffAccessibilityService.EXTRA_REPEAT,
+                        0,
+                    )
+                    // Remote capture is SILENT. The privacy LED exists to confirm a blind
+                    // press of the temple button; someone who just tapped a button on
+                    // their watch has that confirmation on the watch, and lighting up
+                    // would announce the capture to everyone around them instead.
+                    putExtra(
+                        com.repository.glasses.listener.service.ScreenOffAccessibilityService.EXTRA_SILENT,
+                        true,
+                    )
+                }
+            )
+        }
+        uiLog("[RemoteInput] $action -> FN ${if (longPress) "long" else "short"} press")
+        fn("DOWN")
+        // Comfortably past FunctionButtonHandler's 500 ms threshold for the long press,
+        // and immediate for the short one.
+        mainHandler.postDelayed({ fn("UP") }, if (longPress) 700L else 0L)
+        return true
     }
 
     private fun dispatchRemoteAction(action: RemoteAction, keyCode: Int): Boolean {
@@ -8457,7 +8601,14 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // source produces none of those raw gestures -- it sends decided actions -- and must never
         // reach this machinery, most of all the screen-off branch, which would pause the UI process,
         // drop the sink, and strand the session with no way back from the remote device.
-        if (origin == InputOrigin.REMOTE) return null
+        //
+        // NUMPAD_3 is the ONE exception, and it is not a gesture: it is the decided HOLD
+        // action, already recognised on the source against the threshold this device
+        // published. Its consumers (RC dictation, notification reply, AI listening) live
+        // below this line, so a blanket return dropped every remote hold before it could
+        // reach any of them -- the gate passed, the key was delivered, and nothing
+        // happened. Everything genuinely gesture-shaped stays excluded.
+        if (origin == InputOrigin.REMOTE && keyCode != KeyEvent.KEYCODE_NUMPAD_3) return null
         // rokid-touchpad-daemon emits synthetic keycodes on its virtual input
         // device instead of the raw DPAD keys from the PSoC touchpad, so we
         // get finer-grained, velocity-scaled scroll steps and the AI-assistant
@@ -10070,6 +10221,7 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // The armed blackout stays protected from getting stuck by the key-press reveal, the
         // SOLO_END broadcast, and the 20s timeout failsafe.
         if (!notifSoloArmed && (soloContentHidden || soloCoverView?.parent != null)) {
+            android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via onResume-safety armed=$notifSoloArmed hidden=$soloContentHidden")
             revealFromSolo("onResume-safety")
         }
         activityLog("onResume")
@@ -11105,7 +11257,8 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             notificationShownReceiver, notificationHiddenReceiver,
             notificationSoloShowReceiver, notificationSoloEndReceiver,
             soloScreenOffReceiver, soloScreenOnReceiver,
-            callUiStateReceiver, rfcommMouseTrackingReceiver
+            callUiStateReceiver, rfcommMouseTrackingReceiver,
+            lowBatteryStateReceiver
         ).forEach {
             try { unregisterReceiver(it) } catch (_: Exception) {}
         }

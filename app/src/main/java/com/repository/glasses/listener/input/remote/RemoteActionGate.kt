@@ -88,195 +88,25 @@ object RemoteActionGate {
     }
 
     /**
-     * Focus states where remote input is refused outright, whatever the action.
+     * Permits everything except a folded pair of glasses.
      *
-     * Calls, an in-flight notification reply and an in-flight voice message all have the property
-     * that every key is load-bearing and a mistimed one is irreversible (a call answered into a
-     * room, a message sent to a contact). The user is holding the glasses in these states anyway.
-     */
-    private val REFUSED_STATES = setOf(
-        "CALL_INCOMING",
-        "CALL_ACTIVE",
-        "NOTIFICATION_REPLY",
-        "TELEGRAM_RECORDING",
-        "TELEGRAM_PREVIEW",
-    )
-
-
-
-
-
-    /**
-     * `TODO_FOCUSED` level 1 toggles a checklist item, i.e. it mutates the user's data. Levels 0
-     * and 2 only navigate.
-     */
-    private const val TODO_LEVEL_MUTATES = 1
-
-    /**
-     * Every focus state that has been reviewed for remote input.
+     * THE WATCH IS A REMOTE CONTROL, AND THE PERSON HOLDING IT IS THE WEARER. There is no
+     * second party to protect the wearer from, so every state-based refusal that used to
+     * live here was the app refusing the user access to their own device. Do not
+     * reintroduce one. If an action is dangerous, it is equally dangerous from the temple
+     * touchpad, and the fix belongs at the point of action where BOTH input paths pass
+     * through -- not in a list that only the remote path consults.
      *
-     * This is the deny-by-default backstop. The per-action rules below are denylists,
-     * so a state absent from this set would otherwise be permitted the moment it is
-     * added to the UI, silently widening the remote surface -- the precise failure the
-     * original allowlist prevented. Adding a UI state therefore still requires a
-     * deliberate decision here, but the decision is now "is this state known" rather
-     * than "is every action in it individually blessed".
-     */
-    /**
-     * Exposed so a test can assert the escapability invariant over EVERY state rather
-     * than over a list someone remembered to update. A state added to the UI and to
-     * [KNOWN_STATES] but not considered for its exit is then a test failure, not a
-     * trap the user discovers on their head.
-     */
-    val knownStatesForTest: Set<String> get() = KNOWN_STATES
-
-    private val KNOWN_STATES = setOf(
-        "TAB_NAV",
-        "CHAT_FOCUSED",
-        "LIST_FOCUSED",
-        "MAP_FOCUSED",
-        "MAP_ZOOM_FOCUSED",
-        "STOP_MODAL",
-        "STEPS_MODAL",
-        "TRANSLATE_FOCUSED",
-        "TELEPROMPTER_FOCUSED",
-        "REID_FOCUSED",
-        "REID_FACES_FOCUSED",
-        "REID_INTEL_MODAL",
-        "COPILOT_FOCUSED",
-        "TODO_FOCUSED",
-        "NIGHTVISION_FOCUSED",
-        "MUSIC_FOCUSED",
-        "MOUSE_FOCUSED",
-        "TELEGRAM_LIST_FOCUSED",
-        "TELEGRAM_TOPICS_FOCUSED",
-        "TELEGRAM_CHAT_FOCUSED",
-    ) + REFUSED_STATES
-
-    fun evaluate(s: UiInputSnapshot, action: RemoteAction): Denial {
-        // Folded: the touchpad path swallows keys here (pocket/case contact). A remote source has
-        // no such excuse, but acting on a screen the user cannot see is worse, not better.
-        if (s.foldedState) return Denial.REFUSED_FOLDED
-
-        // An unrecognised focus state is denied. The gate is now expressed as denylists
-        // per action, which reads as "permit unless named" -- so without this an
-        // ADDED UI state would silently arrive permitted, which is exactly the
-        // property the original deny-by-default design existed to guarantee. Keeping
-        // it means a new state is still refused until someone considers it, while the
-        // states we HAVE considered are permissive enough to be usable.
-        if (s.focusState !in KNOWN_STATES) return Denial.REFUSED_NOT_ALLOWED
-
-        if (s.focusState in REFUSED_STATES) return Denial.REFUSED_STATE
-
-        // A call in progress. Checked on the phase, because focusState is restored to whatever the
-        // user was doing as soon as the call goes ACTIVE and so never reports the call.
-        if (s.callPhase == "INCOMING" || s.callPhase == "ACTIVE" || s.callPhase == "ENDING") {
-            return Denial.REFUSED_STATE
-        }
-
-        // Armed-but-not-yet-transitioned windows. Each of these reaches microphone or send
-        // machinery while focusState still reads as something permitted.
-        if (s.replyArming || s.hasActiveReply || s.replySendPending ||
-            s.translationStarting || s.translationActive
-        ) {
-            return Denial.REFUSED_ARMED
-        }
-
-        // A live voice session intercepts taps ahead of the focus dispatch: a remote tap would
-        // cancel the user's in-progress request rather than doing anything they asked for.
-        if (s.serviceState == "LISTENING" || s.serviceState == "RESPONDING") {
-            if (action != RemoteAction.SCROLL_STEP) return Denial.REFUSED_BUSY
-        }
-
-        // Mouse/HID tracking owns the input device while active.
-        if (s.mouseTracking) return Denial.REFUSED_BUSY
-
-        val allowed = when (action) {
-            // Scrolling is permitted wherever it only MOVES a selection. The previous
-            // rule also refused the "index hijack" states, on the reasoning that a
-            // remote scroll re-aims the user's next tap at something they did not
-            // choose. That reasoning does not survive contact with what this is: a
-            // REMOTE CONTROL, where the remote user IS the user. Re-aiming your own
-            // selection is the point of scrolling. What remains genuinely excluded is
-            // the handful of states where the scroll ITSELF performs an action rather
-            // than moving an index -- see [SCROLL_ACTS_NOT_NAVIGATES].
-            RemoteAction.SCROLL_STEP ->
-                s.focusState !in SCROLL_ACTS_NOT_NAVIGATES &&
-                    // Night vision scroll only writes persisted settings while its
-                    // slider is locked; unlocked it is ordinary navigation.
-                    !(s.focusState == "NIGHTVISION_FOCUSED" && s.nightVisionSliderLocked)
-
-            // SELECT is permitted except where selecting reaches a hazard. Note this is
-            // now a DENYLIST of outcomes rather than an allowlist of screens: the old
-            // rule refused selection across whole states because SOME element in them
-            // was dangerous, which cost the user selection in LIST_FOCUSED -- the
-            // primary navigation state -- to protect one row out of three. Where the
-            // hazard depends on which element is selected, the check belongs at the
-            // point of action, not here; MainActivity re-checks inside the tap runnable.
-            RemoteAction.SELECT ->
-                s.focusState !in SELECT_REACHES_HAZARD &&
-                    !(s.focusState == "TODO_FOCUSED" && s.todoFocusLevel == TODO_LEVEL_MUTATES)
-
-            RemoteAction.BACK -> s.focusState !in BACK_REACHES_HAZARD
-        }
-        return if (allowed) Denial.ALLOWED else Denial.REFUSED_NOT_ALLOWED
-    }
-
-    /**
-     * States where a SCROLL performs an action instead of moving a selection.
+     * The allowlist that was here failed exactly the way allowlists do: `RC_THREAD_FOCUSED`
+     * was added to the UI, nobody added it to the list, and every remote action inside a
+     * coding thread was silently refused. The deny-by-default rule was working as designed;
+     * the design was wrong.
      *
-     * `REID_FACES_FOCUSED` issues an OSINT lookup that uploads an identifier.
-     * `NIGHTVISION_FOCUSED` writes persisted camera settings, but ONLY while its
-     * slider is locked -- the unlocked case is ordinary navigation, so the state is
-     * gated on [UiInputSnapshot.nightVisionSliderLocked] below rather than refused
-     * wholesale.
+     * FOLD is kept, and it is not a policy judgement: the display is physically off, so
+     * acting would change state the user cannot see. The touchpad path swallows keys for
+     * the same reason (pocket contact).
      */
-    private val SCROLL_ACTS_NOT_NAVIGATES = setOf(
-        "REID_FACES_FOCUSED",
-    )
+    fun evaluate(s: UiInputSnapshot, action: RemoteAction): Denial =
+        if (s.foldedState) Denial.REFUSED_FOLDED else Denial.ALLOWED
 
-    /**
-     * States where a SELECT unavoidably reaches one of the hazards remote input must
-     * never touch: starting or confirming a voice recording, or toggling the
-     * translation microphone.
-     *
-     * `LIST_FOCUSED` is deliberately NOT here. Only one of its three outcomes is
-     * dangerous (the Assistant row, which toggles the mic); the other two open a chat
-     * and start a new one. Refusing the whole state to cover one row is what made the
-     * feature unusable, since this is the state the user is in most of the time. The
-     * Assistant row is refused at the point of action instead.
-     */
-    private val SELECT_REACHES_HAZARD = setOf(
-        // Toggles live translation, i.e. the microphone.
-        "TRANSLATE_FOCUSED",
-        // Toggles Copilot, which opens the front mic and streams ambient speech to the
-        // phone for fact-checking. Same hazard class as TRANSLATE_FOCUSED: a remote user
-        // must not be able to start listening to the wearer's surroundings. BACK stays
-        // permitted, so the state is escapable and not a trap.
-        "COPILOT_FOCUSED",
-        // Starts a voice recording addressed to a real contact.
-        "TELEGRAM_CHAT_FOCUSED",
-        // Toggles HID tracking, which takes ownership of the input device.
-        "MOUSE_FOCUSED",
-    )
-
-    /**
-     * States where BACK reaches a hazard.
-     *
-     * Empty on purpose.
-     *
-     * `TAB_NAV` was listed because BACK at the top level turns the screen off, which
-     * pauses the UI process and drops the sink. That is not a hazard to defend against
-     * -- it is the wearer's normal way to dismiss the display, and refusing it from the
-     * watch removed a gesture they use. Waking is already handled: the next remote event
-     * lights the panel again and is consumed rather than acted on.
-     *
-     * `MOUSE_FOCUSED` was never here. Its BACK only toggles HID tracking on the branch
-     * where tracking is ALREADY on, and that branch is unreachable from a remote source
-     * because `mouseTracking` is refused as REFUSED_BUSY above. With tracking off, BACK
-     * is an ordinary "return to TAB_NAV". Listing it would have made the state a trap:
-     * SELECT is refused there too, so the tab could be entered from the watch and not
-     * left from it.
-     */
-    private val BACK_REACHES_HAZARD = emptySet<String>()
 }

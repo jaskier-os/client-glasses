@@ -21,8 +21,40 @@ class RemoteInputBridgeClient(
     private val mainHandler: Handler,
     private val sink: RemoteInputSink,
     private val log: (String) -> Unit = {},
+    /**
+     * Supplies the view whose hierarchy is drawn as the live AR stream's HUD layer. Null (the
+     * default) means this UI has no HUD to contribute and the surface sink is not registered.
+     */
+    private val hudRootView: (() -> android.view.View?)? = null,
 ) {
     private val actions = RemoteAction.values()
+
+    private val hudDrawer by lazy {
+        com.repository.glasses.listener.arstream.HudSurfaceDrawer { log(it) }
+    }
+
+    /**
+     * The object `:backend` calls to hand over the compositor's HUD Surface. Drawing must happen
+     * on the UI thread (Choreographer is per-thread) but this arrives on a binder thread, hence
+     * the hop.
+     */
+    private val hudStub = object : com.repository.glasses.listener.arstream.IHudSurfaceSink.Stub() {
+        override fun setHudSurface(surface: android.view.Surface?, width: Int, height: Int) {
+            val s = surface ?: return
+            mainHandler.post {
+                val root = hudRootView?.invoke()
+                if (root == null) {
+                    log("[ArStream] HUD surface arrived with no root view")
+                    return@post
+                }
+                hudDrawer.start(root, s)
+            }
+        }
+
+        override fun clearHudSurface() {
+            mainHandler.post { hudDrawer.stop() }
+        }
+    }
 
     /**
      * IPC latency samples, in microseconds. Guarded by [statsLock].
@@ -129,6 +161,16 @@ class RemoteInputBridgeClient(
         } catch (e: RemoteException) {
             bridge = null
             log("[RemoteInput] registerSink failed: ${e.message}")
+            return
+        }
+        if (hudRootView != null) {
+            try {
+                b.registerHudSurfaceSink(hudStub)
+                log("[ArStream] HUD surface sink registered with backend")
+            } catch (e: RemoteException) {
+                // Non-fatal for remote input: only the AR stream's overlay is lost.
+                log("[ArStream] registerHudSurfaceSink failed: ${e.message}")
+            }
         }
     }
 
@@ -139,6 +181,8 @@ class RemoteInputBridgeClient(
      */
     fun onBackendDisconnected() {
         bridge = null
+        // The compositor that owned the Surface died with the backend, so stop drawing into it.
+        mainHandler.post { hudDrawer.stop() }
         log("[RemoteInput] backend disconnected")
     }
 
@@ -161,11 +205,19 @@ class RemoteInputBridgeClient(
     /** Called on an orderly UI teardown, while the binder is still alive. */
     fun unregister() {
         val b = bridge ?: return
+        hudDrawer.stop()
         try {
             b.unregisterSink(sinkBinder)
             log("[RemoteInput] sink unregistered")
         } catch (_: RemoteException) {
             // Backend already gone; its death recipient covers this.
+        }
+        if (hudRootView != null) {
+            try {
+                b.unregisterHudSurfaceSink(hudStub)
+            } catch (_: RemoteException) {
+                // Same as above: the backend's death recipient covers it.
+            }
         }
         bridge = null
     }

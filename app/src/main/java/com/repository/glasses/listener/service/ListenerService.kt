@@ -83,6 +83,28 @@ class ListenerService : LifecycleService(),
 
     companion object {
         private const val TAG = "GlassesListenerSvc"
+
+        /**
+         * How long the touchpad daemon requires a press to be held before it emits
+         * NUMPAD_3, i.e. what a hold IS on this device.
+         *
+         * Mirrors `custom_long_press_ms` in `touchpad-daemon/src/main.c`. The daemon is
+         * launched with no arguments, so its compiled-in default is what actually runs.
+         * Published to remote input sources so a watch hold and a temple hold take the
+         * same time; the two cannot share a symbol across a C binary and an APK, so the
+         * relationship is stated here rather than assumed.
+         */
+        const val TOUCHPAD_LONG_PRESS_MS = 800
+
+        /**
+         * Remote device-state bit 0: a video recording is in progress.
+         *
+         * The meaning lives HERE, on the device that owns the state. Nothing between here
+         * and the watch is told what it means -- the phone copies the field across
+         * blindly -- which is what keeps a new indicator from becoming a relay change.
+         * Must match the watch's reading of the same bit.
+         */
+        const val REMOTE_STATE_RECORDING = 1 shl 0
         /** A2DP music duck level as a fraction of current STREAM_MUSIC index. */
         private const val BTSINK_DUCK_FRACTION = 0.3f
         private const val TAG_WD = "App:Watchdog"
@@ -295,7 +317,22 @@ class ListenerService : LifecycleService(),
         //       .putExtra("force_worn", true))
         const val ACTION_NOTIFICATION_TEST = "com.repository.glasses.listener.ACTION_NOTIFICATION_TEST"
         const val EXTRA_NOTIF_ID = "notif_id"
+
+        /**
+         * Battery is low enough that its indicator must survive a solo blackout.
+         *
+         * Pushed from here rather than recomputed in the UI process: this side owns the
+         * thresholds and the hysteresis (LowBatteryAlerter), and two processes comparing
+         * the same percentage against their own copies of "low" is how they end up
+         * disagreeing about it.
+         */
+        const val ACTION_LOW_BATTERY_STATE = "com.repository.glasses.listener.ACTION_LOW_BATTERY_STATE"
+        const val EXTRA_LOW_BATTERY = "low_battery"
         const val EXTRA_NOTIF_REPLIABLE = "notif_repliable"
+        // On ACTION_NOTIFICATION_SOLO_END: reveal the cover NOW instead of waiting
+        // for a screen-off. Set when the low-battery pin is about to hold the panel
+        // on, so that screen-off will never arrive.
+        const val EXTRA_SOLO_FORCE_REVEAL = "solo_force_reveal"
         const val EXTRA_PROGRESS = "progress"
         const val EXTRA_HOLD_DURATION = "hold_duration"
         const val EXTRA_FREEZE = "freeze"
@@ -449,7 +486,14 @@ class ListenerService : LifecycleService(),
     private var batteryLedArmer: com.repository.glasses.listener.power.BatteryLedArmer? = null
     private val batteryLedReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(c: Context?, i: android.content.Intent?) {
-            batteryLedArmer?.setCharging(isCablePlugged(i))
+            val plugged = isCablePlugged(i)
+            batteryLedArmer?.setCharging(plugged)
+            // The low-battery screen policy also keys off the cable: plugging in
+            // must release the pin immediately, not wait for the next % step.
+            if (plugged != lowBatteryCablePlugged) {
+                lowBatteryCablePlugged = plugged
+                onBatteryLevelForScreen(GlassesConfig.batteryPct)
+            }
         }
     }
 
@@ -1337,6 +1381,10 @@ class ListenerService : LifecycleService(),
         try { btClient.sendWearState(!folded) } catch (t: Throwable) {
             btErr("fold sendWearState failed: ${t.message}")
         }
+        // Worn-ness gates the low-battery screen policy: folding must drop the pin,
+        // and unfolding must re-apply it (plus deliver any threshold card that was
+        // withheld while the glasses were off the head).
+        onBatteryLevelForScreen(GlassesConfig.batteryPct)
         val reason = if (folded) "folded" else "unfolded"
         btLog("FoldGate: $reason -- reconciling capture stack")
         if (folded && streamMode == StreamMode.LIVE_UTTERANCE) {
@@ -2248,6 +2296,10 @@ class ListenerService : LifecycleService(),
             store = com.repository.glasses.listener.input.remote.PrefsSessionStore(applicationContext),
             clock = { SystemClock.elapsedRealtime() },
             post = { remoteInputHandler.post(it) },
+            // Published to remote sources so their press timer matches the temple's.
+            // The daemon runs with no arguments, so its compiled-in default is the live
+            // value; if it ever gains a configurable one, read it here.
+            holdThresholdMs = TOUCHPAD_LONG_PRESS_MS,
             log = { btLog(it) },
         )
     }
@@ -2269,6 +2321,23 @@ class ListenerService : LifecycleService(),
     override fun onBind(intent: Intent): IBinder = GT.section("svc.onBind") {
         super.onBind(intent)
         remoteInputBridge
+    }
+
+    /**
+     * Live AR streaming session (camera + HUD composited, two-way audio) for the phone.
+     * Lazily built so the camera/mic/WiFi-Direct cost is only paid when a session starts.
+     */
+    private val arStreamSession: com.repository.glasses.listener.arstream.ArStreamSession by lazy {
+        com.repository.glasses.listener.arstream.ArStreamSession(
+            context = this,
+            bridge = { remoteInputBridge },
+            openWifiDirect = {
+                val details = fileSyncBridge.openWifiDirectForSync()
+                if (details.isBlank() || details == "{}") null else details
+            },
+            closeWifiDirect = { fileSyncBridge.closeWifiDirect() },
+            log = { btLog(it) }
+        )
     }
 
     override fun onCreate() = GT.section("svc.onCreate") {
@@ -2540,6 +2609,7 @@ class ListenerService : LifecycleService(),
                 // immediately on FN release. The bitmap arrives later via
                 // captureFeedbackListener.onPhotoTaken and swaps in.
                 onPhotoTriggered = { photoPreviewOverlay?.requestPlaceholder() },
+                beforePhoto = { flushMemoryForCapture() },
                 onLongPressVideo = { handleFnLongPressVideo() },
             )
             // EXPORTED so adb / native daemons / the accessibility service's sendBroadcast path
@@ -2642,6 +2712,7 @@ class ListenerService : LifecycleService(),
             } catch (t: Throwable) {
                 btLog("BATTERY_LEVEL notify failed: ${t.message}")
             }
+            onBatteryLevelForScreen(pct)
         }.also { it.start() }
 
         // Recording-gate battery monitor: tracks GlassesConfig.batteryPct and
@@ -2843,14 +2914,19 @@ class ListenerService : LifecycleService(),
                     })
                 }
             }
-            notificationOverlay.onItemDismissed = { id ->
-                btLog("[Notif] Overlay item dismissed: $id")
-                synchronized(notifLatchLock) { notifOverlayDoneIds.add(id) }
-                sendBroadcast(Intent(ACTION_NOTIFICATION_HIDDEN).apply {
-                    setPackage(packageName)
-                    putExtra(EXTRA_NOTIF_ID, id)
-                })
-                checkNotifComplete(id)
+            notificationOverlay.onItemDismissed = { id, synthetic ->
+                btLog("[Notif] Overlay item dismissed: $id synthetic=$synthetic")
+                // A locally generated card (low battery) has no phone-side pending
+                // entry, so running the completion latch would send the phone a
+                // CH_NOTIFICATION_DONE for an id it never sent.
+                if (!synthetic) {
+                    synchronized(notifLatchLock) { notifOverlayDoneIds.add(id) }
+                    sendBroadcast(Intent(ACTION_NOTIFICATION_HIDDEN).apply {
+                        setPackage(packageName)
+                        putExtra(EXTRA_NOTIF_ID, id)
+                    })
+                    checkNotifComplete(id)
+                }
             }
             notificationOverlay.onAllDismissed = {
                 btLog("[Notif] Overlay queue empty")
@@ -2868,9 +2944,14 @@ class ListenerService : LifecycleService(),
                     notifScreenLock?.let { if (it.isHeld) it.release() }
                     notifScreenLock = null
                     notifReplyHoldingScreen = false
-                    // Turn screen back off since we woke it for this notification
+                    // Turn screen back off since we woke it for this notification --
+                    // unless the low-battery pin wants the panel lit continuously.
                     notifHandler.removeCallbacks(notifLockScreenRunnable)
-                    notifHandler.postDelayed(notifLockScreenRunnable, 500)
+                    if (lowBatteryPinWanted) {
+                        btLog("[LowBat] skipping post-notification screen-off -- pin held")
+                    } else {
+                        notifHandler.postDelayed(notifLockScreenRunnable, 500)
+                    }
                 }
             }
             btLog("NotificationOverlay initialized")
@@ -3027,6 +3108,11 @@ class ListenerService : LifecycleService(),
                 IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)
             )
             batteryLedArmer?.setCharging(isCablePlugged(initialBattery))
+            // Seed the low-battery policy too, and re-evaluate: BatteryReporter is
+            // wired earlier in onCreate, so its first sticky callback already ran
+            // against the default (unplugged) assumption.
+            lowBatteryCablePlugged = isCablePlugged(initialBattery)
+            onBatteryLevelForScreen(GlassesConfig.batteryPct)
             btLog("BatteryLedArmer wired: battery receiver registered, charging seeded")
         } catch (e: Exception) {
             // stop() before dropping the reference: if start() succeeded and a
@@ -3962,12 +4048,31 @@ class ListenerService : LifecycleService(),
         }
     }
     private var photoPreviewOverlay: com.repository.glasses.listener.ui.PhotoPreviewOverlay? = null
+    /** True while this feature's own blackout+overlay are up. See startLowBatterySolo. */
+    @Volatile private var batterySoloShown = false
+
+    /** Battery indicator rendered as an overlay window during a low-battery solo. */
+    private var batterySoloOverlay: com.repository.glasses.listener.ui.BatterySoloOverlay? = null
 
     private fun broadcastRecordingState(state: Int) {
         sendBroadcast(Intent(ACTION_RECORDING_STATE).apply {
             setPackage(packageName)
             putExtra(EXTRA_RECORDING_STATE, state)
         })
+        // Publish to remote sources too. Hooked HERE, at the one choke point every
+        // recording transition already passes through, so a recording started by ANY
+        // means -- temple button, watch, phone command -- reaches the watch without each
+        // of those paths having to remember to report it.
+        //
+        // PAUSED counts as recording: the session is still open and the same button still
+        // stops it, which is exactly what the indicator is telling the user.
+        val recording = state == RECORDING_STATE_ACTIVE || state == RECORDING_STATE_PAUSED
+        remoteInputRouter.deviceState =
+            if (recording) {
+                remoteInputRouter.deviceState or REMOTE_STATE_RECORDING
+            } else {
+                remoteInputRouter.deviceState and REMOTE_STATE_RECORDING.inv()
+            }
     }
 
     /**
@@ -4102,13 +4207,14 @@ class ListenerService : LifecycleService(),
         override fun onReceive(context: Context, intent: Intent) {
             val action = intent.getStringExtra(ScreenOffAccessibilityService.EXTRA_EVENT_ACTION) ?: return
             val repeat = intent.getIntExtra(ScreenOffAccessibilityService.EXTRA_REPEAT, 0)
-            android.util.Log.i("FnKeyReceiver", "ACTION_FN_KEY $action repeat=$repeat")
+            val silent = intent.getBooleanExtra(ScreenOffAccessibilityService.EXTRA_SILENT, false)
+            android.util.Log.i("FnKeyReceiver", "ACTION_FN_KEY $action repeat=$repeat silent=$silent")
             if (!::functionButtonHandler.isInitialized) {
                 android.util.Log.w("FnKeyReceiver", "FunctionButtonHandler not initialized yet -- dropping event")
                 return
             }
             when (action) {
-                "DOWN" -> functionButtonHandler.onKeyDown(repeat)
+                "DOWN" -> functionButtonHandler.onKeyDown(repeat, silent)
                 "UP" -> functionButtonHandler.onKeyUp()
             }
         }
@@ -5153,6 +5259,15 @@ class ListenerService : LifecycleService(),
 
     override fun onScreenOff() {
         btLog("Screen OFF")
+        // A lock-screen request (user BACK, the power daemon) can darken the panel
+        // while the pin lock is still held, which would leave the pin permanently
+        // ineffective. Re-evaluate rather than blindly re-acquiring: folding also
+        // requests a lock screen, and its own release runs on a POSTED runnable
+        // that may not have landed yet -- trusting the stale flag here would light
+        // the panel back up on a folded pair of glasses.
+        if (lowBatteryPinWanted) {
+            onBatteryLevelForScreen(GlassesConfig.batteryPct, reassertPin = true)
+        }
         stopGlassesAudioStream("screen off")
         if (state != State.IDLE) {
             cancelledRequestId = currentRequestId
@@ -5759,6 +5874,43 @@ class ListenerService : LifecycleService(),
                     put("success", true)
                     put("deleted", deleted)
                 }.toString())
+            }
+            "start_ar_stream" -> {
+                // The compositor needs the camera and the UI process needs to be up to draw the
+                // HUD layer, so refuse rather than half-start if either is already committed.
+                if (arVideoRecorder?.isRecording == true) {
+                    btClient.sendCommandResult(requestId, JSONObject().apply {
+                        put("success", false)
+                        put("error", "a recording is active")
+                    }.toString())
+                    return
+                }
+                ensureActivityRunning()
+                // Give the UI process a moment to come up and register its HUD sink.
+                Handler(Looper.getMainLooper()).postDelayed({
+                    Thread {
+                        val details = arStreamSession.start()
+                        btClient.sendCommandResult(requestId, JSONObject().apply {
+                            if (details != null) {
+                                put("success", true)
+                                put("details", details)
+                                put("video_port", com.repository.glasses.listener.arstream.ArStreamProtocol.VIDEO_PORT)
+                                put("audio_port", com.repository.glasses.listener.arstream.ArStreamProtocol.AUDIO_PORT)
+                            } else {
+                                put("success", false)
+                                put("error", "failed to start AR stream")
+                            }
+                        }.toString())
+                    }.start()
+                }, 1500)
+            }
+            "stop_ar_stream" -> {
+                Thread {
+                    arStreamSession.stop()
+                    btClient.sendCommandResult(requestId, JSONObject().apply {
+                        put("success", true)
+                    }.toString())
+                }.start()
             }
             "record_ar_screen" -> {
                 val duration = params.optInt("duration_seconds", 10)
@@ -7883,6 +8035,33 @@ class ListenerService : LifecycleService(),
 
     @Volatile private var currentOpenTgChatTitle: String? = null
 
+    // --- low-battery screen policy -------------------------------------------
+    // Mirrors the notification "show only this" model: crossing 20% and 15%
+    // lights the panel for a bounded window with a single card, and at 10% or
+    // below the panel is pinned on permanently until the wearer charges.
+    // TEMPORARY OBSERVATION BUILD: thresholds raised to 100/95 and the pin to 90
+    // so the whole sequence is reachable on a charged pair. Restore the real
+    // values (drop the arguments -- 20/15, pin 10) before this ships.
+    private val lowBatteryAlerter = com.repository.glasses.listener.battery.LowBatteryAlerter(
+        // TESTING VALUES. pinThreshold = 100 means the pin engages at ANY level, so the
+        // battery indicator is permanently on screen and the solo behaviour can be
+        // exercised on a fully charged device. Restore the real thresholds
+        // (alertThresholds = listOf(20, 15), pinThreshold = 10) before shipping.
+        alertThresholds = listOf(100, 95),
+        pinThreshold = 100,
+    )
+    private val lowBatteryAlertWindowMs = 20000L
+    // Untimed lock held for the whole pinned (<=10%) period. Distinct from
+    // notifScreenLock so a notification's timed lock expiring cannot drop the pin.
+    private var lowBatteryPinLock: android.os.PowerManager.WakeLock? = null
+    // The INTENT to pin, tracked separately from the lock's isHeld. A
+    // GLOBAL_ACTION_LOCK_SCREEN (user BACK in TAB_NAV, the power daemon) darkens
+    // the panel without releasing the lock, so isHeld stays true over a dark
+    // screen. Keying the state machine off isHeld would make that a permanent
+    // no-op; keying it off intent lets onScreenOff re-assert the lock instead.
+    @Volatile private var lowBatteryPinWanted = false
+    @Volatile private var lowBatteryCablePlugged = false
+
     @Volatile private var notifWokeScreen = false
     // True while an UNTIMED notifScreenLock is held for the duration of a
     // hold-to-reply (reply-start -> overlay leaves screen). Prevents the timed
@@ -7941,7 +8120,11 @@ class ListenerService : LifecycleService(),
         btLog("Screen lock requested after notification")
     }
 
-    private fun wakeScreenForNotification(repliable: Boolean) {
+    private fun wakeScreenForNotification(repliable: Boolean) =
+        wakeScreenForNotification(if (repliable) 12000L else GlassesConfig.notificationDurationMs)
+
+    /** [windowMs] is how long the card stays up; the lock adds a 2s safety margin. */
+    private fun wakeScreenForNotification(windowMs: Long) {
         val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
         // No early-return when the screen is already interactive: always re-arm the lock
         // so a later notification extends the on-screen window past the prior one.
@@ -7965,7 +8148,6 @@ class ListenerService : LifecycleService(),
             // Repliable notifications stay on screen ~12s (matching the overlay's
             // repliableDurationMs) so the screen must not drop mid-window before
             // the user can start the hold-to-reply gesture.
-            val windowMs = if (repliable) 12000L else GlassesConfig.notificationDurationMs
             @Suppress("DEPRECATION")
             notifScreenLock = pm.newWakeLock(
                 android.os.PowerManager.FULL_WAKE_LOCK or android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP,
@@ -7978,20 +8160,243 @@ class ListenerService : LifecycleService(),
         }
     }
 
+    /**
+     * Apply the low-battery screen policy for a new percentage reading. Runs on
+     * the main thread (posted) because it touches the overlay.
+     */
+    private fun onBatteryLevelForScreen(pct: Int, reassertPin: Boolean = false) {
+        notifHandler.post {
+            // Off-head there is no eye in front of the waveguide, and on a cable
+            // the level is recovering -- neither is worth burning the panel for.
+            // TEMPORARY OBSERVATION BUILD: the cable check is disabled so the
+            // sequence is observable over USB. Restore `&& !lowBatteryCablePlugged`
+            // together with the real thresholds.
+            // TESTING: pin at ANY level, worn or not, on cable or not. Restore
+            // `lastWornState == true && !lowBatteryCablePlugged` with the real thresholds.
+            val eligible = true
+            val d = lowBatteryAlerter.evaluate(pct, eligible)
+            // Tell the UI process whether the indicator is currently allowed to outrank a
+            // blackout. Sent on every evaluation, not just on the edge, so a UI process
+            // that restarted mid-alert re-learns the state on the next battery tick.
+            // The CONDITION, not the decision. d.alertAt is one-shot and goes null as
+            // soon as its alert is consumed, so publishing from it turned the indicator's
+            // blackout exemption on for one evaluation and back off seconds later.
+            publishLowBatteryState(lowBatteryAlerter.isLow(pct))
+            applyLowBatteryPin(d.pinScreen, pct, reassertPin)
+            val at = d.alertAt ?: return@post
+            btLog("[LowBat] alert threshold=$at pct=$pct -- solo battery indicator for ${lowBatteryAlertWindowMs}ms")
+            showLowBatterySolo(pct, lowBatteryAlertWindowMs)
+        }
+    }
+
+    /**
+     * Acquire/release the untimed pin lock that keeps the panel lit at <=10%.
+     * [reassert] re-acquires an already-wanted pin without re-showing the card,
+     * used after a lock-screen request darkened the panel behind the held lock.
+     */
+    private fun applyLowBatteryPin(pin: Boolean, pct: Int, reassert: Boolean = false) {
+        if (pin == lowBatteryPinWanted) {
+            // Already pinned. The solo may still be down (first pin happened while the
+            // UI process was starting, or the user revealed it), so ask for it again --
+            // startLowBatterySolo is idempotent on its own flag and will no-op when the
+            // blackout is genuinely up.
+            if (pin) startLowBatterySolo(pct)
+            if (pin && reassert) {
+                // Re-lighting the panel must ALSO re-black the UI around the indicator.
+                // Doing only the former is what made the pinned state present as "the
+                // screen just turns on showing everything": the pin was already wanted,
+                // so this branch ran on every later evaluation and no solo was ever
+                // started. The solo is idempotent, so re-requesting it is free.
+                acquireLowBatteryPin(pct, "re-assert after screen-off")
+                startLowBatterySolo(pct)
+            }
+            return
+        }
+        lowBatteryPinWanted = pin
+        if (pin) {
+            // A solo blackout in flight (from an earlier 20%/15% card -- 15 can
+            // drop straight to 10) is now unremovable: MainActivity tears the
+            // cover down on ACTION_SCREEN_OFF, and the pin means that never
+            // comes. End the session explicitly before pinning, or the activity
+            // stays black on a lit panel until its 30s failsafe.
+            // Pin FIRST, then black the UI out around the indicator.
+            //
+            // The pin used to END any solo in flight, on the reasoning that MainActivity
+            // tears its cover down on ACTION_SCREEN_OFF and a pinned panel never sleeps,
+            // so the cover would be stranded. That reasoning still holds for a NOTIFICATION
+            // solo -- but the pin's own solo must not be torn down, because "show only the
+            // battery indicator" IS the pinned state, not something interrupting it.
+            //
+            // It is released the same way every other solo is: on the user interacting,
+            // which reveals the full UI (see ACTION_NOTIFICATION_SOLO_END and the reveal
+            // path in MainActivity). So the panel does not stay black behind a pin.
+            acquireLowBatteryPin(pct, "threshold")
+            // No card. The indicator already says the level; a text card repeating it in
+            // words would cover the very thing the pin exists to let the user look at.
+            startLowBatterySolo(pct)
+        } else {
+            releaseLowBatteryPin()
+            batterySoloOverlay?.hide()
+            batterySoloShown = false
+            btLog("[LowBat] pct=$pct -- screen pin RELEASED")
+        }
+    }
+
+    /**
+     * Close any in-flight solo blackout, because the pin is about to remove the
+     * screen-off that MainActivity's normal cover teardown waits for. EXTRA_SOLO
+     * _FORCE_REVEAL tells it to reveal now rather than hold the cover.
+     */
+    private fun endSoloSessionForPin() {
+        if (!notifSoloSessionActive) return
+        notifSoloSessionActive = false
+        btLog("[NSOLO] low-battery pin engaging -- forcing solo reveal (no screen-off will come)")
+        sendBroadcast(Intent(ACTION_NOTIFICATION_SOLO_END).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_SOLO_FORCE_REVEAL, true)
+        })
+    }
+
+    private fun acquireLowBatteryPin(pct: Int, reason: String) {
+        releaseLowBatteryPin()
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            @Suppress("DEPRECATION")
+            lowBatteryPinLock = pm.newWakeLock(
+                android.os.PowerManager.FULL_WAKE_LOCK or android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "GlassesListener::LowBatteryPin"
+            ).apply { setReferenceCounted(false); acquire() }
+            btLog("[LowBat] pct=$pct -- screen PINNED on ($reason)")
+        } catch (t: Throwable) {
+            btErr("[LowBat] pin acquire failed: ${t.message}")
+            lowBatteryPinLock = null
+        }
+    }
+
+    private fun releaseLowBatteryPin() {
+        try { lowBatteryPinLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
+        lowBatteryPinLock = null
+    }
+
+    /**
+     * Wake the panel and show ONLY the battery indicator, for [windowMs].
+     *
+     * Deliberately NOT a notification card. The device already has a battery indicator in
+     * the tab bar; the requirement is to make THAT visible when it matters, not to invent
+     * a second representation of the same fact that then has to be kept consistent with
+     * the first.
+     *
+     * Reuses the notification solo mechanism wholesale -- the same blackout cover, the
+     * same session flag, the same teardown. That is what keeps it from conflicting with a
+     * Telegram message: there is one solo session in the system, not two competing ones,
+     * and MainActivity simply spares the battery indicator from the blackout while it is
+     * low. A Telegram card arriving during a low-battery solo therefore replaces it in the
+     * normal way, with the indicator still lit beside it.
+     *
+     * The session ends exactly as a notification's does -- on the user waking or
+     * interacting with the device -- at which point the full UI is revealed.
+     */
+    /** Mirror the "battery is low" verdict into the UI process. See ACTION_LOW_BATTERY_STATE. */
+    private fun publishLowBatteryState(low: Boolean) {
+        if (low == lastPublishedLowBattery) return
+        lastPublishedLowBattery = low
+        btLog("[LowBat] publishing lowBattery=$low to the UI process")
+        sendBroadcast(Intent(ACTION_LOW_BATTERY_STATE).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_LOW_BATTERY, low)
+        })
+    }
+
+    @Volatile private var lastPublishedLowBattery: Boolean? = null
+
+    private fun showLowBatterySolo(pct: Int, windowMs: Long) {
+        notifHandler.removeCallbacks(notifLockScreenRunnable)
+        wakeScreenForNotification(windowMs)
+        startLowBatterySolo(pct)
+    }
+
+    /**
+     * Black out everything on the panel EXCEPT the battery indicator.
+     *
+     * Reuses the notification solo wholesale -- same cover, same session flag, same
+     * teardown -- so it cannot conflict with a Telegram card: there is one solo session in
+     * the system, not two competing for the panel. MainActivity simply spares the battery
+     * indicator from the blackout while the level is low.
+     *
+     * Ends exactly as a notification's does, on the user interacting with the device, at
+     * which point the whole UI is revealed.
+     */
+    private fun startLowBatterySolo(pct: Int) {
+        // Re-entrancy guard, keyed on THIS feature's own state rather than on
+        // notifSoloSessionActive. That flag is set by the notification path too and is
+        // only cleared on reveal, so keying off it meant every call after the first
+        // returned here and no blackout was ever requested again -- the bug where the
+        // pinned state showed the full UI.
+        if (batterySoloShown) {
+            batterySoloOverlay?.show(pct)
+            return
+        }
+        batterySoloShown = true
+        // Pointless if nobody can see it. Unlike the alert path this does NOT require the
+        // screen to have been off: the pin may well have lit the panel a moment ago, and
+        // requiring darkness here would mean the pinned state never blacks out at all --
+        // which is precisely the bug where the screen came on showing the full UI.
+        // TESTING: normally gated on lastWornState == true (no eye in front of the
+        // waveguide otherwise). Restore that with the real thresholds.
+        notifSoloSessionActive = true
+        // The indicator itself is an OVERLAY WINDOW, above the activity, exactly like the
+        // Telegram card. The activity's own copy is inside the content root the blackout
+        // hides, so it cannot be the thing the user sees during a solo.
+        if (batterySoloOverlay == null) {
+            batterySoloOverlay = com.repository.glasses.listener.ui.BatterySoloOverlay(this).apply {
+                remoteLog = { btLog(it) }
+            }
+        }
+        batterySoloOverlay?.show(pct)
+        sendBroadcast(Intent(ACTION_NOTIFICATION_SOLO_SHOW).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_NOTIF_ID, "lowbat-$pct-${System.currentTimeMillis()}")
+            // Carry the verdict ON this intent. The separate ACTION_LOW_BATTERY_STATE
+            // broadcast races this one, and when it loses the UI blacks out with the flag
+            // still false and spares nothing -- a black screen with no indicator. A flag
+            // that travels with the event it governs cannot arrive after it.
+            putExtra(EXTRA_LOW_BATTERY, true)
+        })
+        android.util.Log.i("GlassesListenerSvc", "[NSOLO-TRACE] SOLO_SHOW broadcast sent pct=$pct")
+        btLog("[LowBat] solo blackout requested (only the battery indicator stays lit)")
+    }
+
+    /**
+     * DISPLAY state, not isInteractive -- the latter lies in DOZE / ON_SUSPEND
+     * and would report an off panel as awake (same reasoning as onNotification).
+     */
+    private fun isScreenOff(): Boolean = try {
+        notifDisplayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.state ==
+            android.view.Display.STATE_OFF
+    } catch (e: Exception) {
+        btErr("[LowBat] display-state read failed: ${e.message}")
+        false
+    }
+
     override fun onNotification(notifId: String, sender: String, text: String, chat: String, repliable: Boolean) {
         btLog("[Notif] Received: notifId=$notifId sender=$sender text=${text.take(60)} repliable=$repliable")
         // Solo decision: use DISPLAY STATE (not isInteractive, which lies in DOZE/ON_SUSPEND).
         // Only enter the solo path when the screen was genuinely OFF and the glasses are worn,
         // i.e. when this notification is the thing that wakes the panel.
-        val screenWasOff = try {
-            notifDisplayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.state ==
-                android.view.Display.STATE_OFF
-        } catch (e: Exception) {
-            btErr("[NSOLO] display-state read failed: ${e.message}")
-            false
-        }
+        val screenWasOff = isScreenOff()
         val solo = screenWasOff && (lastWornState == true)
         btLog("[NSOLO] onNotification screenWasOff=$screenWasOff worn=${lastWornState} -> solo=$solo")
+        // A locked Telegram emits a contentless placeholder ("Telegram" / "New
+        // message"): no sender, no chat, no body. Waking the panel for it costs
+        // battery and tells the wearer nothing they can act on. Drop it before
+        // anything else -- the latch still has to be released or the phone-side
+        // pending-notification map leaks this id forever.
+        if (com.repository.glasses.listener.notification.NotificationFilter
+                .isContentlessTelegramPlaceholder(sender, text)) {
+            btLog("[Notif] Suppressed locked-Telegram placeholder: sender=$sender text=$text")
+            btClient.sendNotificationDone(notifId)
+            return
+        }
         // Suppress notification for currently open Telegram chat
         val openChat = currentOpenTgChatTitle
         if (openChat != null && (sender == openChat || chat == openChat)) {
@@ -8818,8 +9223,17 @@ class ListenerService : LifecycleService(),
     // session over so onAllDismissed does not re-broadcast a redundant SOLO_END race.
     private val notifSoloRevealReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            // Whatever removed the cover -- user interaction, or MainActivity's own
+            // failsafe -- this side must drop its "solo is up" belief too, or the next
+            // request is refused by a guard describing a blackout that no longer exists.
+            batterySoloShown = false
             btLog("[NSOLO] SOLO_REVEAL received -- solo session revealed by user")
             notifSoloSessionActive = false
+            // The user interacted, so the full UI is coming back -- including the
+            // activity's own battery indicator. Drop the overlay copy or there would be
+            // two of them on screen at once.
+            batterySoloOverlay?.hide()
+            batterySoloShown = false
         }
     }
 
@@ -9432,6 +9846,9 @@ class ListenerService : LifecycleService(),
 
     override fun onDestroy() = GT.section("svc.onDestroy") {
         Log.d(TAG_LIFE, "event=onDestroy")
+        // Stop the AR stream first: it holds the camera, both mics and the WiFi-Direct group, and
+        // leaking any of those past service death is a battery incident rather than a cosmetic bug.
+        runCatching { if (arStreamSession.isActive) arStreamSession.stop() }
         // Guarded on the source: if remote-input init failed, these lazies were never built, and
         // touching them here would construct a router, a prefs store and a thread just to stop them.
         remoteInputSource?.let { source ->
@@ -9526,6 +9943,10 @@ class ListenerService : LifecycleService(),
         try { unregisterReceiver(notificationTestReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(batteryLedReceiver) } catch (_: Exception) {}
         try { batteryLedArmer?.stop() } catch (_: Exception) {}
+        // The pin is an untimed FULL_WAKE_LOCK -- leaking it past service death
+        // would hold the panel on with nothing left to turn it off.
+        lowBatteryPinWanted = false
+        releaseLowBatteryPin()
         stopReid("onDestroy")
         stopPcAudioListener()
         disconnectPhoneAudio()

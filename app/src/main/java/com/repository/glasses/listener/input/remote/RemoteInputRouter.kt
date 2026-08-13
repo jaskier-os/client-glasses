@@ -37,6 +37,14 @@ class RemoteInputRouter(
     private val store: SessionStore = InMemorySessionStore(),
     private val clock: () -> Long,
     post: (Runnable) -> Unit,
+    /**
+     * How long a press must be held on THIS device to count as a hold.
+     *
+     * Published to every source so a remote device's press timer matches the physical
+     * touchpad. It is the receiver's number, injected rather than imported, so this
+     * file stays free of any UI or hardware constant.
+     */
+    private val holdThresholdMs: Int = DEFAULT_HOLD_THRESHOLD_MS,
     private val log: (String) -> Unit = {},
 ) {
 
@@ -176,6 +184,21 @@ class RemoteInputRouter(
      */
     @Volatile
     var sinkReallyAttached: () -> Boolean = { sinkRef.get() != null }
+
+    /**
+     * OPAQUE state bits published to every source, for them to render.
+     *
+     * The router does not interpret these either -- it is the transport for them, exactly
+     * as the phone is. Set by the owner (see `RemoteInputStatus.deviceState`) and pushed
+     * on change via [publishStatusAll].
+     */
+    @Volatile
+    var deviceState: Int = 0
+        set(value) {
+            if (field == value) return
+            field = value
+            publishStatusAll()
+        }
 
     fun publishSinkAttached(attached: Boolean) {
         val targets = synchronized(sessionLock) { sources.values.map { it.source } }
@@ -659,6 +682,8 @@ class RemoteInputRouter(
                 sessionOpen = state.session != null,
                 sinkAttached = sinkAttached,
                 droppedTotal = state.dropped + queueDropped,
+                holdMs = holdThresholdMs,
+                deviceState = deviceState,
                 refusal = state.lastRefusalReason?.let {
                     RemoteRefusal(
                         reason = it,
@@ -726,6 +751,16 @@ class RemoteInputRouter(
 
         /** A session with no event and no PING for this long is gone. */
         const val DEFAULT_SESSION_EXPIRY_MS = 20_000L
+
+        /**
+         * Fallback hold threshold, in ms, when the owner injects none.
+         *
+         * Matches the touchpad daemon's `custom_long_press_ms` (800 ms, its compiled-in
+         * default -- the daemon is launched with no arguments), so a remote hold and a
+         * temple hold take the same time. The owner passes the live value; this only
+         * covers a router constructed without one (tests).
+         */
+        const val DEFAULT_HOLD_THRESHOLD_MS = 800
 
         const val DEFAULT_MAX_EVENTS_PER_SECOND = 25
         const val RATE_WINDOW_MS = 1000L

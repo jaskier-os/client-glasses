@@ -47,6 +47,35 @@ enum class RemoteAction {
      * a locally recognised double tap. What produced it is the source's business.
      */
     BACK,
+
+    /**
+     * Press and hold. A SEMANTIC action: the user asked to hold on whatever is focused.
+     *
+     * Mapped onto the same thing the physical touchpad hold does, so a remote source
+     * and the temple behave identically -- dictation in a thread, arming a notification
+     * reply, and so on. The UI decides what a hold means per surface; the source only
+     * says that one happened.
+     *
+     * The source decides WHEN a press became a hold, using the threshold this device
+     * publishes in [RemoteInputStatus.holdMs]. There is no timer on this side and no
+     * press/release pair on the wire: sources send resolved gestures, never raw touch.
+     */
+    HOLD,
+
+    /**
+     * Take a still photo. Identical in effect to a short press of the temple function button.
+     */
+    PHOTO,
+
+    /**
+     * Start recording video, or stop the recording already in progress.
+     *
+     * ONE action for both, decided HERE, because only this device knows whether a recording
+     * is running. A source that had to send distinct start and stop actions would need that
+     * state mirrored to it and would desync the moment a recording ended by any other means
+     * -- the function button, a phone command, a full card.
+     */
+    VIDEO,
 }
 
 /**
@@ -162,6 +191,23 @@ data class RemoteInputStatus(
      * Null when nothing has been refused recently.
      */
     val refusal: RemoteRefusal? = null,
+    /**
+     * How long a press must be held HERE to count as a hold, in ms.
+     *
+     * Published so a remote source can size its own press timer to this device's
+     * physical touchpad instead of freezing a copy of the number and drifting from
+     * it. The RECEIVER owns what a hold is; sources obey. Zero means "not reported".
+     */
+    val holdMs: Int = 0,
+    /**
+     * OPAQUE state bits for remote sources to render, relayed untouched by anything in
+     * between.
+     *
+     * This device owns the meanings; nothing on the path to the source is told them. That
+     * is what keeps a new remote indicator to a change HERE and a change on the source,
+     * with no relay edit. Bit 0 = recording.
+     */
+    val deviceState: Int = 0,
 )
 
 /**
