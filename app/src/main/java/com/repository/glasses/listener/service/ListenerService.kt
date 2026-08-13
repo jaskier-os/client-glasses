@@ -5876,12 +5876,21 @@ class ListenerService : LifecycleService(),
                 }.toString())
             }
             "start_ar_stream" -> {
-                // The compositor needs the camera and the UI process needs to be up to draw the
-                // HUD layer, so refuse rather than half-start if either is already committed.
-                if (arVideoRecorder?.isRecording == true) {
+                // The compositor needs exclusive use of the camera HAL, and this device has THREE
+                // possible camera clients: our own ArVideoRecorder (:backend), the capture
+                // priv-app (photo/video/ReID/rPPG), and now the compositor. Opening while another
+                // holds it fails with ERROR_CAMERA_IN_USE, so refuse up front with a reason the
+                // phone can actually show the user.
+                val blocker = when {
+                    arVideoRecorder?.isRecording == true -> "an AR recording is active"
+                    runCatching { captureBridge.isRecordingActive() }.getOrDefault(false) ->
+                        "a video recording is active"
+                    else -> null
+                }
+                if (blocker != null) {
                     btClient.sendCommandResult(requestId, JSONObject().apply {
                         put("success", false)
-                        put("error", "a recording is active")
+                        put("error", blocker)
                     }.toString())
                     return
                 }

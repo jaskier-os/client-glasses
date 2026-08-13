@@ -62,25 +62,28 @@ class ArStreamSession(
             return null
         }
 
-        var started = false
-        val done = Object()
+        // A latch, not wait/notify: the callback can fire before this thread reaches the wait,
+        // and that missed signal would stall the BT reply for the full timeout.
+        val started = java.util.concurrent.atomic.AtomicBoolean(false)
+        val done = java.util.concurrent.CountDownLatch(1)
         comp.start(
             onFrame = { payload, key, config -> srv.onEncodedFrame(payload, key, config) },
             hudSurfaceReady = { surface, w, h ->
-                // If no UI process is attached the overlay would silently be missing, so treat it
-                // as a hard failure rather than shipping a camera-only "AR" stream.
+                // No UI sink means no HUD layer. The stream still carries the camera, which is
+                // useful, so continue -- but say so, because "AR stream with no AR" otherwise
+                // looks like a compositing bug.
                 if (bridge()?.pushHudSurface(surface, w, h) != true) {
-                    log?.invoke("ArStreamSession: no UI sink for HUD surface")
+                    log?.invoke("ArStreamSession: no UI sink attached -- streaming camera only")
                 }
             },
             callback = { ok ->
-                started = ok
-                synchronized(done) { done.notifyAll() }
+                started.set(ok)
+                done.countDown()
             }
         )
-        synchronized(done) { done.wait(COMPOSITOR_START_TIMEOUT_MS) }
+        done.await(COMPOSITOR_START_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
 
-        if (!started) {
+        if (!started.get()) {
             log?.invoke("ArStreamSession: compositor failed to start")
             teardown()
             return null

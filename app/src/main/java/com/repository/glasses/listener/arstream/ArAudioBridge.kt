@@ -50,6 +50,12 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
 
     @Volatile private var framesWritten = 0L
 
+    /**
+     * Opens an 8-channel AudioRecord alongside the service's always-on mono mic pump. That is the
+     * same arrangement the translation feature already uses in production (one 8-ch open, mono
+     * pump left running), so it is known to work on this HAL -- do not "fix" it by stopping the
+     * mono pump, which would take the wake-word pipeline down with it.
+     */
     fun start(): Boolean {
         if (running) return true
 
@@ -120,23 +126,37 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
         val outward = ShortArray(BLOCK_FRAMES)
         val mixed = ShortArray(BLOCK_FRAMES)
         val cleaned = ShortArray(BLOCK_FRAMES)
+        // Leftover shorts from a read that did not land on a frame boundary. Without carrying
+        // them, the next read starts mid-frame and every channel index shifts for the rest of the
+        // session -- which would silently route the ch6/ch7 echo reference into the uplink, the
+        // exact feedback loop UplinkMixer exists to prevent.
+        var carry = 0
 
         while (running) {
             val read = try {
-                rec.read(raw, 0, raw.size)
+                rec.read(raw, carry, raw.size - carry)
             } catch (e: Exception) {
                 if (running) log?.invoke("ArAudioBridge: read failed: ${e.message}")
                 break
             }
             if (read <= 0) continue
 
-            val frames = read / NUM_CHANNELS_8
-            if (frames <= 0) continue
+            val total = carry + read
+            val frames = total / NUM_CHANNELS_8
+            carry = total % NUM_CHANNELS_8
+            if (frames <= 0) {
+                // Not even one whole frame yet; keep what we have and read more.
+                continue
+            }
 
             for (f in 0 until frames) {
                 val base = f * NUM_CHANNELS_8
                 inward[f] = applyGain(raw[base + UplinkMixer.CHANNEL_INWARD])
                 outward[f] = applyGain(raw[base + OUTWARD_CHANNEL])
+            }
+            if (carry > 0) {
+                // Move the partial frame to the front for the next iteration.
+                System.arraycopy(raw, frames * NUM_CHANNELS_8, raw, 0, carry)
             }
 
             mixer.mix(inward, outward, mixed, frames)
@@ -157,25 +177,32 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
         if (!running || playbackMuted) return
         // Register as far-end BEFORE playback so the canceller has it when the echo returns.
         farEnd.put(pcm, length)
+        // Bound the drift between the network clock and the capture clock.
+        farEnd.trimTo(MAX_FAR_END_SAMPLES)
         try {
-            track?.write(pcm, 0, length)
-            framesWritten += length
+            // NON_BLOCKING: this runs on the socket reader thread, and a blocking write would
+            // stall control messages (mute, stop) behind a full playback buffer.
+            val written = track?.write(pcm, 0, length, AudioTrack.WRITE_NON_BLOCKING) ?: 0
+            if (written > 0) framesWritten += written
         } catch (e: Exception) {
             log?.invoke("ArAudioBridge: playback write failed: ${e.message}")
         }
     }
 
     /**
-     * Round-trip delay estimate for AECM: how much audio we have written but the DAC has not yet
-     * played, i.e. the buffer backlog. Better than a fixed constant, which is what the AECM
-     * default assumes.
+     * Round-trip delay estimate for AECM.
+     *
+     * Two components: audio sitting in the far-end FIFO that the canceller has not consumed yet,
+     * plus audio written to the AudioTrack that the DAC has not played yet. Counting only the
+     * second would understate the delay by however far the FIFO has drifted.
      */
     private fun currentDelayMs(): Int {
         val t = track ?: return DEFAULT_DELAY_MS
         return try {
             val played = t.playbackHeadPosition.toLong() and 0xFFFFFFFFL
             val backlogFrames = (framesWritten - played).coerceAtLeast(0L)
-            val ms = (backlogFrames * 1000L / SAMPLE_RATE).toInt()
+            val fifoFrames = farEnd.depth().toLong()
+            val ms = ((backlogFrames + fifoFrames) * 1000L / SAMPLE_RATE).toInt()
             (ms + SPEAKER_TO_MIC_MS).coerceIn(0, MAX_DELAY_MS)
         } catch (e: Exception) {
             DEFAULT_DELAY_MS
@@ -209,6 +236,9 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
         try { record?.release() } catch (_: Exception) {}
         record = null
 
+        // Uplink thread is already joined above, so nothing is mid-processChunk on the AECM.
+        try { track?.pause() } catch (_: Exception) {}
+        try { track?.flush() } catch (_: Exception) {}
         try { track?.stop() } catch (_: Exception) {}
         try { track?.release() } catch (_: Exception) {}
         track = null
@@ -254,6 +284,25 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
         }
 
         @Synchronized
+        fun depth(): Int = size
+
+        /**
+         * Discard everything older than [keepSamples].
+         *
+         * The producer (network) and consumer (mic capture) clocks are independent, so the FIFO
+         * drifts. Left alone it pins at the cap and the far-end reference ends up describing audio
+         * that played a second ago -- worse than useless to a canceller, which then subtracts the
+         * wrong signal. Trimming keeps the reference near the true acoustic delay.
+         */
+        @Synchronized
+        fun trimTo(keepSamples: Int) {
+            val excess = size - keepSamples
+            if (excess <= 0) return
+            head = (head + excess) % MAX_SAMPLES
+            size -= excess
+        }
+
+        @Synchronized
         fun clear() {
             head = 0
             size = 0
@@ -274,5 +323,8 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
         const val DEFAULT_DELAY_MS = 10
         const val SPEAKER_TO_MIC_MS = 10
         const val MAX_DELAY_MS = 500
+
+        /** ~200 ms of far-end reference; beyond this the FIFO has drifted, not buffered. */
+        const val MAX_FAR_END_SAMPLES = SAMPLE_RATE / 5
     }
 }

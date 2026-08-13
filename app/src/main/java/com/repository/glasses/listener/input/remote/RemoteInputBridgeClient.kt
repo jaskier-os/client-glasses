@@ -47,7 +47,7 @@ class RemoteInputBridgeClient(
                     log("[ArStream] HUD surface arrived with no root view")
                     return@post
                 }
-                hudDrawer.start(root, s)
+                hudDrawer.start(root, s, width, height)
             }
         }
 

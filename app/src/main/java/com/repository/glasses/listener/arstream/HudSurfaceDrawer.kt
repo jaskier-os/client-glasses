@@ -18,6 +18,8 @@ class HudSurfaceDrawer(private val log: ((String) -> Unit)? = null) {
 
     private var surface: Surface? = null
     private var rootView: View? = null
+    private var targetWidth = 0
+    private var targetHeight = 0
 
     @Volatile
     private var running = false
@@ -31,10 +33,12 @@ class HudSurfaceDrawer(private val log: ((String) -> Unit)? = null) {
     }
 
     /** Must be called on the UI thread (Choreographer is per-thread). */
-    fun start(view: View, s: Surface) {
+    fun start(view: View, s: Surface, width: Int, height: Int) {
         if (running) stop()
         rootView = view
         surface = s
+        targetWidth = width
+        targetHeight = height
         running = true
         Choreographer.getInstance().postFrameCallback(frameCallback)
         log?.invoke("HudSurfaceDrawer: started")
@@ -60,6 +64,16 @@ class HudSurfaceDrawer(private val log: ((String) -> Unit)? = null) {
             canvas = s.lockCanvas(null)
             // Clear to black so untouched HUD area composites as fully transparent.
             canvas.drawColor(Color.BLACK)
+            // Scale when the view and the buffer disagree, so the HUD fills the layer instead of
+            // landing in a corner of it.
+            if (targetWidth > 0 && targetHeight > 0 &&
+                (v.width != targetWidth || v.height != targetHeight)
+            ) {
+                canvas.scale(
+                    targetWidth.toFloat() / v.width,
+                    targetHeight.toFloat() / v.height
+                )
+            }
             v.draw(canvas)
         } catch (e: Exception) {
             log?.invoke("HudSurfaceDrawer: draw failed: ${e.message}")

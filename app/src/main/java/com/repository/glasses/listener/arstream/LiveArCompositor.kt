@@ -59,6 +59,14 @@ class LiveArCompositor(private val context: Context) {
     private var notifyThread: HandlerThread? = null
     private var notifyHandler: Handler? = null
 
+    /**
+     * Camera2 callbacks MUST NOT be delivered to the GL thread: setup runs as one long message on
+     * that thread and then blocks waiting for onOpened, so a callback queued behind it could never
+     * run -- a guaranteed self-timeout.
+     */
+    private var cameraThread: HandlerThread? = null
+    private var cameraHandler: Handler? = null
+
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
 
@@ -77,16 +85,24 @@ class LiveArCompositor(private val context: Context) {
     private var hudSurface: Surface? = null
 
     @Volatile private var running = false
+
+    /** True once threads exist, so a failed start still tears them down. */
+    @Volatile private var started = false
     @Volatile private var cameraFrameAvailable = false
     @Volatile private var hudFrameAvailable = false
+
+    /** The HUD texture has no image until MainActivity draws once; sampling it before that is UB. */
+    @Volatile private var hudEverUpdated = false
     private val frameLock = Object()
 
     /** Cached codec-config (SPS/PPS) blob, re-sent to every new client. */
     @Volatile var configFrame: ByteArray? = null
         private set
 
-    private val cameraTexMtx = FloatArray(16)
-    private val hudTexMtx = FloatArray(16)
+    // Identity until the first updateTexImage: a zero matrix would collapse every texture
+    // coordinate to (0,0) and smear one undefined texel across the frame.
+    private val cameraTexMtx = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
+    private val hudTexMtx = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
     private val identityMvp = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
 
     private fun log(msg: String) {
@@ -117,6 +133,9 @@ class LiveArCompositor(private val context: Context) {
         // keeps a separate notify thread).
         notifyThread = HandlerThread("LiveArComp-Notify").also { it.start() }
         notifyHandler = Handler(notifyThread!!.looper)
+        cameraThread = HandlerThread("LiveArComp-Cam").also { it.start() }
+        cameraHandler = Handler(cameraThread!!.looper)
+        started = true
 
         glHandler!!.post {
             try {
@@ -128,6 +147,8 @@ class LiveArCompositor(private val context: Context) {
                 log("LiveArCompositor: setup failed: ${t.javaClass.simpleName}: ${t.message}")
                 releaseOnGlThread()
                 callback(false)
+                // Threads were created in start(); without this a failed session leaks all three.
+                quitThreads()
             }
         }
     }
@@ -169,8 +190,11 @@ class LiveArCompositor(private val context: Context) {
         }
         cameraSurface = Surface(cameraTexture)
 
+        // The HUD buffer is the glasses' own display size, not the stream size. The UI process
+        // draws its root view 1:1 into it and the shader stretches it across the quad; sizing the
+        // buffer to 1280x720 instead would leave the view in a 480x640 corner of a black frame.
         hudTexture = SurfaceTexture(hudTexId).apply {
-            setDefaultBufferSize(WIDTH, HEIGHT)
+            setDefaultBufferSize(HUD_WIDTH, HUD_HEIGHT)
             setOnFrameAvailableListener({
                 synchronized(frameLock) { hudFrameAvailable = true; frameLock.notifyAll() }
             }, notifyHandler)
@@ -180,16 +204,18 @@ class LiveArCompositor(private val context: Context) {
         // 4) Camera.
         openCamera()
 
-        hudSurfaceReady(hudSurface!!, WIDTH, HEIGHT)
-        log("LiveArCompositor: started ${WIDTH}x$HEIGHT @${FPS}fps")
+        hudSurfaceReady(hudSurface!!, HUD_WIDTH, HUD_HEIGHT)
+        log("LiveArCompositor: started ${WIDTH}x$HEIGHT @${FPS}fps hud=${HUD_WIDTH}x$HUD_HEIGHT")
     }
 
     private fun openCamera() {
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val cameraId = findCamera(manager) ?: throw RuntimeException("no camera")
 
-        val opened = Object()
-        var failure: String? = null
+        // A latch, not wait/notify: onOpened can complete before this thread would have reached
+        // wait(), and that missed signal would cost the full timeout.
+        val opened = java.util.concurrent.CountDownLatch(1)
+        val failure = java.util.concurrent.atomic.AtomicReference<String?>(null)
 
         manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
@@ -197,27 +223,38 @@ class LiveArCompositor(private val context: Context) {
                 try {
                     configureSession(camera)
                 } catch (t: Throwable) {
-                    failure = "configureSession: ${t.message}"
+                    failure.set("configureSession: ${t.message}")
                 }
-                synchronized(opened) { opened.notifyAll() }
+                opened.countDown()
             }
 
             override fun onDisconnected(camera: CameraDevice) {
                 camera.close(); cameraDevice = null
-                failure = "camera disconnected"
-                synchronized(opened) { opened.notifyAll() }
+                failure.set("camera disconnected")
+                opened.countDown()
             }
 
             override fun onError(camera: CameraDevice, error: Int) {
                 camera.close(); cameraDevice = null
-                failure = "camera error $error"
-                synchronized(opened) { opened.notifyAll() }
+                // ERROR_CAMERA_IN_USE (1) means another client (the capture APK) holds the HAL.
+                failure.set(
+                    if (error == ERROR_CAMERA_IN_USE) {
+                        "camera already in use by another app"
+                    } else {
+                        "camera error $error"
+                    }
+                )
+                opened.countDown()
             }
-        }, glHandler)
+            // Callbacks go to the CAMERA thread. Delivering them to glHandler would queue them
+            // behind this very message, which is blocked below -- a guaranteed deadlock.
+        }, cameraHandler)
 
-        synchronized(opened) { opened.wait(CAMERA_OPEN_TIMEOUT_MS) }
-        failure?.let { throw RuntimeException(it) }
-        if (cameraDevice == null) throw RuntimeException("camera open timed out")
+        if (!opened.await(CAMERA_OPEN_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            throw RuntimeException("camera open timed out")
+        }
+        failure.get()?.let { throw RuntimeException(it) }
+        if (cameraDevice == null) throw RuntimeException("camera failed to open")
     }
 
     private fun configureSession(camera: CameraDevice) {
@@ -239,7 +276,7 @@ class LiveArCompositor(private val context: Context) {
                     CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                     CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
                 )
-                session.setRepeatingRequest(builder.build(), null, glHandler)
+                session.setRepeatingRequest(builder.build(), null, cameraHandler)
             }
 
             override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -259,7 +296,7 @@ class LiveArCompositor(private val context: Context) {
             )
         } else {
             @Suppress("DEPRECATION")
-            camera.createCaptureSession(listOf(target), stateCb, glHandler)
+            camera.createCaptureSession(listOf(target), stateCb, cameraHandler)
         }
     }
 
@@ -274,17 +311,24 @@ class LiveArCompositor(private val context: Context) {
             if (!running) break
 
             try {
-                // Always update both textures we have new data for; the HUD updates at its own
-                // pace and simply reuses its last frame when the UI process is idle.
-                if (cameraFrameAvailable) {
-                    synchronized(frameLock) { cameraFrameAvailable = false }
+                // Claim both flags under the same monitor that sets them, so a frame arriving
+                // between a read and a clear cannot lose its notification.
+                val takeCamera: Boolean
+                val takeHud: Boolean
+                synchronized(frameLock) {
+                    takeCamera = cameraFrameAvailable
+                    takeHud = hudFrameAvailable
+                    cameraFrameAvailable = false
+                    hudFrameAvailable = false
+                }
+                if (takeCamera) {
                     cameraTexture?.updateTexImage()
                     cameraTexture?.getTransformMatrix(cameraTexMtx)
                 }
-                if (hudFrameAvailable) {
-                    synchronized(frameLock) { hudFrameAvailable = false }
+                if (takeHud) {
                     hudTexture?.updateTexImage()
                     hudTexture?.getTransformMatrix(hudTexMtx)
+                    hudEverUpdated = true
                 }
 
                 GLES20.glViewport(0, 0, WIDTH, HEIGHT)
@@ -292,7 +336,11 @@ class LiveArCompositor(private val context: Context) {
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
                 program?.draw(cameraTexId, identityMvp, cameraTexMtx, MODE_OPAQUE)
-                program?.draw(hudTexId, identityMvp, hudTexMtx, MODE_LUMA_ALPHA)
+                // Skip the overlay until the UI process has actually produced a frame: an OES
+                // texture with no bound image samples undefined data over the whole picture.
+                if (hudEverUpdated) {
+                    program?.draw(hudTexId, identityMvp, hudTexMtx, MODE_LUMA_ALPHA)
+                }
 
                 egl?.setPresentationTime(eglSurface!!, System.nanoTime() - startNanos)
                 egl?.swapBuffers(eglSurface!!)
@@ -344,16 +392,26 @@ class LiveArCompositor(private val context: Context) {
     }
 
     fun stop() {
-        if (!running) return
+        // Keyed on `started`, not `running`: a start that failed during setup never set running
+        // but did create the threads, and skipping teardown there leaks all three per attempt.
+        if (!started) return
+        started = false
         running = false
         synchronized(frameLock) { frameLock.notifyAll() }
+        quitThreads()
+        log("LiveArCompositor: stopped")
+    }
+
+    private fun quitThreads() {
         glThread?.quitSafely()
         notifyThread?.quitSafely()
+        cameraThread?.quitSafely()
         glThread = null
         notifyThread = null
+        cameraThread = null
         notifyHandler = null
+        cameraHandler = null
         glHandler = null
-        log("LiveArCompositor: stopped")
     }
 
     private fun releaseOnGlThread() {
@@ -563,10 +621,17 @@ class LiveArCompositor(private val context: Context) {
         private const val MIME = "video/avc"
         private const val WIDTH = 1280
         private const val HEIGHT = 720
+
+        /** Rokid waveguide panel size -- the HUD layer is captured at its native resolution. */
+        private const val HUD_WIDTH = 480
+        private const val HUD_HEIGHT = 640
         private const val FPS = 30
         private const val BITRATE = 4_000_000
         private const val FRAME_WAIT_MS = 100L
         private const val CAMERA_OPEN_TIMEOUT_MS = 5_000L
+
+        /** CameraDevice.StateCallback.ERROR_CAMERA_IN_USE */
+        private const val ERROR_CAMERA_IN_USE = 1
 
         private const val EGL_RECORDABLE_ANDROID = 0x3142
         private const val MODE_OPAQUE = 0
