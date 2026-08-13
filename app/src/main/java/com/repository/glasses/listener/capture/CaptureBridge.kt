@@ -249,14 +249,25 @@ class CaptureBridge(private val context: Context) {
         try { api?.warmUp() } catch (e: Exception) { logMsg("Capture: warmUp failed: ${e.message}") }
     }
 
-    fun takePhoto() = GT.section("cap.bridge.take_photo") {
-        try { api?.takePhoto() } catch (e: Exception) { logMsg("Capture: takePhoto failed: ${e.message}") }
+    /**
+     * @param silent suppress the white privacy LED. For capture the wearer triggered
+     *        from a REMOTE device (phone, watch) rather than the temple button: they are
+     *        looking at the control they pressed, so the LED is not the confirmation it
+     *        is for a blind button press.
+     */
+    fun takePhoto(silent: Boolean = false) = GT.section("cap.bridge.take_photo") {
+        try {
+            if (silent) api?.takePhotoSilent() else api?.takePhoto()
+        } catch (e: Exception) { logMsg("Capture: takePhoto failed: ${e.message}") }
     }
-    fun startVideo() = GT.section("cap.bridge.start_video") {
+    /** @param silent see [takePhoto]. Applies for the whole recording. */
+    fun startVideo(silent: Boolean = false) = GT.section("cap.bridge.start_video") {
         try { beforeVideoStart?.invoke() } catch (e: Exception) {
             logMsg("Capture: beforeVideoStart hook threw: ${e.message}")
         }
-        try { api?.startVideo() } catch (e: Exception) { logMsg("Capture: startVideo failed: ${e.message}") }
+        try {
+            if (silent) api?.startVideoSilent() else api?.startVideo()
+        } catch (e: Exception) { logMsg("Capture: startVideo failed: ${e.message}") }
     }
     fun togglePauseVideo() = GT.section("cap.bridge.toggle_pause") {
         try { api?.togglePauseVideo() } catch (e: Exception) { logMsg("Capture: togglePause failed: ${e.message}") }
@@ -346,4 +357,18 @@ class CaptureBridge(private val context: Context) {
      * camera + LED teardown -- safe even if nothing was recording).
      */
     fun isRecordingActive(): Boolean = try { api?.isRecordingActive ?: true } catch (_: Exception) { true }
+
+    /**
+     * Recording state as a TRI-STATE: true / false / null when the capture
+     * binder is unreachable and the answer is genuinely unknown.
+     *
+     * [isRecordingActive] collapses "unknown" to true, which is right for the
+     * long-press toggle (prefer an idempotent STOP) but WRONG for the
+     * short-press photo decision: after the capture process dies, every short
+     * press silently became togglePauseVideo and the user got no photo at all
+     * -- with no error, because pausing a non-existent recording is a no-op.
+     * Callers that must distinguish "recording" from "cannot tell" use this.
+     */
+    fun isRecordingActiveOrNull(): Boolean? =
+        try { api?.isRecordingActive } catch (_: Exception) { null }
 }

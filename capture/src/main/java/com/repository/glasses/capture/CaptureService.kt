@@ -122,14 +122,28 @@ class CaptureService : Service() {
             rawStill.warmUp()
         }
 
-        override fun takePhoto() {
-            Log.i(TAG, "AIDL takePhoto entry recording=${isRecordingForCapture()}")
+        override fun takePhoto() = takePhotoInternal(silent = false)
+
+        override fun takePhotoSilent() = takePhotoInternal(silent = true)
+
+        private fun takePhotoInternal(silent: Boolean) {
+            Log.i(TAG, "AIDL takePhoto entry recording=${isRecordingForCapture()} silent=$silent")
+            // Gate the firmware LED at its SOURCE before the camera opens: with the
+            // property at 0, cameraserver never fires CAMERA_OPEN(2014), so the white
+            // LED cannot light at all. Released once the capture is done -- and it must
+            // be released on EVERY exit path below, or the ref count never returns to
+            // zero and the LED stays disabled for every later capture too.
+            if (silent) cameraLedGate.acquireSilent()
             if (isRecordingForCapture()) {
                 // RECORDING: the full RAW archival path is unavailable (camera is
                 // held by the recorder). Produce a 1080p video-grade still from
                 // the live record session's snapshot reader instead, written to
                 // the same DCIM/Repository location and synced like any photo.
                 takeSnapshotPhoto()
+                // The snapshot path rides the already-open record session and never
+                // re-opens the camera, so there is no LED event to suppress; release
+                // immediately rather than leaking a holder.
+                if (silent) cameraLedGate.releaseSilent()
                 return
             }
             // Non-recording func-button photo. Routes through the SAME
@@ -147,11 +161,19 @@ class CaptureService : Service() {
             rawStill.takePhoto(
                 onPreview = onPrev@ { file, err ->
                     Log.i(TAG, "takePhoto preview err=${err?.message} file=${file?.absolutePath} size=${file?.length()}")
+                    // The capture is over by the time the preview JPEG lands, so the
+                    // gate is released here on BOTH the error and success paths.
+                    if (silent) cameraLedGate.releaseSilent()
                     if (err != null || file == null) {
                         broadcast { it.onCaptureError(ERR_CAMERA, err?.message ?: "photo failed") }
                         return@onPrev
                     }
-                    try { LedController.pulseWhite() } catch (_: Exception) {}
+                    // The confirmation pulse is the shutter "click" of this device. A
+                    // silent capture must not emit it -- suppressing the firmware event
+                    // while still flashing the LED ourselves would defeat the point.
+                    if (!silent) {
+                        try { LedController.pulseWhite() } catch (_: Exception) {}
+                    }
                     broadcast { it.onPhotoTaken(file.absolutePath, file.length()) }
                 },
                 onFinal = { file, _ ->
@@ -167,15 +189,31 @@ class CaptureService : Service() {
             )
         }
 
-        override fun startVideo() {
-            Log.i(TAG, "AIDL startVideo entry recording=${video.isRecording()}")
+        override fun startVideo() = startVideoInternal(silent = false)
+
+        override fun startVideoSilent() = startVideoInternal(silent = true)
+
+        private fun startVideoInternal(silent: Boolean) {
+            Log.i(TAG, "AIDL startVideo entry recording=${video.isRecording()} silent=$silent")
             if (video.isRecording()) {
                 Log.i(TAG, "startVideo ignored: already recording")
                 return
             }
+            // Latched for the WHOLE recording, not just the open, because the LED for
+            // video is driven asynchronously by CameraSession.StateListener when the
+            // recorder surface goes active -- long after this call returns. The flag is
+            // what that listener consults; the gate suppresses the firmware event.
+            silentRecording = silent
+            if (silent) cameraLedGate.acquireSilent()
             video.start { file, err ->
                 Log.i(TAG, "startVideo callback err=${err?.message} file=${file?.absolutePath}")
                 if (err != null || file == null) {
+                    // The recording never began, so the holder taken above would other-
+                    // wise be stranded and leave the LED disabled indefinitely.
+                    if (silentRecording) {
+                        cameraLedGate.releaseSilent()
+                        silentRecording = false
+                    }
                     broadcast { it.onCaptureError(ERR_CAMERA, err?.message ?: "video start failed") }
                     return@start
                 }
@@ -225,6 +263,8 @@ class CaptureService : Service() {
             }
             video.stop { file, durationMs, sizeBytes, err ->
                 Log.i(TAG, "stopVideo callback err=${err?.message} file=${file?.absolutePath} durMs=$durationMs bytes=$sizeBytes")
+                // Recording is over: restore the LED for whatever comes next.
+                endSilentRecording()
                 // LED is driven off by CameraSession.StateListener when the
                 // recorder surface is removed (in video.stop -> clearRecorderSurface).
                 if (err != null) {
@@ -427,6 +467,7 @@ class CaptureService : Service() {
      * the VideoRecorder so a half-completed start can't strand state.
      */
     private fun forceTeardown() {
+        endSilentRecording()
         try { cameraSession.clearRecorderSurface() } catch (e: Exception) {
             Log.w(TAG, "forceTeardown clearRecorderSurface failed: ${e.message}")
         }
@@ -770,6 +811,31 @@ class CaptureService : Service() {
      * from re-enabling the LED while another silent capture is still in flight.
      * Used by ReID today; available to photo/video for a silent capture too.
      */
+    /**
+     * True while the in-flight recording was requested SILENT (no privacy LED).
+     *
+     * Session-scoped rather than passed through, because the LED for video is turned on
+     * by [CameraSession.StateListener] when the recorder surface becomes active, which
+     * happens asynchronously after startVideo returns and has no access to the caller's
+     * intent. Cleared on every stop path, including the forced teardown.
+     */
+    @Volatile
+    private var silentRecording = false
+
+    /**
+     * Ends a silent recording's LED suppression, exactly once.
+     *
+     * Idempotent by design: the stop paths overlap (an explicit stopVideo whose callback
+     * fires, a forced teardown, a teardown after a callback already ran), and releasing
+     * the ref-counted gate twice for one acquire would drive the count negative and
+     * re-enable the LED underneath an unrelated silent capture still in flight.
+     */
+    private fun endSilentRecording() {
+        if (!silentRecording) return
+        silentRecording = false
+        cameraLedGate.releaseSilent()
+    }
+
     private val cameraLedGate = object {
         private val silentHolders = java.util.concurrent.atomic.AtomicInteger(0)
         fun acquireSilent() {
@@ -834,6 +900,14 @@ class CaptureService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
+        // Tighten ART's heap sizing before the first capture allocates. The
+        // device default (heaptargetutilization 0.5) leaves ~2x the live set as
+        // slack, and lmkd counts that slack when picking a victim -- this
+        // priv-app is adj 100, so it gets killed for memory it is not using.
+        // init() only sets the target; it does NOT collect (this is the main
+        // thread during service start).
+        HeapTrimmer.init()
+
         FileNamer.ensureRoot()
 
         // Eagerly warm the SCRFD-10G NPU detector on a background thread so the
@@ -864,6 +938,15 @@ class CaptureService : Service() {
                     // (ReID or any other subscriber) keeps the LED off.
                     try {
                         if (active) {
+                            // A silent recording suppresses the LED for its whole
+                            // duration. The source gate alone is not enough here: these
+                            // two calls light the LED explicitly rather than relying on
+                            // the firmware's CAMERA_OPEN event, so they would turn it on
+                            // regardless of the property.
+                            if (silentRecording) {
+                                Log.i(TAG, "recording output active; LED suppressed (silent)")
+                                return
+                            }
                             LedController.assertCameraOpenEvent()
                             LedController.turnOnWhite()
                         } else {
@@ -892,12 +975,33 @@ class CaptureService : Service() {
         // released and rebuilt. Wired AFTER both are constructed.
         cameraSession.denoiseInFlightProvider = { rawStill.isDenoiseInFlight() }
         rawStill.onDenoiseStateChanged = { cameraSession.onDenoiseStateChanged() }
+        // warmUp() opens the camera with no user action behind it, so it must run
+        // as a silent open. Route it through the same ref-counted gate the ReID /
+        // silent-recording paths use, so a concurrent silent holder cannot have
+        // the LED re-enabled out from under it.
+        rawStill.acquireSilentLed = { cameraLedGate.acquireSilent() }
+        rawStill.releaseSilentLed = { cameraLedGate.releaseSilent() }
         video = VideoRecorder(this, cameraSession)
         notifier = SyncNotifier(this)
 
         // Crash-resume: pick up any RAW sidecars a previous run left unprocessed
         // (the failure that produced gray photos) and finish them off-camera.
         try { rawStill.resumePending() } catch (e: Exception) { Log.w(TAG, "resumePending failed: ${e.message}") }
+
+        // Eagerly warm the still-capture camera path on a background thread. The
+        // cold Qualcomm HAL drops the first burst frame (reason=0) during sensor
+        // bring-up, and the resulting retry costs ~5.2s of session-configure +
+        // AE-warmup on the FIRST photo after boot -- all of it inside the window
+        // where the user is watching the capture preview overlay. Paying it here
+        // moves that cost off the user's critical path.
+        //
+        // Ordered AFTER resumePending so a crash-resume denoise is not competing
+        // with camera bring-up. warmUp() dispatches onto RawStillCapturer's own
+        // capture executor (so it serializes behind any real photo rather than in
+        // front of one), hence no extra thread here and no blocking of onCreate.
+        try { rawStill.warmUp() } catch (e: Throwable) {
+            Log.w(TAG, "still eager warmup threw: ${e.message}")
+        }
 
         Log.i(TAG, "CaptureService started, root=${FileNamer.rootDir.absolutePath} onCreateMs=${android.os.SystemClock.elapsedRealtime() - tOnCreate}")
     }
@@ -1111,6 +1215,33 @@ class CaptureService : Service() {
             return START_NOT_STICKY
         }
         return START_STICKY
+    }
+
+    /**
+     * Shed memory when the system says it is running out.
+     *
+     * This process is a priv-app at oom_score_adj 100 holding the biggest
+     * allocations on the device, so lmkd targets it first -- and killing it
+     * mid-capture loses the user's photo. Android offers a warning before that
+     * happens; the service previously ignored it entirely. Trimming here is the
+     * difference between shedding cache and being killed outright.
+     *
+     * Deliberately does NOT touch anything a capture in flight is using: the
+     * point is to survive the pressure WITH the photo, not to drop it.
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        val busy = rawStill.isDenoiseInFlight()
+        Log.w(TAG, "onTrimMemory level=$level denoiseInFlight=$busy")
+        if (level < TRIM_MEMORY_RUNNING_LOW) return
+        // The denoiser singleton caches a mapped model + engine; it rebuilds
+        // cheaply (~0.6s from the cached .bin) and is pure derived state.
+        // Never drop it mid-denoise -- that would fail the photo we are trying
+        // to save.
+        if (!busy) {
+            try { SplitterDenoiser.release() } catch (_: Throwable) {}
+        }
+        HeapTrimmer.collect()
     }
 
     override fun onDestroy() {

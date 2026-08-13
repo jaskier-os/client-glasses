@@ -16,8 +16,20 @@ interface ICapture {
     /** Take a single photo. No-op if currently recording (recording owns camera). */
     void takePhoto();
 
+    /**
+     * Take a photo with NO privacy LED, for capture the wearer triggered from a
+     * remote device (phone, watch) rather than from the temple button.
+     *
+     * Uses the ref-counted silent gate, so it is safe to interleave with any other
+     * silent capture (ReID) without one restoring the LED under the other.
+     */
+    void takePhotoSilent();
+
     /** Start video recording. No-op if already recording. */
     void startVideo();
+
+    /** [startVideo] with the privacy LED suppressed for the whole recording. */
+    void startVideoSilent();
 
     /** Toggle pause/resume. Only valid while recording. */
     void togglePauseVideo();

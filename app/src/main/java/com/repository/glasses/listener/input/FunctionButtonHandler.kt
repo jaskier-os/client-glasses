@@ -39,6 +39,13 @@ class FunctionButtonHandler(
      */
     private val onPhotoTriggered: (() -> Unit)? = null,
     /**
+     * Fires just before the AIDL takePhoto, so the listener can free its own
+     * heap first. Capture is the priv-app lmkd targets when memory is tight, so
+     * shrinking the sibling process improves the odds the user's photo survives.
+     * Mirrors the existing pre-video flush.
+     */
+    private val beforePhoto: (() -> Unit)? = null,
+    /**
      * Optional override for the long-press video toggle. Listener supplies
      * this so it can interrupt a phone-driven recording (record_video /
      * record_ar_screen via ArVideoRecorder) before the capture process
@@ -57,6 +64,17 @@ class FunctionButtonHandler(
     @Volatile private var longPressFired = false
     @Volatile private var folded: Boolean = false
 
+    /**
+     * True when the press being tracked came from a REMOTE device, so the capture it
+     * produces must not light the privacy LED.
+     *
+     * Latched on DOWN and read on the resolution paths (the long-press runnable and UP),
+     * because by then the originating intent is long gone. One flag suffices: there is a
+     * single finger and a single state machine, so a remote and a physical press cannot
+     * be in flight at once.
+     */
+    @Volatile private var silentPress: Boolean = false
+
     // Triple-press tracking (folded mode only).
     private val pressTimestamps: ArrayDeque<Long> = ArrayDeque()
 
@@ -72,8 +90,10 @@ class FunctionButtonHandler(
             // Authoritative session state, not the VideoRecorder boolean (see
             // CaptureBridge.isRecordingActive) so a wedged false can't double-start.
             val rec = capture.isRecordingActive()
-            log("FnButton: long-press, active=$rec -> ${if (rec) "stopVideo" else "startVideo"}")
-            if (rec) capture.stopVideo() else capture.startVideo()
+            log("FnButton: long-press, active=$rec silent=$silentPress -> ${if (rec) "stopVideo" else "startVideo"}")
+            // Silence applies to START only. A stop has no LED to suppress -- it turns
+            // the LED off -- and passing the flag there would be meaningless.
+            if (rec) capture.stopVideo() else capture.startVideo(silent = silentPress)
         }
     }
 
@@ -85,7 +105,12 @@ class FunctionButtonHandler(
         log("FnButton: fold state -> folded=$f")
     }
 
-    fun onKeyDown(repeatCount: Int): Boolean = GT.section("input.fn.down") {
+    /**
+     * @param silent this press came from a REMOTE device; the capture it resolves to must
+     *        not light the privacy LED. See [silentPress].
+     */
+    @JvmOverloads
+    fun onKeyDown(repeatCount: Int, silent: Boolean = false): Boolean = GT.section("input.fn.down") {
         if (repeatCount > 0) return@section true  // swallow repeats while held
 
         if (folded) {
@@ -111,6 +136,7 @@ class FunctionButtonHandler(
         if (downAtMs != 0L) return@section true  // already tracking a press
         downAtMs = SystemClock.elapsedRealtime()
         longPressFired = false
+        silentPress = silent
         handler.postDelayed(longPressRunnable, longPressMs)
         true
     }
@@ -129,8 +155,23 @@ class FunctionButtonHandler(
         // than the VideoRecorder boolean, so a binder/HAL wedge that desyncs
         // isRecording() to false can't make a short-press mis-route (pause vs
         // photo). Matches the long-press toggle.
-        val rec = capture.isRecordingActive()
-        log("FnButton: short-press, active=$rec -> ${if (rec) "togglePauseVideo" else "takePhoto"}")
+        //
+        // TRI-STATE on purpose. isRecordingActive() collapses "binder
+        // unreachable" to TRUE, which is correct for the long-press toggle
+        // (prefer an idempotent stop) but catastrophic here: after the capture
+        // process dies or is restarting, every short press resolved to
+        // togglePauseVideo, which is a silent no-op when nothing is recording.
+        // The user pressed the button repeatedly and got NO photo and NO error.
+        // Measured on device: capture died, then 0 photos from any press until
+        // the app was restarted. So an UNKNOWN state must take the photo path --
+        // taking a photo when a recording is somehow live is recoverable, while
+        // silently discarding every press is not.
+        val recOrNull = capture.isRecordingActiveOrNull()
+        val rec = recOrNull == true
+        if (recOrNull == null) {
+            log("FnButton: short-press, capture state UNKNOWN (binder down?) -> takePhoto anyway")
+        }
+        log("FnButton: short-press, active=$rec silent=$silentPress -> ${if (rec) "togglePauseVideo" else "takePhoto"}")
         if (rec) {
             capture.togglePauseVideo()
         } else {
@@ -141,7 +182,16 @@ class FunctionButtonHandler(
             try { onPhotoTriggered?.invoke() } catch (t: Throwable) {
                 log("FnButton: onPhotoTriggered threw: ${t.message}")
             }
-            capture.takePhoto()
+            // Drop the LISTENER's heap before capture allocates its ~120-170MB.
+            // lmkd scores by oom_score_adj * size and picks the capture priv-app
+            // (adj 100) even at ~124MB when the system total is tight -- measured
+            // "Memory Load Sum: 1241 MB" on this 1.8GB device. Shrinking the
+            // sibling process is the one lever we have from this side. Already
+            // done before video starts; photos need it just as much.
+            try { beforePhoto?.invoke() } catch (t: Throwable) {
+                log("FnButton: beforePhoto threw: ${t.message}")
+            }
+            capture.takePhoto(silent = silentPress)
         }
         true
     }

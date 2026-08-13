@@ -28,6 +28,14 @@ class ScreenOffAccessibilityService : AccessibilityService() {
         const val ACTION_FN_KEY = "com.repository.glasses.listener.ACTION_FN_KEY"
         const val EXTRA_EVENT_ACTION = "ev_action"
         const val EXTRA_REPEAT = "ev_repeat"
+        /**
+         * Optional: this press came from a REMOTE device, so the capture it produces must
+         * not light the privacy LED.
+         *
+         * Absent for the physical button, which is the case the LED exists for -- pressing
+         * a button on your temple gives no other confirmation that anything happened.
+         */
+        const val EXTRA_SILENT = "ev_silent"
         private const val TAG = "ScreenOffA11y"
     }
 
