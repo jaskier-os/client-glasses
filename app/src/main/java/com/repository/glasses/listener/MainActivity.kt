@@ -1222,7 +1222,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         }
         if (soloContentHidden) {
             activityLog("[NSOLO] blackout timeout failsafe -> force reveal")
-            android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via TIMEOUT failsafe")
             revealFromSolo("timeout")
         }
     }
@@ -1390,13 +1389,11 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             // panel is the lesser evil against ~30s of black UI.
             if (intent.getBooleanExtra(ListenerService.EXTRA_SOLO_FORCE_REVEAL, false)) {
                 uiLog("[NSOLO] SOLO_END received with force-reveal -- revealing now")
-                android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via SOLO_END force-reveal")
                 revealFromSolo("SOLO_END force-reveal")
                 return
             }
             if (soloScreenOff) {
                 uiLog("[NSOLO] SOLO_END received (no-touch, screen already off) -- removing instantly")
-                android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via SOLO_END screen-off")
                 removeSoloCoverInstant("SOLO_END screen-off -> cover removed instantly (no flash)")
             } else {
                 uiLog("[NSOLO] SOLO_END received (no-touch, screen still lit) -- holding cover until screen-off")
@@ -1412,7 +1409,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
             // sets notifSoloArmed=false but also tears the cover down, so soloContentHidden
             // will be false there and we won't fight it.
             if (soloContentHidden) {
-                android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via SCREEN_OFF receiver")
                 removeSoloCoverInstant("screen-off -> cover removed instantly (no flash)")
             }
         }
@@ -7791,7 +7787,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         if (notifSoloArmed && event.action == android.view.KeyEvent.ACTION_DOWN) {
             notifSoloArmed = false
             activityLog("[NSOLO] key DOWN while armed -> revealing content (not consuming)")
-            android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via KEY-PRESS")
             revealFromSolo("key-press")
             sendBroadcast(Intent(ListenerService.ACTION_NOTIFICATION_SOLO_REVEAL).apply {
                 setPackage(packageName)
@@ -10221,7 +10216,6 @@ class MainActivity : AppCompatActivity(), RemoteInputSink {
         // The armed blackout stays protected from getting stuck by the key-press reveal, the
         // SOLO_END broadcast, and the 20s timeout failsafe.
         if (!notifSoloArmed && (soloContentHidden || soloCoverView?.parent != null)) {
-            android.util.Log.i("MainActivityUI", "[NSOLO-TRACE] removal via onResume-safety armed=$notifSoloArmed hidden=$soloContentHidden")
             revealFromSolo("onResume-safety")
         }
         activityLog("onResume")

@@ -8039,16 +8039,12 @@ class ListenerService : LifecycleService(),
     // Mirrors the notification "show only this" model: crossing 20% and 15%
     // lights the panel for a bounded window with a single card, and at 10% or
     // below the panel is pinned on permanently until the wearer charges.
-    // TEMPORARY OBSERVATION BUILD: thresholds raised to 100/95 and the pin to 90
-    // so the whole sequence is reachable on a charged pair. Restore the real
-    // values (drop the arguments -- 20/15, pin 10) before this ships.
+    // The card was removed: at the pin threshold the panel is held lit precisely so the
+    // wearer can read the battery indicator, and a text card repeating the number covers
+    // the thing it is pointing at. The solo blackout shows the indicator alone instead.
     private val lowBatteryAlerter = com.repository.glasses.listener.battery.LowBatteryAlerter(
-        // TESTING VALUES. pinThreshold = 100 means the pin engages at ANY level, so the
-        // battery indicator is permanently on screen and the solo behaviour can be
-        // exercised on a fully charged device. Restore the real thresholds
-        // (alertThresholds = listOf(20, 15), pinThreshold = 10) before shipping.
-        alertThresholds = listOf(100, 95),
-        pinThreshold = 100,
+        alertThresholds = listOf(20, 15),
+        pinThreshold = 10,
     )
     private val lowBatteryAlertWindowMs = 20000L
     // Untimed lock held for the whole pinned (<=10%) period. Distinct from
@@ -8168,12 +8164,7 @@ class ListenerService : LifecycleService(),
         notifHandler.post {
             // Off-head there is no eye in front of the waveguide, and on a cable
             // the level is recovering -- neither is worth burning the panel for.
-            // TEMPORARY OBSERVATION BUILD: the cable check is disabled so the
-            // sequence is observable over USB. Restore `&& !lowBatteryCablePlugged`
-            // together with the real thresholds.
-            // TESTING: pin at ANY level, worn or not, on cable or not. Restore
-            // `lastWornState == true && !lowBatteryCablePlugged` with the real thresholds.
-            val eligible = true
+            val eligible = lastWornState == true && !lowBatteryCablePlugged
             val d = lowBatteryAlerter.evaluate(pct, eligible)
             // Tell the UI process whether the indicator is currently allowed to outrank a
             // blackout. Sent on every evaluation, not just on the edge, so a UI process
@@ -8341,8 +8332,7 @@ class ListenerService : LifecycleService(),
         // screen to have been off: the pin may well have lit the panel a moment ago, and
         // requiring darkness here would mean the pinned state never blacks out at all --
         // which is precisely the bug where the screen came on showing the full UI.
-        // TESTING: normally gated on lastWornState == true (no eye in front of the
-        // waveguide otherwise). Restore that with the real thresholds.
+        if (lastWornState != true) return
         notifSoloSessionActive = true
         // The indicator itself is an OVERLAY WINDOW, above the activity, exactly like the
         // Telegram card. The activity's own copy is inside the content root the blackout
@@ -8362,7 +8352,6 @@ class ListenerService : LifecycleService(),
             // that travels with the event it governs cannot arrive after it.
             putExtra(EXTRA_LOW_BATTERY, true)
         })
-        android.util.Log.i("GlassesListenerSvc", "[NSOLO-TRACE] SOLO_SHOW broadcast sent pct=$pct")
         btLog("[LowBat] solo blackout requested (only the battery indicator stays lit)")
     }
 
