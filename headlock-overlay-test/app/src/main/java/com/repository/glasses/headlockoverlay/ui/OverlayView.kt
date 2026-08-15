@@ -34,9 +34,11 @@ class OverlayView @JvmOverloads constructor(
 
     val projection = Projection()
 
-    // Debug-readout mirrors of the lazy-follow tunables (display only).
+    // Debug-readout mirrors of the lazy-follow tunables + live telemetry (display only).
     var followRate = 0.6f
     var deadzoneDeg = 6f
+    var idleSpeedDegPerSec = 12f
+    var headSpeedDegPerSec = 0f
     var selectedTunable: String = "k"
 
     var debugEnabled = true
@@ -157,10 +159,12 @@ class OverlayView @JvmOverloads constructor(
         val x = 12f
         var y = 28f
         val lineH = 24f
+        val idleMark = if (headSpeedDegPerSec <= idleSpeedDegPerSec) "IDLE" else "MOVE"
         val lines = listOf(
             "head y=%.1f p=%.1f".format(headYawDeg, headPitchDeg),
             "ref  y=%.1f".format(refYawDeg),
             "off  y=%.1f p=%.1f".format(offsetYawDeg, offsetPitchDeg),
+            "rot  %.1f deg/s  [%s]".format(headSpeedDegPerSec, idleMark),
             tunablesLine(),
         )
         for (line in lines) {
@@ -171,10 +175,11 @@ class OverlayView @JvmOverloads constructor(
 
     private fun tunablesLine(): String {
         fun mark(key: String) = if (selectedTunable == key) ">" else " "
-        return "%sk=%.2f %sD=%.1f %sfov=%.1f".format(
+        return "%sk=%.2f %sD=%.1f %sfov=%.1f %sidle=%.0f".format(
             mark("k"), followRate,
             mark("D"), deadzoneDeg,
             mark("fov"), projection.horizontalFovDeg,
+            mark("idle"), idleSpeedDegPerSec,
         )
     }
 

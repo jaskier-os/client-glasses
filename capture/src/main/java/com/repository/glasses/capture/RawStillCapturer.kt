@@ -91,6 +91,7 @@ class RawStillCapturer(
         // genuinely stuck HAL.
         private const val AE_WARMUP_MS = 4000L
 
+
         // Exposure correction is no longer an absolute-target DRO gain. This Rokid
         // HAL exposes RAW conservatively (a well-lit scene's green sits at codes
         // ~78-94 of 1023), so an absolute target/mean clamped to 8x on nearly every
@@ -107,8 +108,48 @@ class RawStillCapturer(
         private const val PREVIEW_TEX_W = 640
         private const val PREVIEW_TEX_H = 480
 
-        /** Number of RAW frames averaged per capture. sqrt(N) noise reduction. */
+        /** Default/maximum RAW frames averaged per capture (~sqrt(N) noise
+         *  reduction). The ACTUAL count is chosen per shot by [burstNForScene]
+         *  from the metered scene; this is the ceiling it picks under, and the
+         *  ImageReader's buffer depth. */
         private const val BURST_N = 3
+
+        /** Upper clamp for the [BURST_N_PROP] override. Capped at [BURST_N]: the
+         *  prop only ever LOWERS the ceiling (raising it would allocate RAW
+         *  buffers the adaptive choice can never use). */
+        private const val BURST_N_MAX = BURST_N
+
+        /** DEBUG override for burst length (non-persist, resets on reboot). Acts as
+         *  a CAP on the scene-adaptive choice, so `setprop ... 1` forces single-frame
+         *  and the default 3 lets [burstNForScene] pick 1..3 from the metered scene. */
+        private const val BURST_N_PROP = "debug.glasses.capture.burst_n"
+
+        /** How long to wait for the metered number of RAW frames. Generous: this
+         *  covers the whole burst on the slowest (dimmest, longest-exposure) path. */
+        private const val BURST_FRAMES_TIMEOUT_MS = 30_000L
+
+        /** Scales the raw ambient/(exp*iso) ratio into a readable range. Purely
+         *  cosmetic -- it moves SCENE_LIGHT_* off tiny decimals. */
+        private const val SCENE_LIGHT_SCALE = 1_000_000.0
+
+        /** Scene-light thresholds for [burstNForScene], in the scaled units above.
+         *  Calibrated on-device against the same room at two light levels, both
+         *  of which AE reported IDENTICALLY as 30ms/ISO800 (which is precisely
+         *  why AE metadata could not drive this decision):
+         *
+         *    lights off, monitor only : median 0.00104 @30ms -> light 0.04 (n=3)
+         *    lights on, dim/medium    : median 0.00313 @30ms -> light 0.13 (n=2)
+         *    lights on, full          : median 0.01460 @20ms -> light 0.91 (n=1)
+         *
+         *  Note the dark and dim rooms are INDISTINGUISHABLE by AE (both 30ms /
+         *  ISO 800) yet differ 3x in metered light -- the reason this decision
+         *  reads pixels instead of capture metadata.
+         *
+         *  Each threshold sits at the geometric mean of its neighbours, giving
+         *  ~1.7-2.6x margin on both sides, so ordinary scene variation cannot
+         *  flip the burst length between consecutive shots. */
+        private const val MID_LIGHT = 0.08
+        private const val BRIGHT_LIGHT = 0.34
 
         /** Upper bound on the exclusive device borrow. The body runs
          *  synchronously on CameraSession's handler thread and the caller
@@ -178,6 +219,20 @@ class RawStillCapturer(
          *  + 1-frame burst + demosaic + JPEG encode all fit well under this. */
         private const val REID_BORROW_TIMEOUT_MS = 12000L
 
+        /** How long a completed warmUp keeps the HAL considered warm. Collapses
+         *  the onCreate warmup and the per-bind AIDL warmUp() into one on boot. */
+        private const val WARMUP_VALID_MS = 60_000L
+
+        /** Cap on the warmup's throwaway RAW frame. Short on purpose: a cold-HAL
+         *  drop here is the expected case we are absorbing, not something to wait
+         *  out. Real captures use their own (much longer) burst timeout. */
+        private const val WARMUP_RAW_TIMEOUT_MS = 3000L
+
+        /** AE budget for the warmup only (vs [AE_WARMUP_MS] for a real capture).
+         *  The warmup blocks the shared camera handler for its whole duration, so
+         *  it is deliberately capped well below the real one. */
+        private const val WARMUP_AE_MS = 1500L
+
         /** Bounded in-session retries for a demosaic that threw (path b in
          *  [enqueueProcess]). A demosaic failure is almost always transient RAM/CPU
          *  contention (a 2nd photo + the rPPG stream), so a short delay then a retry
@@ -186,6 +241,66 @@ class RawStillCapturer(
          *  raw (e.g. genuinely corrupt) cannot re-enqueue forever -- after the cap we
          *  leave the raw sidecar on disk so the next process-start [resumePending]
          *  picks it up, rather than burning the CPU in a tight retry loop. */
+        /** Max photos queued (in flight + waiting) before further presses are
+         *  rejected.
+         *
+         *  Sized from measured peaks, not intuition. Each queued photo carries
+         *  ~120MB of pixel arrays through demosaic+denoise, and GC cannot keep
+         *  up when passes overlap:
+         *    queue 6 -> peaked 248MB, killed (lost ALL six)
+         *    queue 3 -> peaked 302MB, killed ~2-3 runs in 10
+         *    queue 2 -> peaks ~200MB, survives
+         *  lmkd starts taking this priv-app (adj 100) around 270MB on this
+         *  1.8GB device, so 2 is the honest ceiling. Rejecting the third press
+         *  costs one photo; not rejecting it costs the process and every photo
+         *  already queued. */
+        private const val MAX_PENDING_PHOTOS = 2
+
+        /** Cap on waiting for the previous capture to release its camera
+         *  buffers. A capture is ~5s (burst + RAW write), so this covers a full
+         *  queue; past it we proceed rather than drop the user's photo. */
+        private const val CAMERA_SERIALISE_MAX_MS = 20_000L
+
+        /** Cap on waiting for the camera software lock before giving up on a
+         *  photo. Never proceed without it: two concurrent camera bodies are far
+         *  worse than one dropped shot. */
+        private const val BUSY_ACQUIRE_MAX_MS = 15_000L
+
+        /** Cap on how long the BACKGROUND processor defers to the capture queue.
+         *
+         *  Generous ON PURPOSE. A capture is ~4-5s, and the cap must cover a
+         *  full queue of them plus the camera settling, or processing resumes
+         *  mid-queue and its ~85MB working set lands on top of a capture's
+         *  ~120MB -- measured 291-331MB peaks and lmkd kills at ~270MB.
+         *
+         *  Waiting is nearly free here: the RAW is already durable on disk, so
+         *  the only cost of deferring is that the final denoised JPEG appears
+         *  later. Being killed costs the photo outright. */
+        private const val PROCESS_YIELD_MAX_MS = 120_000L
+        private const val PROCESS_YIELD_POLL_MS = 100L
+
+        /** Wait before touching a crash-resume backlog, so recovery does not land
+         *  on the process-start memory peak (camera warmup + SCRFD/QNN init) and
+         *  re-trigger the kill that created the backlog. Shorter now that
+         *  [yieldToCapture] also protects the live path -- this only has to clear
+         *  startup, not an arbitrary capture. */
+        private const val RESUME_START_DELAY_MS = 6_000L
+
+        /** Spacing between multiple recovered photos, so a backlog drains one at
+         *  a time instead of dogpiling. One full pass is ~23s. */
+        private const val RESUME_STAGGER_MS = 25_000L
+
+        /** Bounded in-session retries for a failed denoise (OOM being the case
+         *  this exists for). Same shape as the demosaic retry: the raw sidecar
+         *  stays on disk, so a retry can still produce the colour photo instead
+         *  of stranding it until the next process start. */
+        private const val DENOISE_RETRY_MAX = 3
+
+        /** Longer than the demosaic backoff: a denoise failure usually means the
+         *  device is out of memory, and the retry needs time for the pressure
+         *  (typically a concurrent capture) to clear. */
+        private const val DENOISE_RETRY_DELAY_MS = 8000L
+
         private const val DEMOSAIC_RETRY_MAX = 3
 
         /** Delay before a bounded demosaic retry, giving the contending denoise /
@@ -240,6 +355,78 @@ class RawStillCapturer(
      */
     private val denoiseInFlight = java.util.concurrent.atomic.AtomicInteger(0)
 
+    /** Photos enqueued for demosaic+denoise and not yet finished. No longer
+     *  gates the shutter (capture has absolute priority), but it DOES gate the
+     *  post-capture heap collection -- collecting while work is still queued
+     *  would stall it. Incremented at ENQUEUE so queued-but-not-started work is
+     *  visible. */
+    private val processBacklog = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * Captures currently holding camera buffers (~170MB each).
+     *
+     * The background demosaic/denoise worker checks this BETWEEN its stages and
+     * pauses while it is non-zero, so heavy processing never overlaps a capture
+     * on this 1.8GB device. The capture itself never waits: the user is holding
+     * still with the shutter pressed, so the deferrable side is the background.
+     */
+    private val captureInFlight = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** True while a shutter-initiated capture is holding camera buffers. */
+    private fun isCaptureInFlight(): Boolean = captureInFlight.get() > 0
+
+    /**
+     * Burst length the LAST capture actually metered, used to predict the next
+     * capture's ImageReader depth.
+     *
+     * Depth cannot be chosen from the scene (the reader must exist before AE
+     * runs), but each buffer is 24.4MB of DMA-BUF -- so always reserving the
+     * maximum wastes ~49MB per capture in the common single-frame case. The
+     * previous shot is a good predictor: lighting rarely changes between two
+     * presses seconds apart. Starts at the full default so the very first
+     * capture after start is never under-provisioned.
+     */
+    private val lastMeteredBurstN = java.util.concurrent.atomic.AtomicInteger(BURST_N)
+
+    /**
+     * Park the background processor while a capture is in flight, so a heavy
+     * stage never allocates on top of the capture's ~170MB.
+     *
+     * Called BETWEEN processing stages, never inside one -- a partially
+     * completed demosaic cannot be suspended. Bounded so a stuck capture flag
+     * can never wedge the queue permanently; past the cap we proceed and accept
+     * the memory pressure rather than strand the user's photo forever.
+     */
+    private fun yieldToCapture(stage: String) {
+        // Wait for the ENTIRE capture queue to drain, not just the one capture
+        // currently holding buffers.
+        //
+        // This is the user's stated requirement: "all user's presses must flush
+        // and go through initial capture first in high priority before others
+        // get their demosaics". It is also the only thing that fits the memory
+        // budget. Measured: one capture peaks ~200MB, but a capture overlapping
+        // another photo's processing peaks 302-331MB, and lmkd takes this
+        // priv-app (adj 100) somewhere around 270MB on this 1.8GB device.
+        //
+        // photoPending counts presses whose camera work has not finished, so
+        // waiting on it serialises "all captures, then all processing" -- the
+        // user holds still once, and the heavy work happens afterwards.
+        //
+        // Also covers warmUp, which holds a full-res RAW reader plus the
+        // SCRFD/QNN init (~228MB native at process start).
+        fun busy(): Boolean = isCaptureInFlight() || warmUpInFlight || photoPending > 0
+        if (!busy()) return
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        while (busy() &&
+            android.os.SystemClock.elapsedRealtime() - t0 < PROCESS_YIELD_MAX_MS
+        ) {
+            try { Thread.sleep(PROCESS_YIELD_POLL_MS) }
+            catch (_: InterruptedException) { Thread.currentThread().interrupt(); return }
+        }
+        Log.i(TAG, "process yielded ${android.os.SystemClock.elapsedRealtime() - t0}ms " +
+            "to capture before $stage (pending=$photoPending inFlight=${captureInFlight.get()})")
+    }
+
     /** True while >= 1 heavy denoise is running. CameraSession consults this (via
      *  denoiseInFlightProvider) to decide whether the rPPG stream may run. */
     fun isDenoiseInFlight(): Boolean = denoiseInFlight.get() > 0
@@ -253,6 +440,16 @@ class RawStillCapturer(
      * no-op so the class compiles standalone.
      */
     @Volatile var onDenoiseStateChanged: () -> Unit = {}
+
+    /**
+     * Bracket a silent (no privacy-LED) camera open. Wired by CaptureService to
+     * its ref-counted cameraLedGate; kept as plain lambdas so this class has no
+     * compile-time dependency on CaptureService. Used by [warmUp], which opens
+     * the camera with no user action behind it and so must not light the LED.
+     * Defaults are no-ops so the class compiles standalone.
+     */
+    @Volatile var acquireSilentLed: () -> Unit = {}
+    @Volatile var releaseSilentLed: () -> Unit = {}
 
     /**
      * Count of func-button photos that have been requested but whose camera/session
@@ -271,6 +468,19 @@ class RawStillCapturer(
      */
     @Volatile private var photoPending = 0
     private val photoPendingLock = Any()
+
+    /** elapsedRealtime of the last accepted [warmUp], 0 = never. Guarded by
+     *  [warmUpLock] so concurrent binder + onCreate calls collapse to one. */
+    private var lastWarmUpMs = 0L
+    private val warmUpLock = Any()
+
+    /** True while [warmUpBody] holds its RAW ImageReader + camera session.
+     *  Startup warmup peaks the process at ~228MB native; a capture starting in
+     *  that window adds ~170MB on top and gets the process OOM-killed (measured:
+     *  357MB, lmkd kill, preview vanished mid-flight). The gate in takePhoto
+     *  waits this out. */
+    @Volatile private var warmUpInFlight = false
+
 
     /**
      * Two-phase capture:
@@ -301,16 +511,88 @@ class RawStillCapturer(
         // FIFO executor and NEVER abort on busy -- at worst the photo waits for the single
         // ReID frame already in flight (busy set by it), then runs; no new ReID frame can
         // be admitted while photoPending > 0.
-        synchronized(photoPendingLock) { photoPending++ }
+        // BOUND THE QUEUE. Each queued photo will allocate ~120-170MB of camera
+        // buffers when it runs, and nothing else caps how many can be waiting:
+        // 6 presses in 1.5s stacked photoPending to 6, drove the process to
+        // 248MB and lmkd killed it -- losing ALL SIX. Dropping the excess press
+        // costs the user one photo; not dropping it costs them every photo plus
+        // the process. Rejected presses return an error so the UI can clear its
+        // placeholder instead of spinning forever.
+        val queued = synchronized(photoPendingLock) {
+            if (photoPending >= MAX_PENDING_PHOTOS) {
+                -1
+            } else {
+                ++photoPending
+            }
+        }
+        if (queued < 0) {
+            Log.w(TAG, "takePhoto REJECTED: $MAX_PENDING_PHOTOS photos already queued")
+            try { onPreview(null, IllegalStateException("capture queue full")) } catch (_: Throwable) {}
+            return@section
+        }
         Log.i(TAG, "takePhoto entry busy=${busy.get()} photoPending=$photoPending")
         executor.execute {
             // Acquire busy by waiting, not aborting. On the single-thread FIFO executor
             // any in-flight ReID frame has already run to completion before this body
             // starts, so compareAndSet succeeds immediately. The spin is a belt-and-braces
             // guard for the theoretical case where busy is held by a non-executor path.
+            // Do NOT break out of this on interrupt: proceeding without owning
+            // `busy` would let two camera bodies run concurrently. Bounded, then
+            // fail the photo cleanly rather than racing the camera.
+            var busyWaitMs = 0L
             while (!busy.compareAndSet(false, true)) {
-                try { Thread.sleep(5) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+                if (busyWaitMs >= BUSY_ACQUIRE_MAX_MS) {
+                    Log.e(TAG, "takePhoto: busy not released after ${busyWaitMs}ms; dropping photo")
+                    synchronized(photoPendingLock) { if (photoPending > 0) photoPending-- }
+                    onPreview(null, IllegalStateException("camera busy"))
+                    return@execute
+                }
+                try { Thread.sleep(5) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+                busyWaitMs += 5
             }
+            // SERIALISE THE CAMERA BUFFERS.
+            //
+            // Each capture's ImageReader reserves burstCap full-res RAW buffers
+            // -- 24.4MB of DMA-BUF each, so 73MB at depth 3 (which a dark scene
+            // genuinely needs: measured `scene light=0.0` -> n=3). Two captures
+            // holding readers at once is ~146MB of DMA-BUF before a single Java
+            // array is counted, and the process is lmkd-killed at ~260-300MB.
+            //
+            // Measured repeatedly: the kill lands the instant a second
+            // doCapture() starts while the first still owns its reader, with NO
+            // processing running at all. So the second capture waits for the
+            // first to release -- which is quick (~5s: the burst plus writing
+            // the RAW to disk), and is exactly the "flush captures first"
+            // ordering the user asked for.
+            //
+            // This does NOT make the user hold still longer for their own shot:
+            // the wait is between shots, and the shutter for press #2 was always
+            // going to queue behind press #1's camera access anyway.
+            val tCam = android.os.SystemClock.elapsedRealtime()
+            while (isCaptureInFlight() &&
+                android.os.SystemClock.elapsedRealtime() - tCam < CAMERA_SERIALISE_MAX_MS
+            ) {
+                try { Thread.sleep(20) }
+                catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+            }
+            val camWaitMs = android.os.SystemClock.elapsedRealtime() - tCam
+            if (camWaitMs > 20) Log.i(TAG, "capture waited ${camWaitMs}ms for previous capture's buffers")
+
+            // CAPTURE HAS ABSOLUTE PRIORITY over background PROCESSING.
+            //
+            // The user is standing still with the shutter pressed: every second
+            // spent here is a second they must hold the scene. An earlier version
+            // gated the capture on the processing backlog to bound memory, and it
+            // made the user wait 15.8s -- unacceptable, and backwards. The right
+            // trade is the opposite: the BACKGROUND yields to the capture.
+            //
+            // Memory is still bounded, but from the other side: captureInFlight
+            // makes the demosaic/denoise worker pause between stages (see the
+            // yieldToCapture() calls in enqueueProcess), so the heavy
+            // ~170MB capture allocation does not overlap a heavy processing
+            // stage. Processing is deferrable; the user's shutter is not.
+            captureInFlight.incrementAndGet()
+            try {
             val t0 = android.os.SystemClock.elapsedRealtime()
             val burst: BurstResult
             // Wrap onPreview so it fires exactly once -- either from the fast-path
@@ -319,6 +601,15 @@ class RawStillCapturer(
             val previewFired = java.util.concurrent.atomic.AtomicBoolean(false)
             val onPreviewOnce: (File?, Throwable?) -> Unit = { f, e ->
                 if (previewFired.compareAndSet(false, true)) onPreview(f, e)
+            }
+            // Once-guarded ACROSS retries. onShutterDone fires after captureLatch
+            // but BEFORE the merge await, so a merge timeout can still throw and
+            // retry after the checkmark already showed -- without this guard the
+            // UI would get a second "photo taken, you can move now" for the same
+            // user-visible shot.
+            val shutterFired = java.util.concurrent.atomic.AtomicBoolean(false)
+            val onShutterOnce: () -> Unit = {
+                if (shutterFired.compareAndSet(false, true)) onShutterDone()
             }
             // BOUNDED BURST RETRY. On a cold camera (first capture after boot) the
             // Qualcomm HAL transiently runs out of a sensor/CSIPHY resource during
@@ -345,7 +636,7 @@ class RawStillCapturer(
                     // else: swallow this attempt's failure, we will retry
                 }
                 try {
-                    captured = captureBurst(attemptPreview, t0, onShutterDone)
+                    captured = captureBurst(attemptPreview, t0, onShutterOnce)
                     break
                 } catch (e: Throwable) {
                     lastErr = e
@@ -395,7 +686,24 @@ class RawStillCapturer(
             }
             // `burst` (holding avg) is now unreferenced past this point and GC-eligible;
             // the disk sidecar is the only copy of the raw from here on.
+            //
+            // RECLAIM IT NOW rather than waiting for the collector to notice.
+            // This capture just churned ~120MB of short/int arrays through the
+            // Java heap; the next queued press allocates its own set within
+            // milliseconds. Measured mid-burst: Dalvik heap at 146MB against a
+            // 102MB capacity -- i.e. the previous capture's arrays were still
+            // resident when the next one started, and lmkd killed the process.
+            // An explicit collect between captures costs a few ms on a thread
+            // the user is not waiting on (the RAW is already safely on disk) and
+            // removes that overlap.
+            System.gc()
             enqueueProcess(rawFile, onPreviewOnce, onFinal, t0)
+            } finally {
+                // Camera-side work for this photo is done (success or failure), so
+                // the background processor may resume its heavy stages. Must cover
+                // every exit path or processing would stall until the next capture.
+                captureInFlight.decrementAndGet()
+            }
         }
     }
 
@@ -533,7 +841,15 @@ class RawStillCapturer(
         onResumed: ((File) -> Unit)? = null,
         attempt: Int = 0,
     ) {
+        // Counted at ENQUEUE, not at execution start: the memory gate has to see
+        // work that is queued-but-not-yet-running, otherwise several captures
+        // race past the gate while the executor is still on the first one.
+        processBacklog.incrementAndGet()
         processExecutor.execute process@{
+            try {
+            // Yield BEFORE reading the raw (~24MB) -- the first heavy allocation
+            // of this pass. A capture in flight owns the memory budget.
+            yieldToCapture("raw read")
             val burst = readPendingRaw(rawFile) ?: run {
                 // Corrupt/missing raw already logged + deleted in readPendingRaw.
                 // Color is UNRECOVERABLE (no raw left to demosaic), and the on-disk
@@ -548,6 +864,17 @@ class RawStillCapturer(
             val file = burst.out
             val binned: Bitmap
             try {
+                // Demosaic is the longest stage (~15s) and allocates the full-res
+                // bitmaps. Yield again here: a shutter press that arrived while
+                // the raw was being read must not have this land on top of it.
+                yieldToCapture("demosaic")
+                // Reclaim the PREVIOUS photo's arrays before allocating this
+                // one's. Collecting only at the very end of a pass was not
+                // enough: two overlapping photos each peaked (live measured at
+                // 148MB) before anything was freed, and lmkd killed the process
+                // at 275-281MB. This is the cheapest point to do it -- the raw
+                // is on disk, the bitmaps are not allocated yet.
+                HeapTrimmer.collect()
                 binned = GT.section("cap.raw.demosaic") { demosaicBurst(burst) }
                 // Fast preview should already have fired from frame 0 for live photos.
                 // If it did not (fast-preview path threw), deliver it now from the
@@ -594,9 +921,9 @@ class RawStillCapturer(
             // flag is a non-persist sysprop, so it resets on reboot.
             if (skipDenoise()) {
                 try {
-                    FileOutputStream(file).use { binned.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it) }
+                    val ok = writeJpegAtomic(file, binned, JPEG_QUALITY)
                     binned.recycle()
-                    stampExifOrientationNormal(file)
+                    if (!ok) throw IllegalStateException("skip_denoise publish failed")
                     if (!rawFile.delete()) Log.w(TAG, "pending raw delete failed ${rawFile.absolutePath}")
                     Log.i(TAG, "skip_denoise=1: using undenoised demosaic as final ${file.absolutePath} totalMs=${android.os.SystemClock.elapsedRealtime() - t0}")
                     onFinal(file, null)
@@ -616,16 +943,36 @@ class RawStillCapturer(
             // ALWAYS decrements (success, denoise-failure, or any exception/OOM-
             // survivable error) + notifies so the stream rebuilds afterwards. The
             // ~17s demosaic above is deliberately NOT gated.
+            // Last yield before the denoise: it holds the QNN engine plus two
+            // full-res bitmaps, so it is the worst stage to overlap a capture.
+            yieldToCapture("denoise")
+            // Collect the demosaic's intermediates BEFORE the denoise allocates
+            // its output bitmap and tile buffers. Measured: at the peak of a
+            // single pass, live is 121MB but a collect takes it to 49MB -- i.e.
+            // ~72MB of the 202MB peak is garbage ART simply had not got to yet.
+            // Freeing it here is what keeps the pass under lmkd's threshold
+            // (~270MB for this adj-100 priv-app on a 1.8GB device).
+            HeapTrimmer.collect()
             denoiseInFlight.incrementAndGet()
             try { onDenoiseStateChanged() } catch (_: Throwable) {}
             try {
             GT.section("cap.raw.denoise") {
                 try {
                     val tD = android.os.SystemClock.elapsedRealtime()
-                    val denoised = SplitterDenoiser.get(context).denoise(binned)
-                    FileOutputStream(file).use { denoised.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it) }
+                    val denoiser = SplitterDenoiser.get(context)
+                    // Let the denoise pause BETWEEN TILES while a capture holds
+                    // camera buffers. Yielding only before the stage was not
+                    // enough: a denoise already running when the shutter is
+                    // pressed would otherwise overlap the capture's ~170MB.
+                    denoiser.pauseCheck = { yieldToCapture("denoise tile") }
+                    val denoised = try {
+                        denoiser.denoise(binned)
+                    } finally {
+                        denoiser.pauseCheck = null
+                    }
+                    val ok = writeJpegAtomic(file, denoised, JPEG_QUALITY)
                     denoised.recycle()
-                    stampExifOrientationNormal(file)
+                    if (!ok) throw IllegalStateException("final publish failed")
                     // Cleanup: the full-res color JPEG is on disk, so the raw backlog
                     // entry is done. Delete the sidecar so it is not reprocessed.
                     if (!rawFile.delete()) Log.w(TAG, "pending raw delete failed ${rawFile.absolutePath}")
@@ -633,11 +980,33 @@ class RawStillCapturer(
                     onFinal(file, null)
                     onResumed?.invoke(file)
                 } catch (e: Throwable) {
-                    Log.e(TAG, "process denoise failed: ${e.message}")
-                    // Denoise failed but demosaic succeeded -- the gray preview is still on
-                    // disk. Leave the raw so a future resume can retry rather than stranding
-                    // the photo as gray forever.
-                    onFinal(file, e)
+                    Log.e(TAG, "process denoise failed (attempt=$attempt): ${e.message}")
+                    // Denoise failed but demosaic succeeded -- the gray preview is still
+                    // on disk. NEVER sync that (the phone must not get a gray image);
+                    // leave the raw so the colour photo can still be produced.
+                    //
+                    // Retry in-session, bounded, mirroring the demosaic path. An OOM
+                    // kill is the motivating case: the raw survives on disk, but
+                    // waiting for the next process start to notice it can strand the
+                    // photo indefinitely if the user never shoots again. Free the
+                    // denoise engine first so the retry starts from a clean heap
+                    // rather than re-failing against the same exhausted memory.
+                    if (!binned.isRecycled) binned.recycle()
+                    SplitterDenoiser.release()
+                    if (attempt + 1 < DENOISE_RETRY_MAX) {
+                        Log.w(TAG, "scheduling denoise retry ${attempt + 2}/$DENOISE_RETRY_MAX for ${rawFile.name} in ${DENOISE_RETRY_DELAY_MS}ms")
+                        try {
+                            retryScheduler.schedule({
+                                enqueueProcess(rawFile, onPreviewOnce, onFinal, t0, onResumed, attempt + 1)
+                            }, DENOISE_RETRY_DELAY_MS, TimeUnit.MILLISECONDS)
+                        } catch (re: Throwable) {
+                            Log.w(TAG, "denoise retry schedule failed: ${re.message}")
+                            onFinal(file, e)
+                        }
+                    } else {
+                        Log.e(TAG, "denoise retries exhausted for ${rawFile.name}; leaving raw for next process-start resume")
+                        onFinal(file, e)
+                    }
                 }
             }
             } finally {
@@ -645,6 +1014,26 @@ class RawStillCapturer(
                 // even if denoise threw or the process was killed mid-write.
                 denoiseInFlight.decrementAndGet()
                 try { onDenoiseStateChanged() } catch (_: Throwable) {}
+            }
+            } finally {
+                // Release the memory gate on EVERY exit path (success, unreadable
+                // raw, demosaic failure, retry scheduled), or a capture would
+                // wait out the full gate timeout for work that already finished.
+                processBacklog.decrementAndGet()
+                // Hand the now-garbage pixel arrays back to the OS.
+                //
+                // This is what makes the process survivable between shots. ART
+                // grows the Dalvik heap to fit a capture (~120MB of short/int
+                // arrays) and then KEEPS that capacity: measured 134MB of heap
+                // held while IDLE with only 25MB actually live. lmkd scores
+                // adj*size and this priv-app runs at adj 100, so an idle process
+                // that still looks like 178MB is picked off the moment the
+                // device tightens -- which is the residual "sometimes crashes"
+                // after all the correctness fixes. System.gc() alone collects
+                // but does NOT return the pages; the trim call does.
+                if (processBacklog.get() == 0 && !isCaptureInFlight()) {
+                    HeapTrimmer.collect()
+                }
             }
         }
     }
@@ -669,21 +1058,48 @@ class RawStillCapturer(
         if (raws.size > PENDING_RUNAWAY_WARN) {
             Log.w(TAG, "resumePending: ${raws.size} pending raws (> $PENDING_RUNAWAY_WARN) -- possible runaway backlog")
         }
-        Log.i(TAG, "resumePending: re-enqueueing ${raws.size} leftover raw(s)")
+        Log.i(TAG, "resumePending: re-enqueueing ${raws.size} leftover raw(s) " +
+            "after ${RESUME_START_DELAY_MS}ms settle")
         // Oldest first so recovered photos finish in capture order.
+        //
+        // DELAYED + STAGGERED, deliberately. A resume runs at process start,
+        // which is exactly when the process is at its heaviest (camera warmup +
+        // SCRFD/QNN init, ~228MB native). Enqueuing a demosaic+denoise straight
+        // into that window pushed the process back over lmkd's limit and it was
+        // killed again -- which left the raw on disk, so the NEXT start resumed
+        // it and died again. Measured as a restart cascade that also took down
+        // the listener and filesync each round.
+        //
+        // Letting startup settle first, and spacing multiple recoveries, keeps
+        // recovery off the startup peak. Recovery is inherently not urgent: the
+        // photo is already safe on disk.
+        var delayMs = RESUME_START_DELAY_MS
         for (rawFile in raws.sortedBy { it.lastModified() }) {
             val t0 = android.os.SystemClock.elapsedRealtime()
-            enqueueProcess(
-                rawFile,
-                onPreviewOnce = { _, _ -> },
-                onFinal = { _, _ -> },
-                t0 = t0,
-                onResumed = { file ->
-                    Log.i(TAG, "resumePending: re-syncing recovered photo ${file.absolutePath}")
-                    onResumedPhotoProcessed(file)
-                },
-            )
+            val thisDelay = delayMs
+            delayMs += RESUME_STAGGER_MS
+            try {
+                retryScheduler.schedule({
+                    enqueueProcessResume(rawFile, t0)
+                }, thisDelay, TimeUnit.MILLISECONDS)
+            } catch (e: Throwable) {
+                Log.w(TAG, "resume schedule failed: ${e.message}")
+            }
         }
+    }
+
+    /** The actual resume enqueue, deferred by [resumePending]. */
+    private fun enqueueProcessResume(rawFile: File, t0: Long) {
+        enqueueProcess(
+            rawFile,
+            onPreviewOnce = { _, _ -> },
+            onFinal = { _, _ -> },
+            t0 = t0,
+            onResumed = { file ->
+                Log.i(TAG, "resumePending: re-syncing recovered photo ${file.absolutePath}")
+                onResumedPhotoProcessed(file)
+            },
+        )
     }
 
     /**
@@ -713,26 +1129,119 @@ class RawStillCapturer(
             ?.getOffsetForIndex(0, 0) ?: 64).toFloat()
         val whiteLevel = (chars.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: 1023).toFloat()
         val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 270
-        Log.i(TAG, "doCapture ${w}x${h} burstN=$BURST_N black=$blackLevel white=$whiteLevel (AE_ON warmup then LOCK)")
+        // Burst length is chosen AFTER the AE warmup, from the exposure the HAL
+        // settles on (see [burstNForScene]) -- a bright scene needs no averaging,
+        // a dim one does. But the ImageReader has to exist BEFORE that, because
+        // its surface is part of the capture session AE runs on. So allocate for
+        // the worst case and only request as many frames as the scene needs.
+        // (Buffer count matches the old fixed default, so no memory regression.)
+        // Reader depth = how many full-res RAW buffers we reserve. Each is
+        // 24.4MB of DMA-BUF, so a depth-3 reader costs 73MB per capture EVEN
+        // WHEN THE SCENE ONLY NEEDS ONE FRAME -- and in any decent light
+        // burstNForScene picks n=1, so two of the three are never written.
+        //
+        // Two overlapping captures at depth 3 is ~146MB of DMA-BUF alone, which
+        // is what pushed the process to 284MB and got it lmkd-killed with no
+        // processing even running (measured 20:14:56).
+        //
+        // The scene cannot be metered before the reader exists, so use the
+        // PREVIOUS capture's answer as the prediction: lighting rarely changes
+        // between two presses seconds apart. Reserve one spare frame above it
+        // for headroom, clamped to the configured cap. If the prediction is too
+        // low the burst simply captures fewer frames than ideal (slightly more
+        // noise) -- never a failure, and far better than an OOM kill.
+        val cap = burstNCap()
+        val predicted = (lastMeteredBurstN.get() + 1).coerceIn(1, cap)
+        val burstCap = predicted
+        // Actual frame count for this shot; set once AE has reported. The image
+        // listener latches on this, and the divisor is the count actually summed.
+        val burstTarget = java.util.concurrent.atomic.AtomicInteger(burstCap)
+        // AE's settled exposure/gain, published by the warmup for the metering
+        // step below. 0 = AE never converged -> keep the full burst.
+        val aeIso = java.util.concurrent.atomic.AtomicInteger(0)
+        val aeExpNs = java.util.concurrent.atomic.AtomicLong(0L)
+        Log.i(TAG, "doCapture ${w}x${h} burstCap=$burstCap black=$blackLevel white=$whiteLevel (AE_ON warmup then LOCK)" +
+            " isoRange=${chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)}" +
+            " expRange=${chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)}")
 
-        // Accumulator for burst averaging. Each sample <= whiteLevel (~1023),
-        // BURST_N=3 -> sum <= 3069, fits comfortably in int32.
-        val acc = IntArray(w * h)
+        // Burst accumulation, allocated LAZILY.
+        //
+        // The common case on this device is burstN==1 (any decently lit scene),
+        // and for a single frame an int32 accumulator is pure waste: a 48.8MB
+        // copy of a 24.4MB frame that is then divided by 1. On a 1.8GB device
+        // that alone was enough to get the capture process OOM-killed mid-shot.
+        //
+        // So: keep frame 0 as a ShortArray, and only materialise the int32
+        // accumulator if a second frame actually turns up. Peak drops from
+        // ~195MB to ~122MB for the single-frame path.
+        var first: ShortArray? = null      // frame 0, kept verbatim
+        var acc: IntArray? = null          // sum of frames, only if burstN > 1
         val received = java.util.concurrent.atomic.AtomicInteger(0)
         val imageLatch = CountDownLatch(1)
         val frameErr = arrayOfNulls<Throwable>(1)
 
-        // RAW reader holds the BURST_N burst frames. No separate metering frame:
+        // RAW reader holds all burstN burst frames. No separate metering frame:
         // metering off a distinct RAW frame faults the HAL FD pipeline (~20% photo
         // failure), so the burst captures at comp=0 (always-works) and DRO is measured
         // from the burst's own averaged RAW after the fact (zero extra frames).
-        val reader = ImageReader.newInstance(w, h, ImageFormat.RAW_SENSOR, BURST_N)
+        val reader = ImageReader.newInstance(w, h, ImageFormat.RAW_SENSOR, burstCap)
+        // Set once the body is done with this reader. The listener checks it
+        // before acquiring: after abortCaptures() the HAL can still deliver
+        // surplus frames, and acquireNextImage() on a CLOSED ImageReader throws
+        // IllegalStateException rather than returning null. That throw lands on
+        // the RawStill-cb HandlerThread with no handler above it, which kills
+        // the whole capture process -- the exact "two presses in 1s crashes"
+        // report: press #2 short-circuits press #1's burst, the abort fires, and
+        // the surplus frames race reader.close().
+        val readerClosed = java.util.concurrent.atomic.AtomicBoolean(false)
+        // Callbacks currently touching the reader's NATIVE buffers. The teardown
+        // waits for this to hit zero before closing, so the buffer can never be
+        // unmapped while a memcpy is running inside it (see the SIGSEGV note in
+        // the listener body).
+        val callbacksInFlight = java.util.concurrent.atomic.AtomicInteger(0)
         reader.setOnImageAvailableListener({ r ->
-            val img = r.acquireNextImage() ?: run {
+            // INCREMENT BEFORE CHECKING -- this ordering is the whole point.
+            //
+            // Checking first and incrementing after leaves a hole: this thread
+            // could read readerClosed=false, be preempted, the teardown then
+            // observes callbacksInFlight==0 and closes the reader, and we resume
+            // into a memcpy on unmapped memory. Incrementing first makes it a
+            // Dekker-style handshake -- either the teardown sees our increment
+            // and waits, or we see its flag and bail. One of the two must hold.
+            callbacksInFlight.incrementAndGet()
+            try {
+            if (readerClosed.get()) return@setOnImageAvailableListener
+            // EVERYTHING from acquire onwards is guarded: a throw here is fatal
+            // to the process, and nothing this listener does is worth that.
+            val img = try {
+                r.acquireNextImage()
+            } catch (e: Throwable) {
+                Log.w(TAG, "acquireNextImage failed (reader closing?): ${e.message}")
+                null
+            } ?: run {
                 Log.w(TAG, "acquireNextImage null")
                 return@setOnImageAvailableListener
             }
             try {
+                // NATIVE USE-AFTER-FREE GUARD.
+                //
+                // A surplus frame's callback can be mid-`get()` while the body's
+                // finally closes the reader. The ImageReader's native buffer is
+                // then unmapped underneath the copy and memcpy segfaults inside
+                // SetShortArrayRegion -- an unrecoverable SIGSEGV, not a Java
+                // exception, so no catch block can save the process. Confirmed by
+                // tombstone: `signal 11 (SIGSEGV) ... __memcpy ... ShortBuffer.get
+                // ... captureBurst$lambda`, on thread RawStill-cb.
+                //
+                // Re-check the flag immediately before touching native memory:
+                // the acquire above may have succeeded microseconds before the
+                // close. This is a race we can narrow but not eliminate in Kotlin
+                // alone, which is why the teardown ALSO drops the listener and
+                // marks readerClosed before calling reader.close().
+                if (readerClosed.get()) {
+                    Log.w(TAG, "reader closed mid-callback; dropping frame before native read")
+                    return@setOnImageAvailableListener
+                }
                 val buf = img.planes[0].buffer
                 val shorts = ShortArray(buf.remaining() / 2)
                 buf.asShortBuffer().get(shorts)
@@ -745,7 +1254,34 @@ class RawStillCapturer(
                 // accumulate for the full-fidelity denoised result.
                 val isFirst = received.get() == 0
                 if (isFirst) {
-                    val frame0 = shorts.copyOf()
+                    // Decide the burst length from THIS frame's actual pixels
+                    // combined with AE's exposure/gain. Must happen before the
+                    // accumulate below, so the latch target is correct by the
+                    // time `done` is compared against it.
+                    val iso = aeIso.get()
+                    val expNs = aeExpNs.get()
+                    // Clamped to burstCap = the reader's actual depth. The depth
+                    // is a PREDICTION from the previous shot, so a scene that
+                    // suddenly got darker could meter more frames than we have
+                    // buffers for -- and waiting for a frame the reader can
+                    // never deliver would hang the capture until its timeout.
+                    // Fewer frames means slightly more noise; a hang means no
+                    // photo at all.
+                    val chosen = if (iso > 0 && expNs > 0L) {
+                        val amb = RawDemosaic.ambientLevel(shorts, w, h, blackLevel, whiteLevel)
+                        burstNForScene(iso, expNs, amb, burstCap)
+                    } else {
+                        burstCap  // AE never converged -> use everything we reserved
+                    }
+                    burstTarget.set(chosen)
+                    // Feed the next capture's reader-depth prediction.
+                    lastMeteredBurstN.set(chosen)
+                    Log.i(TAG, "burst length: n=$chosen readerDepth=$burstCap")
+                    // No copy: `shorts` was freshly allocated from this Image's
+                    // buffer above and nothing else retains it, so the preview
+                    // worker can own it directly. Saves a 24.4MB duplicate on
+                    // the capture critical path.
+                    val frame0 = shorts
                     previewExecutor.execute {
                         try {
                             val tPrev = android.os.SystemClock.elapsedRealtime()
@@ -755,9 +1291,11 @@ class RawStillCapturer(
                             // preview is already roughly as bright as the DRO-corrected final.
                             // The final color JPEG (binToBitmap) carries the precise measured
                             // gain; the preview just gives an instant, already-bright proxy.
+                            val tDem = android.os.SystemClock.elapsedRealtime()
                             val gray = RawDemosaic.fastPreviewToBitmap(
                                 frame0, w, h, blackLevel, whiteLevel,
                             )
+                            val demMs = android.os.SystemClock.elapsedRealtime() - tDem
                             val rotM = android.graphics.Matrix().apply { postRotate(-90f) }
                             val rotated = Bitmap.createBitmap(gray, 0, 0, gray.width, gray.height, rotM, false)
                             if (rotated !== gray) gray.recycle()
@@ -768,11 +1306,13 @@ class RawStillCapturer(
                                 val th = (rotated.height * scale).toInt().coerceAtLeast(1)
                                 Bitmap.createScaledBitmap(rotated, tw, th, true)
                             } else rotated
-                            FileOutputStream(out).use { thumb.compress(Bitmap.CompressFormat.JPEG, PREVIEW_JPEG_QUALITY, it) }
+                            val tEnc = android.os.SystemClock.elapsedRealtime()
+                            val published = writeJpegAtomic(out, thumb, PREVIEW_JPEG_QUALITY)
                             if (thumb !== rotated && !thumb.isRecycled) thumb.recycle()
                             rotated.recycle()
-                            stampExifOrientationNormal(out)
-                            Log.i(TAG, "fastPreview done ${out.absolutePath} bytes=${out.length()} previewMs=${android.os.SystemClock.elapsedRealtime() - takePhotoStartMs} pathMs=${android.os.SystemClock.elapsedRealtime() - tPrev}")
+                            val encMs = android.os.SystemClock.elapsedRealtime() - tEnc
+                            if (!published) throw IllegalStateException("preview publish failed")
+                            Log.i(TAG, "fastPreview done ${out.absolutePath} bytes=${out.length()} previewMs=${android.os.SystemClock.elapsedRealtime() - takePhotoStartMs} pathMs=${android.os.SystemClock.elapsedRealtime() - tPrev} demosaicMs=$demMs encodeMs=$encMs")
                             onEarlyPreview(out, null)
                         } catch (e: Throwable) {
                             Log.e(TAG, "fastPreview failed: ${e.message}")
@@ -782,17 +1322,61 @@ class RawStillCapturer(
                         }
                     }
                 }
-                for (i in 0 until w * h) {
-                    acc[i] += (shorts[i].toInt() and 0xFFFF)
+                // Ignore anything beyond what the scene needs. The burst always
+                // REQUESTS the full count (the scene can only be metered from
+                // frame 0), so surplus frames are expected here; summing one
+                // without counting it -- or racing the divisor read -- would
+                // brighten the whole photo. Dropped here; the enclosing finally
+                // still closes the Image.
+                val target = burstTarget.get()
+                if (received.get() >= target) {
+                    Log.i(TAG, "burst RAW surplus frame ignored (have ${received.get()}/$target)")
+                } else {
+                    if (received.get() == 0) {
+                        // Frame 0: keep it verbatim. No accumulator yet -- if the
+                        // scene metered to a single frame, none is ever needed.
+                        first = shorts
+                    } else {
+                        // A second frame exists, so we really are averaging.
+                        // Materialise the accumulator now and seed it with frame 0.
+                        var a = acc
+                        if (a == null) {
+                            a = IntArray(w * h)
+                            val f = first
+                            if (f != null) {
+                                for (i in 0 until w * h) a[i] = f[i].toInt() and 0xFFFF
+                            }
+                            acc = a
+                            first = null   // released; the sum owns the data now
+                        }
+                        for (i in 0 until w * h) a[i] += (shorts[i].toInt() and 0xFFFF)
+                    }
+                    val done = received.incrementAndGet()
+                    Log.i(TAG, "burst RAW $done/$target accumulated")
+                    if (done >= target) imageLatch.countDown()
                 }
-                val done = received.incrementAndGet()
-                Log.i(TAG, "burst RAW $done/$BURST_N accumulated")
-                if (done == BURST_N) imageLatch.countDown()
             } catch (e: Throwable) {
                 frameErr[0] = e
                 imageLatch.countDown()
             } finally {
-                img.close()
+                // close() can itself throw if the reader was closed underneath
+                // us (surplus frame racing teardown). Swallow: an unhandled
+                // throw on this HandlerThread kills the capture process.
+                try { img.close() } catch (e: Throwable) {
+                    Log.w(TAG, "image close failed: ${e.message}")
+                }
+            }
+            } catch (e: Throwable) {
+                // Last line of defence. This lambda runs on a bare HandlerThread
+                // with nothing above it, so ANY escaping throwable kills the
+                // capture process outright.
+                Log.e(TAG, "image callback threw: ${e.message}", e)
+                frameErr[0] = e
+                imageLatch.countDown()
+            } finally {
+                // Diagnostic only: the close is posted to this same looper, so
+                // it cannot overlap a callback regardless of this count.
+                callbacksInFlight.decrementAndGet()
             }
         }, handler)
 
@@ -890,9 +1474,29 @@ class RawStillCapturer(
                         set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
                     }
                     session.capture(triggerReq.build(), cb, handler)
+                    // NOTE: do NOT shorten this on a "warm" camera. Tried it
+                    // (700ms budget when a capture converged recently): AE then
+                    // reported converged=false / aeState=5 (PRECAPTURE) and the
+                    // burst fired on an unsettled exposure -- exactly the
+                    // black-photo failure documented above. AE needs the full
+                    // budget to re-run its precapture sequence even when the
+                    // sensor is warm, because each capture builds a NEW session.
+                    // The preview latency win has to come from elsewhere (the
+                    // fast-preview demosaic, which is where it actually was).
                     val convergedOk = converged.await(AE_WARMUP_MS, TimeUnit.MILLISECONDS)
                     session.stopRepeating()
                     Log.i(TAG, "AE warmup: converged=$convergedOk aeState=${lastAeState.get()} exp=${lastExp.get() / 1_000_000.0}ms iso=${lastIso.get()}")
+
+                    // Publish AE's settled exposure/gain for the metering step.
+                    // The burst length is NOT decided here: AE metadata alone
+                    // cannot separate a lit room from a dark one on this HAL (see
+                    // burstNForScene). It is decided in the image listener, from
+                    // the first RAW frame's own pixels, once both halves of the
+                    // light equation are in hand.
+                    if (convergedOk) {
+                        aeIso.set(lastIso.get())
+                        aeExpNs.set(lastExp.get())
+                    }
                 }
                 val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                     addTarget(reader.surface)
@@ -904,12 +1508,19 @@ class RawStillCapturer(
                     set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, 0)
                 }
                 Log.i(TAG, "initial capture: AE_MODE_ON AWB_AUTO comp=0 (${AE_WARMUP_MS}ms warmup, digital DRO)")
-                val burstRequests = List(BURST_N) { builder.build() }
-                val captureLatch = CountDownLatch(BURST_N)
+                // Always REQUEST the full burst: the scene can only be metered
+                // from the first frame's pixels, which do not exist yet. The
+                // listener decides the real target the moment frame 0 lands and
+                // the extra frames are aborted below, so a bright scene still
+                // costs only its one frame of hold-still time.
+                val nFrames = burstCap
+                val burstRequests = List(nFrames) { builder.build() }
+                val captureLatch = CountDownLatch(nFrames)
                 val captureErr = arrayOfNulls<Throwable>(1)
                 // WB gains read from the last burst frame's result (stable across the
-                // 3-frame burst), written into the hoisted wbGainsOut so they survive
-                // the borrow; persisted with the raw so the disk demosaic matches.
+                // burst, whatever its length), written into the hoisted wbGainsOut so
+                // they survive the borrow; persisted with the raw so the disk
+                // demosaic matches.
                 val tBurst = android.os.SystemClock.elapsedRealtime()
                 session.captureBurst(burstRequests, object : CameraCaptureSession.CaptureCallback() {
                     override fun onCaptureCompleted(
@@ -931,25 +1542,91 @@ class RawStillCapturer(
                     ) {
                         captureErr[0] = IllegalStateException("capture failed reason=${failure.reason}")
                         captureLatch.countDown()
+                        // If every request is now accounted for and the frames the
+                        // scene needs still have not arrived, no further image can
+                        // come -- wake the body so it rethrows the REAL failure
+                        // immediately instead of sitting out the full frames
+                        // timeout and then reporting the wrong error.
+                        if (captureLatch.count == 0L && received.get() < burstTarget.get()) {
+                            imageLatch.countDown()
+                        }
                     }
                 }, handler)
-                if (!captureLatch.await(10, TimeUnit.SECONDS))
-                    throw IllegalStateException("burst capture timeout (remaining=${captureLatch.count})")
-                captureErr[0]?.let { throw it }
+                // Wait only for the frames this scene actually needs. imageLatch
+                // trips as soon as `received` reaches the metered target, so a
+                // bright scene stops here after frame 1 instead of sitting
+                // through all three -- that wait IS the user's hold-still time.
+                // It ALSO trips on a capture failure that can no longer produce
+                // the missing frames, so a dead burst fails fast instead of
+                // sitting out the full timeout.
+                if (!imageLatch.await(BURST_FRAMES_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+                    throw IllegalStateException("burst frames timeout (received=${received.get()}/${burstTarget.get()})")
+                frameErr[0]?.let { throw it }
+                // Did we get everything the scene needed? Decide BEFORE aborting:
+                // once enough frames are accumulated the shot is a success, and
+                // the abort below deliberately induces failures we must not
+                // mistake for real ones.
+                val gotEnough = received.get() >= burstTarget.get()
+                if (!gotEnough) captureErr[0]?.let { throw it }
+                // Drop any still-outstanding frames of the requested burst. The
+                // accumulator already has everything it will use; aborting stops
+                // the sensor now rather than making the user hold still for
+                // frames that would be discarded.
+                //
+                // NOTE: aborted requests come back through onCaptureFailed with
+                // REASON_FLUSHED and set captureErr. That is expected here and
+                // must NOT be rethrown -- doing so would fail a good photo and
+                // trigger a full BURST_RETRY. Hence the gotEnough check above,
+                // and no captureErr check after this point.
+                if (captureLatch.count > 0L) {
+                    try { session.abortCaptures() } catch (e: Exception) {
+                        Log.w(TAG, "abortCaptures failed: ${e.message}")
+                    }
+                    Log.i(TAG, "burst short-circuited: used ${received.get()}/$nFrames frames")
+                }
                 Log.i(TAG, "burst captured durMs=${android.os.SystemClock.elapsedRealtime() - tBurst}")
                 // All RAW frames are in hand -- the scene no longer needs to be held
                 // still. Signal "photo taken" so the UI can show the captured checkmark
                 // (the remaining demosaic/denoise work off the buffered frames).
                 try { onShutterDone() } catch (_: Throwable) {}
-                if (!imageLatch.await(30, TimeUnit.SECONDS))
-                    throw IllegalStateException("raw burst merge timeout (received=${received.get()}/$BURST_N)")
-                frameErr[0]?.let { throw it }
             } catch (e: Throwable) {
                 bodyErr[0] = e
                 throw e
             } finally {
+                // Order matters. Mark closed and DROP the listener before
+                // closing the reader, so a surplus frame still queued on the
+                // handler cannot call acquireNextImage() on a dead reader.
+                readerClosed.set(true)
+                try { reader.setOnImageAvailableListener(null, null) } catch (_: Exception) {}
                 try { session?.close() } catch (_: Exception) {}
-                try { reader.close() } catch (_: Exception) {}
+                // CLOSE ON THE LISTENER'S OWN LOOPER.
+                //
+                // reader.close() unmaps the native buffers; doing that while a
+                // callback is mid-memcpy is a SIGSEGV that kills the process
+                // (tombstone: __memcpy <- SetShortArrayRegion <- ShortBuffer.get,
+                // thread RawStill-cb). Image callbacks are delivered serially on
+                // `handler`, so a close POSTED to that same looper is guaranteed
+                // to run after any in-progress callback has returned -- no
+                // busy-wait, no timeout, and no residual race.
+                //
+                // An earlier version polled callbacksInFlight from this (camera)
+                // thread and closed anyway on timeout, which re-opened the exact
+                // crash window precisely when the system was slowest. The
+                // counter is kept only as a diagnostic.
+                val inFlight = callbacksInFlight.get()
+                if (inFlight > 0) Log.i(TAG, "reader close deferred behind $inFlight in-flight callback(s)")
+                try {
+                    handler.post {
+                        try { reader.close() } catch (e: Throwable) {
+                            Log.w(TAG, "deferred reader close failed: ${e.message}")
+                        }
+                    }
+                } catch (e: Throwable) {
+                    // Looper gone (shutdown): nothing can be running on it either,
+                    // so closing inline is safe here.
+                    Log.w(TAG, "could not post reader close (${e.message}); closing inline")
+                    try { reader.close() } catch (_: Exception) {}
+                }
                 try { previewSurface.release() } catch (_: Exception) {}
                 try { previewTex.release() } catch (_: Exception) {}
             }
@@ -961,13 +1638,26 @@ class RawStillCapturer(
         // device is already released (borrowDeviceExclusive returned). takePhoto
         // persists this avg to a disk sidecar and frees it before any heavy work,
         // so it never piles up in RAM across the demosaic/denoise tail.
-        val avg = ShortArray(w * h)
-        for (i in 0 until w * h) {
-            avg[i] = (acc[i] / BURST_N).toShort()
+        // Divide by the number of frames ACTUALLY summed, not the number
+        // requested. imageLatch only trips at the target, so these normally
+        // agree -- but dividing by a request count the accumulator never
+        // reached would darken the whole photo, so read it from the counter.
+        val summed = received.get().coerceAtLeast(1)
+        val accLocal = acc
+        val avg: ShortArray = if (accLocal == null) {
+            // Single-frame burst: frame 0 IS the result. No accumulator was ever
+            // allocated and no division is needed -- hand the buffer straight on.
+            first ?: throw IllegalStateException("burst produced no frames")
+        } else {
+            val out = ShortArray(w * h)
+            for (i in 0 until w * h) {
+                out[i] = (accLocal[i] / summed).toShort()
+            }
+            out
         }
         // Exposure is corrected by the demosaic's own percentile auto-level from this
         // RAW, so nothing exposure-related is measured or persisted here.
-        Log.i(TAG, "burst accumulated+averaged ${w}x${h} burstN=$BURST_N wb=[${wbGainsOut[0]},${wbGainsOut[1]},${wbGainsOut[2]}] (camera free, demosaic offloaded)")
+        Log.i(TAG, "burst accumulated+averaged ${w}x${h} burstN=$summed wb=[${wbGainsOut[0]},${wbGainsOut[1]},${wbGainsOut[2]}] (camera free, demosaic offloaded)")
         BurstResult(out, avg, w, h, blackLevel, whiteLevel, wbGainsOut[0], wbGainsOut[1], wbGainsOut[2])
     }
 
@@ -1096,7 +1786,15 @@ class RawStillCapturer(
         // is corrected digitally (DRO) from this frame's own luma after the fact.
         val reader = ImageReader.newInstance(w, h, ImageFormat.RAW_SENSOR, REID_BURST_N)
         reader.setOnImageAvailableListener({ r ->
-            val img = r.acquireNextImage() ?: return@setOnImageAvailableListener
+            // Guarded acquire: on a closed reader this throws ISE rather than
+            // returning null, and an unhandled throw on this HandlerThread kills
+            // the capture process. Same hazard as the burst listener.
+            val img = try {
+                r.acquireNextImage()
+            } catch (e: Throwable) {
+                Log.w(TAG, "reid acquireNextImage failed (reader closing?): ${e.message}")
+                null
+            } ?: return@setOnImageAvailableListener
             try {
                 val buf = img.planes[0].buffer
                 buf.asShortBuffer().get(frame, 0, minOf(frame.size, buf.remaining() / 2))
@@ -1105,7 +1803,12 @@ class RawStillCapturer(
                 frameErr[0] = e
                 imageLatch.countDown()
             } finally {
-                img.close()
+                // close() can itself throw if the reader was closed underneath
+                // us (surplus frame racing teardown). Swallow: an unhandled
+                // throw on this HandlerThread kills the capture process.
+                try { img.close() } catch (e: Throwable) {
+                    Log.w(TAG, "image close failed: ${e.message}")
+                }
             }
         }, handler)
 
@@ -1217,7 +1920,24 @@ class RawStillCapturer(
                 throw e
             } finally {
                 try { session?.close() } catch (_: Exception) {}
-                try { reader.close() } catch (_: Exception) {}
+                // Same native use-after-free hazard as the burst path: this
+                // capture has a 5s frame timeout that throws straight into this
+                // finally, so a late frame can be mid-memcpy when we close. Post
+                // the close to the listener's own looper -- callbacks are
+                // serialized there, so it provably runs after any in-progress
+                // one. Rapid presses interleave photo and ReID frames, which is
+                // exactly the reachable case.
+                try {
+                    reader.setOnImageAvailableListener(null, null)
+                    handler.post {
+                        try { reader.close() } catch (e: Throwable) {
+                            Log.w(TAG, "deferred reid reader close failed: ${e.message}")
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "could not post reid reader close (${e.message}); closing inline")
+                    try { reader.close() } catch (_: Exception) {}
+                }
                 try { previewSurface.release() } catch (_: Exception) {}
                 try { previewTex.release() } catch (_: Exception) {}
             }
@@ -1286,6 +2006,79 @@ class RawStillCapturer(
         }
     }
 
+    /**
+     * Burst length for this shot: [BURST_N] unless the DEBUG [BURST_N_PROP]
+     * non-persist property overrides it (clamped to 1..[BURST_N_MAX]). Exists to
+     * A/B the noise-vs-shutter-latency tradeoff on-device without a rebuild --
+     * each extra frame adds ~1s of "hold still" but averages down read noise.
+     * Read ONCE per capture into a local, so a prop change mid-burst can never
+     * desync the accumulator from the divisor.
+     */
+    /**
+     * Choose the burst length for the scene AE just metered.
+     *
+     * Rationale: burst averaging beats down sensor noise (~sqrt(N); measured on
+     * this sensor: flat-field noise 6.16 / 5.22 / 4.21 for N = 1 / 2 / 3), and
+     * every extra frame costs the user ~1s of holding still. Spend frames only
+     * where the noise is.
+     *
+     * WHY NOT AE METADATA: exposure/ISO alone cannot do this on this HAL. AE pins
+     * ISO at 800 (sensor range is [50, 12680]) and quantizes exposure to 10/20/
+     * 30ms, so across a MEASURED 13x change in scene light (emitter coverage 7%
+     * -> 0.55%) it moved exactly one step, with the lit and dark rooms overlapping
+     * at 20ms. AE output is also already compensated -- it is the RESULT of
+     * solving for the scene, not a measurement of it.
+     *
+     * WHAT THIS USES: the actual photon rate, from the burst's own first RAW
+     * frame. [RawDemosaic.ambientLevel] gives sensor response of the ROOM (a low
+     * percentile, so a monitor or lamp filling part of the frame cannot make a
+     * dark room read as bright). Dividing by exposure x gain undoes AE's
+     * compensation and leaves a quantity proportional to real incident light:
+     *
+     *     light = ambient / (exp_ms * iso)
+     *
+     * This works in BOTH regimes -- when AE has headroom the denominator moves,
+     * and when AE is saturated (the indoor case here) the numerator does.
+     */
+    private fun burstNForScene(iso: Int, expNs: Long, ambient: Float, cap: Int): Int {
+        // Missing/garbage metadata -> full burst (safe, higher quality).
+        if (iso <= 0 || expNs <= 0L) {
+            Log.i(TAG, "scene light: no AE metadata (iso=$iso expNs=$expNs) -> n=$cap")
+            return cap
+        }
+        val expMs = expNs / 1_000_000.0
+        // A zero median means a scene darker than the sensor can register at all
+        // -- unambiguously the dim end, so take the full burst. (Not an error
+        // case: it is the correct answer, just one the ratio cannot express.)
+        if (ambient <= 0f) {
+            Log.i(TAG, "scene light: median=0 (below sensor floor) exp=${expMs}ms iso=$iso -> n=$cap")
+            return cap
+        }
+        // Scale is arbitrary (units are response per ms per ISO); SCENE_LIGHT_*
+        // are calibrated against measured captures on this device.
+        val light = ambient / (expMs * iso) * SCENE_LIGHT_SCALE
+        val n = when {
+            light >= BRIGHT_LIGHT -> 1   // well-lit: single frame is clean
+            light >= MID_LIGHT -> 2      // moderately lit
+            else -> 3                     // dim: averaging clearly pays
+        }
+        Log.i(TAG, "scene light=${"%.1f".format(light)} (ambient=${"%.4f".format(ambient)} " +
+            "exp=${expMs}ms iso=$iso) -> n=$n")
+        return n.coerceAtMost(cap)
+    }
+
+    private fun burstNCap(): Int {
+        return try {
+            val sp = Class.forName("android.os.SystemProperties")
+            val v = sp.getMethod("get", String::class.java).invoke(null, BURST_N_PROP) as? String
+            val n = v?.trim()?.toIntOrNull() ?: return BURST_N
+            n.coerceIn(1, BURST_N_MAX)
+        } catch (e: Exception) {
+            Log.w(TAG, "burstN cap read failed: ${e.message}")
+            BURST_N
+        }
+    }
+
     private fun findRawCapableCamera(manager: CameraManager): String? {
         for (id in manager.cameraIdList) {
             val chars = manager.getCameraCharacteristics(id)
@@ -1299,6 +2092,46 @@ class RawStillCapturer(
      * Pixels are already rotated 90° CCW in [demosaicBurst]; mark EXIF
      * as NORMAL so viewers and downstream encoders don't re-rotate.
      */
+    /**
+     * Write a JPEG so that any concurrent reader sees either the OLD complete
+     * file or the NEW complete file -- never a partially written one.
+     *
+     * Necessary because this JPEG is published to other processes (the preview
+     * overlay in :backend decodes it, filesync ships it to the phone) while this
+     * process rewrites the SAME path up to three times: fast preview, then the
+     * demosaiced full-res, then the denoised final. Writing in place -- and
+     * especially [stampExifOrientationNormal], which reopens and rewrites the
+     * file after the pixels are down -- gave the reader a window onto a torn
+     * file, and BitmapFactory returned null ("decode returned null" on device),
+     * so the preview silently vanished.
+     *
+     * Encode + EXIF-stamp happen on a sibling temp file; the rename at the end
+     * is atomic within a directory, which is what makes publication safe. The
+     * temp is removed on any failure so a crash cannot leave litter behind.
+     *
+     * @return true if the file was published.
+     */
+    private fun writeJpegAtomic(target: File, bmp: Bitmap, quality: Int): Boolean {
+        // Same directory: rename() is only atomic within a filesystem.
+        val tmp = File(target.parentFile, "${target.name}.tmp")
+        try {
+            FileOutputStream(tmp).use { bmp.compress(Bitmap.CompressFormat.JPEG, quality, it) }
+            // Stamp while still private. Doing this after publication would
+            // reintroduce exactly the torn-read window this method exists to close.
+            stampExifOrientationNormal(tmp)
+            if (!tmp.renameTo(target)) {
+                Log.e(TAG, "atomic publish failed (rename) ${tmp.absolutePath} -> ${target.absolutePath}")
+                tmp.delete()
+                return false
+            }
+            return true
+        } catch (e: Throwable) {
+            Log.e(TAG, "atomic publish failed: ${e.message}")
+            tmp.delete()
+            return false
+        }
+    }
+
     private fun stampExifOrientationNormal(file: File) {
         try {
             val exif = androidx.exifinterface.media.ExifInterface(file.absolutePath)
@@ -1312,11 +2145,243 @@ class RawStillCapturer(
         }
     }
 
-    /** No-op warmup. The RAW capture path opens the device + runs its own AE
-     *  warmup transparently per [takePhoto], so there is nothing to pre-warm
-     *  here. Kept so the AIDL warmUp() entrypoint has a single capture engine
-     *  to call (mirrors takePhoto routing through this class). */
-    fun warmUp() {}
+    /**
+     * Pre-open the camera and run one throwaway RAW+preview session so the FIRST
+     * real [takePhoto] does not pay cold-HAL bring-up.
+     *
+     * On a cold camera the Qualcomm HAL transiently exhausts a sensor/CSIPHY
+     * resource during bring-up and drops a burst frame with reason=0 (see the
+     * BURST_RETRY loop in [takePhoto]). That retry re-runs session configure AND
+     * a fresh AE warmup -- measured ~5.2 s, paid once per boot, entirely inside
+     * the window where the user is staring at the capture preview overlay.
+     *
+     * This configures the exact stream combo the real burst uses (RAW_SENSOR +
+     * PRIVATE preview), drives AE to convergence, and pulls ONE throwaway RAW
+     * frame -- so the resource churn, the first-AE search, and the bring-up
+     * frame drop all happen at service start instead. The RAW frame is not
+     * optional: the reason=0 failure is a FRAME error, so configuring the
+     * stream without requesting a frame would leave the flake for the first
+     * real photo.
+     *
+     * Best-effort: any failure is logged and swallowed. A failed warmup must
+     * never prevent a later real capture (which still has its own retry loop).
+     */
+    fun warmUp() {
+        // The AIDL warmUp() is called on every listener bind (CaptureBridge), and
+        // CaptureService also calls it at onCreate -- on boot both land within
+        // seconds. Warming twice just doubles the camera-open cost it exists to
+        // avoid, so collapse repeats inside the validity window.
+        val now = android.os.SystemClock.elapsedRealtime()
+        synchronized(warmUpLock) {
+            if (lastWarmUpMs != 0L && now - lastWarmUpMs < WARMUP_VALID_MS) {
+                Log.i(TAG, "warmUp skipped (warmed ${now - lastWarmUpMs}ms ago)")
+                return
+            }
+            // Provisional claim: prevents a concurrent caller from starting a
+            // second warmup while this one runs. Cleared again if the attempt
+            // does not actually warm anything, so a failure does not suppress
+            // retries for the whole validity window.
+            lastWarmUpMs = now
+        }
+        // Serialize with real captures on the same single-thread executor
+        // takePhoto uses, so a warmup can never sit in front of a user shutter
+        // press on CameraSession's handler queue.
+        executor.execute { warmUpBody() }
+    }
+
+    private fun warmUpBody() {
+        // A shutter press that arrived while this was queued wins outright --
+        // warming is pure optimization and the real capture warms the HAL anyway.
+        if (photoPending > 0) {
+            // A real capture warms the HAL far better than this does, so this is
+            // not a failure -- but nothing was warmed by US, and the real photo
+            // may be a ReID frame rather than a full still, so allow a retry.
+            Log.i(TAG, "warmUp skipped: photoPending=$photoPending")
+            synchronized(warmUpLock) { lastWarmUpMs = 0L }
+            return
+        }
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        var reader: ImageReader? = null
+        var previewTex: SurfaceTexture? = null
+        var previewSurface: Surface? = null
+        warmUpInFlight = true
+        // Silent open: no user action is behind this, so the firmware privacy LED
+        // must stay dark. Gate at the source BEFORE the device opens -- Rokid's
+        // cameraserver fires CAMERA_OPEN(2014) on open and reads the prop then.
+        acquireSilentLed()
+        try {
+            val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val cameraId = findRawCapableCamera(manager) ?: run {
+                Log.w(TAG, "warmUp: no RAW camera")
+                return
+            }
+            val chars = manager.getCameraCharacteristics(cameraId)
+            val rawSize = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?.getOutputSizes(ImageFormat.RAW_SENSOR)?.firstOrNull() ?: run {
+                Log.w(TAG, "warmUp: no RAW sizes")
+                return
+            }
+            reader = ImageReader.newInstance(rawSize.width, rawSize.height, ImageFormat.RAW_SENSOR, 1)
+            previewTex = SurfaceTexture(0).apply { setDefaultBufferSize(PREVIEW_TEX_W, PREVIEW_TEX_H) }
+            previewSurface = Surface(previewTex)
+            val rdr = reader
+            val surf = previewSurface
+            val tex = previewTex
+
+            // borrowDeviceExclusive can return WITHOUT ever running the body --
+            // it refuses outright while recording, and swallows an open failure
+            // internally. In those cases no exception reaches us and the body's
+            // finally never runs, so ownership of the reader/surface/texture
+            // stays here. This flag is what tells the two cases apart.
+            val bodyEntered = java.util.concurrent.atomic.AtomicBoolean(false)
+            val ran = cameraSession.borrowDeviceExclusive(BORROW_TIMEOUT_MS) { camera ->
+                bodyEntered.set(true)
+                var session: CameraCaptureSession? = null
+                try {
+                    val sessLatch = CountDownLatch(1)
+                    val sessOut = arrayOfNulls<CameraCaptureSession>(1)
+                    @Suppress("DEPRECATION")
+                    camera.createCaptureSession(
+                        listOf(rdr.surface, surf),
+                        object : CameraCaptureSession.StateCallback() {
+                            override fun onConfigured(s: CameraCaptureSession) {
+                                sessOut[0] = s; sessLatch.countDown()
+                            }
+                            override fun onConfigureFailed(s: CameraCaptureSession) {
+                                sessLatch.countDown()
+                            }
+                        },
+                        handler,
+                    )
+                    if (!sessLatch.await(3, TimeUnit.SECONDS)) {
+                        Log.w(TAG, "warmUp: session configure timeout")
+                        return@borrowDeviceExclusive
+                    }
+                    session = sessOut[0] ?: run {
+                        Log.w(TAG, "warmUp: session configure failed")
+                        return@borrowDeviceExclusive
+                    }
+
+                    // Same one-shot precapture pattern as the real burst: free-running
+                    // AE preview + exactly ONE trigger. A trigger inside the repeating
+                    // request pins AE at PRECAPTURE and never converges.
+                    val base = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                        addTarget(surf)
+                        set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                    }
+                    val converged = CountDownLatch(1)
+                    val cb = object : CameraCaptureSession.CaptureCallback() {
+                        override fun onCaptureCompleted(
+                            s: CameraCaptureSession,
+                            req: CaptureRequest,
+                            result: android.hardware.camera2.TotalCaptureResult,
+                        ) {
+                            val st = result.get(android.hardware.camera2.CaptureResult.CONTROL_AE_STATE)
+                            if (st == android.hardware.camera2.CaptureResult.CONTROL_AE_STATE_CONVERGED ||
+                                st == android.hardware.camera2.CaptureResult.CONTROL_AE_STATE_LOCKED ||
+                                st == android.hardware.camera2.CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED
+                            ) converged.countDown()
+                        }
+                    }
+                    session.setRepeatingRequest(base.build(), cb, handler)
+                    val trigger = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                        addTarget(surf)
+                        set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                        set(
+                            CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
+                            CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START,
+                        )
+                    }
+                    session.capture(trigger.build(), cb, handler)
+                    // Shorter AE budget than a real capture. Warmup only needs AE
+                    // to have RUN once (so the HAL holds a sane exposure and the
+                    // next capture's search starts warm); it does not need a
+                    // publishable exposure. Every ms spent here is a ms the camera
+                    // handler is blocked to a shutter press arriving right behind
+                    // us, which is the exact window this change exists to protect.
+                    val ok = converged.await(WARMUP_AE_MS, TimeUnit.MILLISECONDS)
+                    try { session.stopRepeating() } catch (_: Exception) {}
+                    Log.i(TAG, "warmUp: AE converged=$ok")
+
+                    // Pull ONE throwaway RAW frame. Configuring the stream alone
+                    // does not exercise the RAW buffer path, and the reason=0
+                    // bring-up drop we are trying to absorb is a FRAME failure on
+                    // the ZSLPreviewRaw usecase -- so the frame has to actually be
+                    // requested here or the flake just moves to the first real
+                    // photo. Failure is fine and expected on a cold HAL: absorbing
+                    // it here is the entire point.
+                    val rawLatch = CountDownLatch(1)
+                    val rawFailed = booleanArrayOf(false)
+                    rdr.setOnImageAvailableListener({ r ->
+                        try { r.acquireNextImage()?.close() } catch (_: Exception) {}
+                        rawLatch.countDown()
+                    }, handler)
+                    val still = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                        addTarget(rdr.surface)
+                        set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+                    }
+                    session.capture(still.build(), object : CameraCaptureSession.CaptureCallback() {
+                        override fun onCaptureFailed(
+                            s: CameraCaptureSession,
+                            req: CaptureRequest,
+                            failure: android.hardware.camera2.CaptureFailure,
+                        ) {
+                            rawFailed[0] = true
+                            rawLatch.countDown()
+                        }
+                    }, handler)
+                    val rawOk = rawLatch.await(WARMUP_RAW_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    Log.i(TAG, "warmUp: raw frame ok=$rawOk failed=${rawFailed[0]}")
+                } catch (e: Throwable) {
+                    Log.w(TAG, "warmUp body failed: ${e.message}")
+                } finally {
+                    // Close inside the body, not after borrowDeviceExclusive
+                    // returns: that call can return false with the body still
+                    // running on the camera handler, which would otherwise pull
+                    // the reader out from under a live session.
+                    //
+                    // Drop the listener FIRST. It fires on the RawStill handler
+                    // thread while this finally runs on the camera handler, so a
+                    // frame arriving after the RAW timeout could otherwise be
+                    // inside acquireNextImage() as close() frees the native
+                    // reader -- a use-after-free no catch block would save us
+                    // from.
+                    try { rdr.setOnImageAvailableListener(null, null) } catch (_: Exception) {}
+                    try { session?.close() } catch (_: Exception) {}
+                    try { rdr.close() } catch (_: Exception) {}
+                    try { surf.release() } catch (_: Exception) {}
+                    try { tex.release() } catch (_: Exception) {}
+                }
+            }
+            if (!bodyEntered.get()) {
+                // Body never ran (borrow refused / device open failed): we still
+                // own these, and nothing was warmed, so allow an immediate retry.
+                Log.w(TAG, "warmUp: borrow did not run body")
+                synchronized(warmUpLock) { lastWarmUpMs = 0L }
+                try { reader?.close() } catch (_: Exception) {}
+                try { previewSurface?.release() } catch (_: Exception) {}
+                try { previewTex?.release() } catch (_: Exception) {}
+            }
+            Log.i(TAG, "warmUp done ran=$ran bodyRan=${bodyEntered.get()} ms=${android.os.SystemClock.elapsedRealtime() - t0}")
+        } catch (e: Throwable) {
+            Log.w(TAG, "warmUp failed: ${e.message}")
+            synchronized(warmUpLock) { lastWarmUpMs = 0L }
+            // Only reached if setup threw BEFORE the borrow body took ownership;
+            // once the body runs it closes these in its own finally.
+            try { reader?.close() } catch (_: Exception) {}
+            try { previewSurface?.release() } catch (_: Exception) {}
+            try { previewTex?.release() } catch (_: Exception) {}
+        } finally {
+            warmUpInFlight = false
+            releaseSilentLed()
+        }
+    }
 
     fun shutdown() {
         handlerThread.quitSafely()

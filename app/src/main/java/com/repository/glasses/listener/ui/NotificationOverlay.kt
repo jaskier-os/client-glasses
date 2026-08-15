@@ -45,7 +45,15 @@ class NotificationOverlay(private val context: Context) {
         val sender: String,
         val text: String,
         val chat: String,
-        val repliable: Boolean
+        val repliable: Boolean,
+        /** Overrides the configured display duration for this item only. */
+        val durationMsOverride: Long? = null,
+        /**
+         * Locally generated card (e.g. the low-battery alert) rather than a
+         * notification relayed from the phone. The service must not run the
+         * phone-facing completion latch for these.
+         */
+        val synthetic: Boolean = false,
     )
 
     /** Reply affordance phase. Drives which sub-views are shown inside the box. */
@@ -53,7 +61,7 @@ class NotificationOverlay(private val context: Context) {
 
     var remoteLog: ((String) -> Unit)? = null
     var onAllDismissed: (() -> Unit)? = null
-    var onItemDismissed: ((notifId: String) -> Unit)? = null
+    var onItemDismissed: ((notifId: String, synthetic: Boolean) -> Unit)? = null
     /** Fired when an item actually becomes the visible one (incl. queued items
      *  that surface after an earlier one finishes). Carries (notifId, repliable). */
     var onItemShown: ((notifId: String, repliable: Boolean) -> Unit)? = null
@@ -126,7 +134,8 @@ class NotificationOverlay(private val context: Context) {
     private val displayDurationMs: Long get() = GlassesConfig.notificationDurationMs
     private val repliableDurationMs: Long = 12000L
     private val currentDismissDelayMs: Long
-        get() = if (current?.repliable == true) repliableDurationMs else displayDurationMs
+        get() = current?.durationMsOverride
+            ?: if (current?.repliable == true) repliableDurationMs else displayDurationMs
     private val dismissRunnable = Runnable { dismissCurrent() }
 
     // blink + synthetic visualizer animation driver
@@ -448,6 +457,9 @@ class NotificationOverlay(private val context: Context) {
         } else {
             data.sender
         }
+        // The paper-plane mark identifies a relayed Telegram message; a locally
+        // generated card (low battery) is not one, so drop it from the header.
+        tgMark.visibility = if (data.synthetic) View.GONE else View.VISIBLE
         messageLabel.text = data.text
 
         // Reset ALL reply state for the new item -- a previous reply may have
@@ -992,7 +1004,7 @@ class NotificationOverlay(private val context: Context) {
         val dismissed = current
         current = null
         if (dismissed != null) {
-            onItemDismissed?.invoke(dismissed.notifId)
+            onItemDismissed?.invoke(dismissed.notifId, dismissed.synthetic)
         }
         if (queue.isNotEmpty()) {
             handler.post { showNext() }

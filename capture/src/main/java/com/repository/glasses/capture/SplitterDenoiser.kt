@@ -37,6 +37,19 @@ class SplitterDenoiser private constructor(
      * lowmemorykiller threshold. Re-creating the interpreter costs ~130ms,
      * negligible against the ~60s denoise and the ~300MB it would otherwise pin.
      */
+    /**
+     * Called between tiles so the caller can pause the denoise while a camera
+     * capture is in flight.
+     *
+     * Without this the ~236MB arena + two full-res bitmaps can coexist with a
+     * new capture's ~170MB on this 1.8GB device and lmkd kills the process
+     * mid-photo. Yielding only BETWEEN stages was not enough: a denoise already
+     * running when the shutter is pressed cannot be preempted, which is exactly
+     * the rapid-double-press case. Per-tile is the finest granularity available
+     * without splitting the graph.
+     */
+    @Volatile var pauseCheck: (() -> Unit)? = null
+
     fun denoise(src: Bitmap): Bitmap {
         val t0 = android.os.SystemClock.elapsedRealtime()
         val w0 = src.width
@@ -129,6 +142,9 @@ class SplitterDenoiser private constructor(
                     inFloats[fi++] = (p and 0xFF) * inv255
                 }
 
+                // Checkpoint: if a capture is in flight, park here (between
+                // tiles) rather than allocating alongside it.
+                try { pauseCheck?.invoke() } catch (_: Throwable) {}
                 val tt0 = android.os.SystemClock.elapsedRealtime()
                 qnn.runTile(inFloats, outFloats)
                 val tdt = android.os.SystemClock.elapsedRealtime() - tt0
@@ -362,6 +378,28 @@ class SplitterDenoiser private constructor(
                 instance = created
                 return created
             }
+        }
+
+        /**
+         * Drop the cached denoiser so the next [get] rebuilds it from scratch.
+         *
+         * Called after a denoise failure -- typically memory pressure on this
+         * 1.8GB device. The QNN engine and its interpreter arenas are already
+         * per-call (created and closed inside denoise()), so what this actually
+         * releases is the singleton and its mapped model, letting the whole
+         * object graph be collected before a retry runs. Cheap to rebuild
+         * (the model is a ~3MB mmap) next to losing the photo.
+         *
+         * Safe to call with no instance. Callers run on the single-threaded
+         * process executor, so this never races a live denoise.
+         */
+        fun release() {
+            val had = synchronized(this) {
+                val i = instance
+                instance = null
+                i != null
+            }
+            if (had) Log.i(TAG, "denoiser released (will rebuild on next use)")
         }
 
         private fun loadModel(context: Context): MappedByteBuffer {

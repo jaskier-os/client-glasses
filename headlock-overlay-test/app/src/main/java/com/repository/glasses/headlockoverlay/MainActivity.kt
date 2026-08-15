@@ -36,7 +36,7 @@ class MainActivity : AppCompatActivity() {
             val dt = if (lastPoseNanos == 0L) 0f
                 else ((now - lastPoseNanos) / 1e9f).coerceIn(0f, 0.1f)
             lastPoseNanos = now
-            val off = lazyFollow.update(yaw, pitch, dt)
+            val off = lazyFollow.update(yaw, pitch, tracker.headSpeedDegPerSec, dt)
             pushFrame(off.yawDeg, off.pitchDeg, yaw, pitch)
         }
 
@@ -50,6 +50,8 @@ class MainActivity : AppCompatActivity() {
             overlay.refYawDeg = lazyFollow.refYaw
             overlay.followRate = lazyFollow.followRate
             overlay.deadzoneDeg = lazyFollow.deadzoneDeg
+            overlay.idleSpeedDegPerSec = lazyFollow.idleSpeedDegPerSec
+            overlay.headSpeedDegPerSec = tracker.headSpeedDegPerSec
             overlay.invalidate()
         }
     }
@@ -71,14 +73,15 @@ class MainActivity : AppCompatActivity() {
      */
     @VisibleForTesting
     fun testInjectPose(yawDeg: Float, pitchDeg: Float) {
-        val off = lazyFollow.update(yawDeg, pitchDeg, 0.016f)
+        // Report high speed so the injected sweep never triggers auto-follow during the test.
+        val off = lazyFollow.update(yawDeg, pitchDeg, 1000f, 0.016f)
         pushFrame(off.yawDeg, off.pitchDeg, yawDeg, pitchDeg)
     }
 
     // --- Live touchpad tuning ------------------------------------------------
 
     /** Ordered tunables the touchpad cursor cycles through. */
-    private val tunables = listOf("k", "D", "fov", "recenter")
+    private val tunables = listOf("k", "D", "fov", "idle", "recenter")
     private var selectedIndex = 0
 
     private fun currentTunable() = tunables[selectedIndex]
@@ -113,6 +116,7 @@ class MainActivity : AppCompatActivity() {
 
             KEY_HOLD -> {
                 if (currentTunable() == "recenter") {
+                    tracker.recenter()
                     lazyFollow.recenter(tracker.yawDeg, tracker.pitchDeg)
                 } else {
                     overlay.debugEnabled = !overlay.debugEnabled
@@ -140,6 +144,11 @@ class MainActivity : AppCompatActivity() {
             "fov" -> {
                 val v = (overlay.projection.horizontalFovDeg + dir * 1.0f).coerceIn(12.0f, 60.0f)
                 overlay.projection.horizontalFovDeg = v
+            }
+            "idle" -> {
+                val v = (lazyFollow.idleSpeedDegPerSec + dir * 1.0f).coerceIn(1.0f, 60.0f)
+                lazyFollow.idleSpeedDegPerSec = v
+                overlay.idleSpeedDegPerSec = v
             }
             // "recenter": scrolling is a no-op.
         }

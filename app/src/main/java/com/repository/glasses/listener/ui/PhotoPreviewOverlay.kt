@@ -7,6 +7,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PathMeasure
 import android.graphics.PixelFormat
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
@@ -67,8 +69,16 @@ class PhotoPreviewOverlay(private val context: Context) {
     )
 
     fun requestPlaceholder() {
-        main.post { attachPlaceholder() }
+        main.post {
+            overlayShownAtMs = SystemClock.uptimeMillis()
+            android.util.Log.i("PhotoPreview", "OVERLAY_LIFETIME: shown")
+            attachPlaceholder()
+        }
     }
+
+    /** uptimeMillis when the placeholder first appeared, for the end-to-end
+     *  on-screen lifetime measurement logged in [clear]. 0 = not showing. */
+    private var overlayShownAtMs = 0L
 
     /**
      * RAW burst is fully captured -- the user can stop holding the scene still.
@@ -93,14 +103,21 @@ class PhotoPreviewOverlay(private val context: Context) {
     }
 
     /**
-     * Cancel the most recently added placeholder (e.g. when the capture fails
-     * with ERR_BUSY before any photo is produced). Without this a failed
-     * capture leaves the spinner on screen until the long placeholder
-     * timeout runs out.
+     * Cancel the placeholder belonging to a capture that failed before it could
+     * produce a photo (ERR_BUSY, or a press rejected because the queue is full).
+     * Without this the spinner sits there until the long placeholder timeout.
+     *
+     * Pops the LAST placeholder, not the first. The queue is FIFO and unkeyed:
+     * successful photos consume it from the front in capture order, so the
+     * failure that just happened necessarily belongs to the MOST RECENT press.
+     * Removing the first instead (as this did) killed the oldest still-pending
+     * photo's placeholder, and that photo then swapped into a placeholder
+     * belonging to a different press -- visible as a preview appearing under the
+     * wrong spinner. Reachable now that rapid presses can be rejected outright.
      */
     fun clearPendingPlaceholder() {
         main.post {
-            val orphan = pendingPlaceholders.removeFirstOrNull() ?: return@post
+            val orphan = pendingPlaceholders.removeLastOrNull() ?: return@post
             if (active.contains(orphan)) {
                 android.util.Log.i("PhotoPreview", "clearPendingPlaceholder: removing spinner after capture error")
                 clear(orphan, "capture_error")
@@ -146,13 +163,11 @@ class PhotoPreviewOverlay(private val context: Context) {
                     attachAndAnimate(processed, decoded.rotationDeg)
                 }
                 if (loading != null && active.contains(placeholder!!)) {
-                    // The fast preview (frame 0) is ready BEFORE the RAW burst is fully
-                    // captured, so don't swap to the photo yet -- hold the loading view
-                    // (spinner + progress bar) until burst-done fires the checkmark
-                    // ("you can move now"), THEN complete the bar and swap. This keeps
-                    // the progress bar showing the whole capture and guarantees the
-                    // checkmark gets a loader to animate on. A fallback fires the swap
-                    // anyway if the shutter signal never arrives.
+                    // Hold the swap until the burst-captured checkmark has shown
+                    // on the loader: the spinner morphing into a tick IS the
+                    // "photo taken, you can move now" signal. The fast preview
+                    // is ready ~1s before the burst finishes, so swapping the
+                    // photo in immediately would leave no surface for that tick.
                     loading.completeWhenCaptured(swap)
                 } else {
                     swap.run()
@@ -176,7 +191,19 @@ class PhotoPreviewOverlay(private val context: Context) {
                 sample = 16
             }
             val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-            val bmp = BitmapFactory.decodeFile(path, opts) ?: return null
+            // The writer publishes atomically (temp + rename), so a torn read
+            // should be impossible. This retry is defence in depth: a decode can
+            // also fail transiently if the file is being replaced by a LATER
+            // stage of the same capture (preview -> demosaiced -> denoised all
+            // reuse this path). One short retry costs nothing and turns a
+            // vanished preview into a slightly late one.
+            val bmp = BitmapFactory.decodeFile(path, opts)
+                ?: run {
+                    android.util.Log.w("PhotoPreview", "decode failed, retrying once: $path")
+                    Thread.sleep(DECODE_RETRY_DELAY_MS)
+                    BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
+                }
+                ?: return null
             // RawStillCapturer bakes a 90 CCW rotation into the JPEG pixels
             // and stamps ORIENTATION_NORMAL (see feedback_glasses_photo_rotation).
             // Any other value here reflects a legacy file; honor it so old
@@ -415,6 +442,7 @@ class PhotoPreviewOverlay(private val context: Context) {
         main.postDelayed(dwell, DWELL_MS)
     }
 
+
     // ---- bitmap-known path (no placeholder, e.g. ADB-triggered) --------
 
     private fun attachAndAnimate(bmp: Bitmap, rotationDeg: Float) {
@@ -601,6 +629,16 @@ class PhotoPreviewOverlay(private val context: Context) {
     }
 
     private fun clear(s: Showing, reason: String) {
+        // End-to-end on-screen lifetime: placeholder appears -> nothing left on
+        // the waveguide. This is the number the user actually experiences, as
+        // opposed to any single stage of the capture pipeline.
+        if (overlayShownAtMs != 0L && active.size <= 1) {
+            android.util.Log.i(
+                "PhotoPreview",
+                "OVERLAY_LIFETIME: gone after ${SystemClock.uptimeMillis() - overlayShownAtMs}ms (reason=$reason)",
+            )
+            overlayShownAtMs = 0L
+        }
         main.removeCallbacks(s.dwellRunnable)
         s.root.animate().cancel()
         (s.content as? LoadingPreviewView)?.stop()
@@ -858,13 +896,13 @@ class PhotoPreviewOverlay(private val context: Context) {
             // confident "done". Draw the tick over CHECK_DRAW_MS; cross-fade the
             // spinner out over the (shorter) CHECK_FADE_MS so the two overlap briefly.
             private const val CHECK_STROKE_DP = 3.0f
-            private const val CHECK_DRAW_MS = 300f
+            private const val CHECK_DRAW_MS = 220f
             private const val CHECK_FADE_MS = 160f
-            // How long the checkmark stays visible after burst-done before the photo
-            // swaps in -- long enough for the user to register "taken, can move now".
-            private const val CHECK_HOLD_MS = 600L
-            // If the burst-captured signal never arrives, swap the preview in anyway
-            // after this long so the photo is never withheld.
+            // Checkmark hold. Only reachable via the indicateCaptured() path now
+            // that the photo swap no longer waits on burst-done.
+            private const val CHECK_HOLD_MS = 150L
+            // Safety net: swap the preview in anyway if the capture signal never
+            // arrives, so a photo is never withheld indefinitely.
             private const val CAPTURE_WAIT_TIMEOUT_MS = 6000L
             private const val PROGRESS_HEIGHT_DP = 4f
             private const val PROGRESS_INSET_X_DP = 10f
@@ -876,17 +914,25 @@ class PhotoPreviewOverlay(private val context: Context) {
             // is reserved for the post-arrival completion sweep so the user
             // sees the bar visibly finish right as the photo appears.
             private const val CAPTURING_CAP = 0.95f
-            private const val COMPLETION_MS = 220L
+            // Short: the bar's job now is just to not jump-cut into the photo.
+            private const val COMPLETION_MS = 120L
         }
     }
 
     companion object {
         private const val TARGET_LONG_EDGE_PX = 540
         private const val PREVIEW_WIDTH_DP = 140
-        private const val BOUNCE_IN_MS = 320L
-        private const val DWELL_MS = 2500L
-        private const val EXIT_MS = 520L
+        private const val BOUNCE_IN_MS = 220L
+        // How long the photo stays up once shown. The overlay's job is "here is
+        // the shot you just took" -- long enough to confirm framing, not to
+        // study it (the photo itself goes to the phone).
+        private const val DWELL_MS = 1000L
+        private const val EXIT_MS = 320L
         private const val EXIT_SCALE = 0.30f
+
+        /** Backoff for the single decode retry in [decodeWithExif]. Short: this
+         *  runs on the decode worker, and the file is normally already complete. */
+        private const val DECODE_RETRY_DELAY_MS = 60L
         private const val MAX_CONCURRENT = 8
         private const val BORDER_DP = 2
         private const val BORDER_COLOR: Int = 0xFFFFFFFF.toInt()
@@ -902,17 +948,11 @@ class PhotoPreviewOverlay(private val context: Context) {
         // that or the spinner dismisses mid-capture and the real preview
         // attaches to nothing, leaving a frozen frame on screen.
         private const val PLACEHOLDER_TIMEOUT_MS = 25_000L
-        // Roughly how long a cold capture takes end-to-end. The progress
-        // bar reaches 100% at this elapsed time; if the photo arrives
-        // sooner the bar is interrupted (replaced by the photo); if later
-        // the bar caps at 100% and waits.
-        // RawStillCapturer measured ~3.3-4.1s from shutter to preview JPEG
-        // (RAW burst + demosaic + rotate + encode). Match the bar to the
-        // upper end so the progress hits ~100% right as the photo swap
-        // happens instead of finishing early and looking stuck.
-        // Fast-preview path hands off ~700 ms after shutter (AE warmup ~300 ms +
-        // first RAW frame + fast demosaic + encode). Progress bar should fill in
-        // that window, not 4 s, otherwise the spinner lags the actual capture.
-        private const val ESTIMATED_CAPTURE_MS = 900L
+        // Roughly how long the overlay waits from shutter to the photo swap. The
+        // bar fills to CAPTURING_CAP over this window, then sticks until the
+        // photo actually lands. Matches the measured shutter->preview latency
+        // (~2.5-3.5s) so the bar fills at roughly the real rate instead of
+        // pinning at 95% and looking hung. Retune if fast-preview changes.
+        private const val ESTIMATED_CAPTURE_MS = 2800L
     }
 }

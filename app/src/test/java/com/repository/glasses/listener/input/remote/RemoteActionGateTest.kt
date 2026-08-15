@@ -478,7 +478,7 @@ class RemoteActionGateTest {
             // Refuses BACK on purpose (BACK turns the screen off); covered below.
             "TAB_NAV",
         )
-        for (state in RemoteActionGate.knownStatesForTest - notEnterableByRemote) {
+        for (state in allStates - notEnterableByRemote) {
             assertEquals(
                 "no exit from " + state + ": BACK is refused, so a remote user who " +
                     "entered it cannot leave without the physical touchpad",

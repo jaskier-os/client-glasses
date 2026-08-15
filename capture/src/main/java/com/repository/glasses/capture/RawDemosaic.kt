@@ -191,6 +191,56 @@ object RawDemosaic {
      * Pixel format is ARGB_8888 with R=G=B=luma so downstream rotation /
      * scale / JPEG encode don't have to branch on format.
      */
+    /**
+     * Ambient scene level from a RAW frame, as a 0..1 fraction of full well.
+     *
+     * Returns a LOW percentile of the green channel, deliberately: the point is
+     * to measure the ROOM, not the brightest thing in it. A monitor or lamp can
+     * dominate the frame while the actual environment is dark -- metering the
+     * mean (or anything near the top) reports "bright" for a pitch-black room
+     * containing one screen. The low percentile ignores small emitters no matter
+     * how bright they are, which is exactly the failure mode this replaces.
+     *
+     * Subsamples on a coarse grid: this runs on the capture critical path and
+     * full-resolution accuracy is pointless for a 3-way decision.
+     */
+    fun ambientLevel(
+        raw: ShortArray,
+        width: Int, height: Int,
+        blackLevel: Float, whiteLevel: Float,
+    ): Float {
+        val range = (whiteLevel - blackLevel).coerceAtLeast(1f)
+        // Green channel at (odd x, even y) in the RGGB quad. Step by 16px so a
+        // 4032x3024 frame yields ~48k samples -- plenty for a percentile.
+        val step = 16
+        // Primitive array + primitive sort: this runs on the capture critical
+        // path, and a boxed ArrayList of ~48k Floats would be pure churn.
+        val cols = (width - 1 + step - 1) / step
+        val rows = (height - 1 + step - 1) / step
+        val vals = FloatArray(cols * rows)
+        var count = 0
+        var y = 0
+        while (y < height - 1) {
+            val row = y * width
+            var x = 0
+            while (x < width - 1) {
+                val g = (raw[row + x + 1].toInt() and 0xFFFF).toFloat() - blackLevel
+                vals[count++] = (g / range).coerceIn(0f, 1f)
+                x += step
+            }
+            y += step
+        }
+        if (count == 0) return 0f
+        java.util.Arrays.sort(vals, 0, count)
+        // p50 (median). Chosen from measured data, not theory: in a genuinely
+        // dark room p1..p25 all read exactly 0.00000 on this sensor, so a low
+        // tap carries NO signal at the dark end. The median separates the same
+        // room lit vs unlit by ~3x (0.00104 -> 0.00313) while still ignoring
+        // emitters -- a monitor has to fill half the frame to move it, which is
+        // the failure mode this metric exists to avoid.
+        return vals[count / 2]
+    }
+
     fun fastPreviewToBitmap(
         raw: ShortArray,
         width: Int, height: Int,
@@ -198,8 +248,16 @@ object RawDemosaic {
     ): Bitmap {
         val t0 = android.os.SystemClock.elapsedRealtime()
         require(raw.size >= width * height)
-        val outW = width / 4
-        val outH = height / 4
+        // 1/8 bin, not 1/4. This bitmap exists ONLY to fill the on-glasses
+        // preview overlay, which downsamples to a 540px long edge and displays
+        // it at ~210px wide -- so 1/4 (1008x756) was ~4x more pixels than
+        // anything downstream can show, and the extra work sat directly in
+        // front of the user (measured ~1.8s of the ~4.3s preview latency).
+        // 504x378 still comfortably exceeds the overlay's needs. The FINAL
+        // full-res colour JPEG is unaffected: it comes from binToBitmap and
+        // overwrites this file later.
+        val outW = width / 8
+        val outH = height / 8
         val bl = blackLevel
         val maxSum = (whiteLevel - blackLevel) * 8f
         // Pass 1: compute sum-of-8-greens per block AND a 256-bin histogram.
@@ -207,9 +265,9 @@ object RawDemosaic {
         val hist = IntArray(256)
         val binScale = 255f / maxSum.coerceAtLeast(1f)
         for (by in 0 until outH) {
-            val srcY0 = by * 4
+            val srcY0 = by * 8
             for (bx in 0 until outW) {
-                val srcX0 = bx * 4
+                val srcX0 = bx * 8
                 var sumG = 0f
                 for (qy in 0..1) {
                     val y = srcY0 + qy * 2
@@ -390,6 +448,12 @@ object RawDemosaic {
 
         val bmp = Bitmap.createBitmap(outPx, halfW, halfH, Bitmap.Config.ARGB_8888)
         Log.i(TAG, "bin ${width}x${height}->${halfW}x${halfH} ccm+sat+localtonemap durMs=${android.os.SystemClock.elapsedRealtime() - t0}")
+        // NOTE: this function's working set is ~85MB for a 4032x3024 input
+        // (linR/linG/linB/luma/lLocal/outPx are 12.2MB EACH at half res). A
+        // System.gc() here was tried and measured as USELESS -- the arrays are
+        // still in scope at this point, so nothing is collectable. The caller
+        // collects after the demosaic returns, which is where they are actually
+        // unreachable. Do not re-add a collect here.
         return bmp
     }
 

@@ -7,18 +7,29 @@ import org.junit.Test
 class HeadOrientationTrackerTest {
 
     @Test
-    fun `gyro yaw integrates to about 57 degrees over one radian`() {
+    fun `head-right yaw integrates positive to about 57 degrees over one radian`() {
         val tracker = HeadOrientationTracker(sensorManager = null)
-        // 101 samples; first seeds the timestamp, remaining 100 each advance 0.01s at 1 rad/s.
+        // Yaw = integral of -gy. A -1 rad/s Y-rate = head turning right = +yaw.
+        // 101 samples; first seeds the timestamp, remaining 100 each advance 0.01s.
         for (i in 0..100) {
-            tracker.injectGyro(0f, 0f, 1f, i * 10_000_000L)
+            tracker.injectGyro(0f, -1f, 0f, (i + 1) * 10_000_000L)
         }
         // 100 * 0.01s * 1 rad/s = 1 rad = 57.2958 deg.
         assertEquals(57.2958f, tracker.yawDeg, 1.5f)
     }
 
     @Test
-    fun `onPose callback fires with final yaw`() {
+    fun `look-up pitch integrates positive to about 57 degrees over one radian`() {
+        val tracker = HeadOrientationTracker(sensorManager = null)
+        // Pitch = integral of gx. A +1 rad/s X-rate = looking up = +pitch.
+        for (i in 0..100) {
+            tracker.injectGyro(1f, 0f, 0f, (i + 1) * 10_000_000L)
+        }
+        assertEquals(57.2958f, tracker.pitchDeg, 1.5f)
+    }
+
+    @Test
+    fun `onPose callback fires on every integrated sample`() {
         val tracker = HeadOrientationTracker(sensorManager = null)
         var lastYaw = Float.NaN
         var lastPitch = Float.NaN
@@ -31,41 +42,52 @@ class HeadOrientationTrackerTest {
             count++
         }
         for (i in 0..100) {
-            tracker.injectGyro(0f, 0f, 1f, i * 10_000_000L)
+            tracker.injectGyro(0f, -1f, 0f, (i + 1) * 10_000_000L)
         }
         assertEquals(tracker.yawDeg, lastYaw, 1e-3f)
         assertTrue("callback fired at least 100 times, got $count", count >= 100)
-        // sanity: pitch/roll present
         assertTrue(!lastPitch.isNaN() && !lastRoll.isNaN())
     }
 
     @Test
-    fun `gravity keeps pitch near level and converges toward tilt`() {
+    fun `still gyro does not accumulate drift`() {
         val tracker = HeadOrientationTracker(sensorManager = null)
-
-        // Phase 1: level accel (0,0,9.8) interleaved with zero-rate gyro to publish.
-        var t = 0L
-        for (i in 0 until 500) {
-            tracker.injectAccel(0f, 0f, 9.8f)
-            t += 10_000_000L
-            tracker.injectGyro(0f, 0f, 0f, t)
+        for (i in 0..200) {
+            tracker.injectGyro(0f, 0f, 0f, (i + 1) * 10_000_000L)
         }
-        assertTrue("pitch stays near level, got ${tracker.pitchDeg}", kotlin.math.abs(tracker.pitchDeg) < 3f)
+        assertEquals(0f, tracker.yawDeg, 1e-4f)
+        assertEquals(0f, tracker.pitchDeg, 1e-4f)
+    }
 
-        // Phase 2: tilt. Chosen formula: pitch = atan2(-ax, sqrt(ay*ay+az*az)).
-        // A positive ax therefore drives pitch negative. Feed a clear +ax tilt.
-        val g = 9.8f
-        val ax = g * kotlin.math.sin(Math.toRadians(30.0)).toFloat()  // ~4.9
-        val az = g * kotlin.math.cos(Math.toRadians(30.0)).toFloat()  // ~8.49
-        // Expected accel pitch = atan2(-4.9, 8.49) = -30 deg.
-        for (i in 0 until 1000) {
-            tracker.injectAccel(ax, 0f, az)
-            t += 10_000_000L
-            tracker.injectGyro(0f, 0f, 0f, t)
+    @Test
+    fun `head speed comes from gyro rate and does not spike on batched samples`() {
+        val tracker = HeadOrientationTracker(sensorManager = null)
+        // Steady 0.2 rad/s about Y (~11.5 deg/s), but delivered with erratic timestamps
+        // including near-zero gaps (simulating Android sensor-event batching). A speed derived
+        // from angle/dt would explode on the tiny gaps; a gyro-rate-derived speed stays put.
+        var t = 10_000_000L
+        val gaps = longArrayOf(20_000_000L, 200_000L, 200_000L, 15_000_000L, 100_000L, 18_000_000L)
+        tracker.injectGyro(0f, 0.2f, 0f, t) // seed
+        var maxSpeed = 0f
+        repeat(6) { i ->
+            t += gaps[i % gaps.size]
+            tracker.injectGyro(0f, 0.2f, 0f, t)
+            if (tracker.headSpeedDegPerSec > maxSpeed) maxSpeed = tracker.headSpeedDegPerSec
         }
-        // Direction: pitch should move negative and approach -30 within 5 deg.
-        assertTrue("pitch moved negative, got ${tracker.pitchDeg}", tracker.pitchDeg < -5f)
-        assertEquals(-30f, tracker.pitchDeg, 5f)
+        // ~11.5 deg/s expected; must never blow past a small multiple of that.
+        assertTrue("speed must not spike from batching, got $maxSpeed", maxSpeed < 20f)
+    }
+
+    @Test
+    fun `recenter zeroes the pose`() {
+        val tracker = HeadOrientationTracker(sensorManager = null)
+        for (i in 0..50) {
+            tracker.injectGyro(-0.5f, -0.5f, 0f, (i + 1) * 10_000_000L)
+        }
+        assertTrue(kotlin.math.abs(tracker.yawDeg) > 1f)
+        tracker.recenter()
+        assertEquals(0f, tracker.yawDeg, 1e-6f)
+        assertEquals(0f, tracker.pitchDeg, 1e-6f)
     }
 
     @Test
