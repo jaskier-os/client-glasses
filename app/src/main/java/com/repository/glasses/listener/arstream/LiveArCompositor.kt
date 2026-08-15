@@ -70,6 +70,9 @@ class LiveArCompositor(private val context: Context) {
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
 
+    /** Capture-session callback executor; shut down with the session or it leaks a thread. */
+    private var sessionExecutor: java.util.concurrent.ExecutorService? = null
+
     private var encoder: MediaCodec? = null
     private var encoderSurface: Surface? = null
 
@@ -93,6 +96,21 @@ class LiveArCompositor(private val context: Context) {
 
     /** The HUD texture has no image until MainActivity draws once; sampling it before that is UB. */
     @Volatile private var hudEverUpdated = false
+
+    private var frameIndex = 0L
+
+    /**
+     * Flicker instrumentation. Kept in production: two counter increments per frame are free, and
+     * they are the only direct evidence that every emitted frame carried a HUD update. A healthy
+     * stream has hudUpdatesApplied == framesRendered and fps == the camera rate (~30). The bug this
+     * measures showed as a 0.67 ratio at ~90fps.
+     */
+    private var framesRendered = 0L
+    private var hudUpdatesApplied = 0L
+
+    @Volatile private var cameraEverUpdated = false
+    @Volatile private var lastCameraFrameAtMs = 0L
+    private var cameraStaleLogged = false
     private val frameLock = Object()
 
     /** Cached codec-config (SPS/PPS) blob, re-sent to every new client. */
@@ -101,9 +119,29 @@ class LiveArCompositor(private val context: Context) {
 
     // Identity until the first updateTexImage: a zero matrix would collapse every texture
     // coordinate to (0,0) and smear one undefined texel across the frame.
-    private val cameraTexMtx = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
+    private val cameraStMtx = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
     private val hudTexMtx = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
-    private val identityMvp = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
+
+    /**
+     * The camera quad covers the WHOLE output frame, unscaled.
+     *
+     * The camera's own SurfaceTexture transform (getTransformMatrix) already carries the sensor
+     * rotation on this hardware -- measured on-device, it transposes ([0]~0, [1]~+-1, [4]~+-1,
+     * [5]~0). So the sampled content is already PORTRAIT 3:4, which is exactly the 720x960 output
+     * aspect: no extra rotation and no aspect fit are needed, and applying one squashed the
+     * picture to 56% height (the min(720/960, 960/720) = 0.75 fit against a wrongly-transposed
+     * source aspect).
+     */
+    private val cameraMvp = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
+
+    /**
+     * The HUD spans the WHOLE frame.
+     *
+     * Now that the overlay carries real alpha its black areas are transparent, so covering the
+     * full frame costs nothing and matches what the wearer sees: HUD elements sit where they sit
+     * on the panel, over the entire view rather than inside an inset rectangle.
+     */
+    private val hudMvp = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
 
     private fun log(msg: String) {
         android.util.Log.i(TAG, msg)
@@ -146,8 +184,11 @@ class LiveArCompositor(private val context: Context) {
             } catch (t: Throwable) {
                 log("LiveArCompositor: setup failed: ${t.javaClass.simpleName}: ${t.message}")
                 releaseOnGlThread()
+                started = false
                 callback(false)
                 // Threads were created in start(); without this a failed session leaks all three.
+                // Safe from this thread: quitSafely() on one's own looper just ends it after the
+                // current message. stop() is a no-op afterwards because started is already false.
                 quitThreads()
             }
         }
@@ -174,16 +215,17 @@ class LiveArCompositor(private val context: Context) {
         eglSurface = core.createWindowSurface(encoderSurface!!)
         core.makeCurrent(eglSurface!!)
         program = OesProgram()
-
-        GLES20.glEnable(GLES20.GL_BLEND)
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        // Blending is enabled per-layer in the render loop, not globally.
 
         // 3) Two OES textures + their SurfaceTextures.
         cameraTexId = createOesTexture()
         hudTexId = createOesTexture()
 
+        // Sensor-native landscape buffer; the GL rotation turns it upright into the portrait
+        // encoder frame. Requesting a portrait buffer from the camera would make the HAL letterbox
+        // or refuse the size.
         cameraTexture = SurfaceTexture(cameraTexId).apply {
-            setDefaultBufferSize(WIDTH, HEIGHT)
+            setDefaultBufferSize(HEIGHT, WIDTH)
             setOnFrameAvailableListener({
                 synchronized(frameLock) { cameraFrameAvailable = true; frameLock.notifyAll() }
             }, notifyHandler)
@@ -211,6 +253,17 @@ class LiveArCompositor(private val context: Context) {
     private fun openCamera() {
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val cameraId = findCamera(manager) ?: throw RuntimeException("no camera")
+
+        // No app-side rotation: the SurfaceTexture transform already stands the frame upright
+        // (logged once on the first camera frame as "stMtx=[...]" -- it transposes). Logged here
+        // for the record only.
+        val sensorOrientation = try {
+            manager.getCameraCharacteristics(cameraId)
+                .get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 270
+        } catch (e: Exception) {
+            270
+        }
+        log("LiveArCompositor: sensorOrientation=$sensorOrientation (no app-side rotation applied)")
 
         // A latch, not wait/notify: onOpened can complete before this thread would have reached
         // wait(), and that missed signal would cost the full timeout.
@@ -286,6 +339,7 @@ class LiveArCompositor(private val context: Context) {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val exec = Executors.newSingleThreadExecutor { r -> Thread(r, "LiveArComp-cb") }
+            sessionExecutor = exec
             camera.createCaptureSession(
                 SessionConfiguration(
                     SessionConfiguration.SESSION_REGULAR,
@@ -302,9 +356,16 @@ class LiveArCompositor(private val context: Context) {
 
     private fun renderLoop() {
         val startNanos = System.nanoTime()
+        var lastStatsAtMs = System.currentTimeMillis()
+        var statsBaseFrames = 0L
         while (running) {
             synchronized(frameLock) {
-                if (!cameraFrameAvailable && !hudFrameAvailable) {
+                // Wait on the CAMERA only. The HUD posts at display rate (~60Hz) and the camera at
+                // ~30Hz; waking (and swapping) on either produced ~90 frames/s into a 30fps stream,
+                // and every camera-only iteration skipped the HUD update -- which, combined with
+                // BufferQueue slot recycling, sampled an all-black HUD buffer and dropped the
+                // overlay for ~1 frame in 3 (the measured flicker).
+                if (!cameraFrameAvailable) {
                     try { frameLock.wait(FRAME_WAIT_MS) } catch (_: InterruptedException) {}
                 }
             }
@@ -314,40 +375,126 @@ class LiveArCompositor(private val context: Context) {
                 // Claim both flags under the same monitor that sets them, so a frame arriving
                 // between a read and a clear cannot lose its notification.
                 val takeCamera: Boolean
-                val takeHud: Boolean
                 synchronized(frameLock) {
                     takeCamera = cameraFrameAvailable
-                    takeHud = hudFrameAvailable
                     cameraFrameAvailable = false
+                }
+                // Output rate == camera rate. No camera buffer means nothing new to encode, so do
+                // NOT draw and do NOT swap: an extra swap here is a duplicate frame the encoder
+                // has to spend bitrate on and a chance to sample a half-recycled HUD slot.
+                // hudFrameAvailable is deliberately NOT cleared here -- clearing it on a skipped
+                // iteration would lose the only signal that the UI process has ever drawn.
+                if (!takeCamera) continue
+
+                // Claimed separately, and only on iterations that actually render, so the
+                // "HUD has produced at least one frame" edge cannot be dropped by a skip.
+                val hudPosted: Boolean
+                synchronized(frameLock) {
+                    hudPosted = hudFrameAvailable
                     hudFrameAvailable = false
                 }
-                if (takeCamera) {
-                    cameraTexture?.updateTexImage()
-                    cameraTexture?.getTransformMatrix(cameraTexMtx)
+
+                cameraTexture?.updateTexImage()
+                cameraTexture?.getTransformMatrix(cameraStMtx)
+                lastCameraFrameAtMs = System.currentTimeMillis()
+                if (!cameraEverUpdated) {
+                    cameraEverUpdated = true
+                    // The whole geometry decision rests on this matrix: if it transposes
+                    // ([0]~0,[1]~+-1,[4]~+-1,[5]~0) the sensor rotation is already baked in and
+                    // the MVP must stay identity. Logged so a regression is one line away.
+                    log("LiveArCompositor: first camera frame stMtx=" +
+                        cameraStMtx.joinToString(",") { "%.3f".format(it) })
                 }
-                if (takeHud) {
-                    hudTexture?.updateTexImage()
-                    hudTexture?.getTransformMatrix(hudTexMtx)
-                    hudEverUpdated = true
+
+                // Warn once when the camera stops feeding while the HUD keeps going: that state
+                // used to render as a full-frame green wash (stale/undefined camera texture with
+                // the HUD drawn over it) and looked like a colour bug rather than a stalled feed.
+                val cameraStale = cameraEverUpdated &&
+                    System.currentTimeMillis() - lastCameraFrameAtMs > CAMERA_STALE_MS
+                if (cameraStale != cameraStaleLogged) {
+                    cameraStaleLogged = cameraStale
+                    log("LiveArCompositor: camera feed ${if (cameraStale) "STALLED" else "resumed"}")
+                }
+                // Update the HUD UNCONDITIONALLY on every rendered frame -- no freshness gate.
+                //
+                // SurfaceTexture.updateTexImage() with nothing queued is a documented no-op that
+                // RETAINS the currently bound image, so calling it always is safe and guarantees
+                // the overlay is the latest POSTED buffer (worst case the previous valid one).
+                // Gating it on hudFrameAvailable was the flicker: on a camera-only wake the HUD
+                // was left bound to a slot the producer had already released and refilled, which
+                // sampled as black -- and black gives a = max(rgb) = 0, i.e. no overlay at all.
+                //
+                // hudEverUpdated still latches on the first ACTUAL post, because the draw below
+                // must not sample a texture that has never had an image bound (undefined data).
+                if (hudPosted) hudEverUpdated = true
+                val hud = hudTexture
+                if (hud != null) {
+                    hud.updateTexImage()
+                    hud.getTransformMatrix(hudTexMtx)
+                    hudUpdatesApplied++
                 }
 
                 GLES20.glViewport(0, 0, WIDTH, HEIGHT)
                 GLES20.glClearColor(0f, 0f, 0f, 1f)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-                program?.draw(cameraTexId, identityMvp, cameraTexMtx, MODE_OPAQUE)
+                // Camera base layer: opaque, blending OFF. Leaving blending enabled here let the
+                // camera's own alpha modulate the frame, which on the waveguide's green-dominant
+                // content showed up as a green tint that pulsed with the content.
+                GLES20.glDisable(GLES20.GL_BLEND)
+                // Only sample the camera once it has actually produced a frame; an OES texture
+                // with no bound image reads as undefined data (observed as a green field).
+                if (cameraEverUpdated) {
+                    program?.draw(cameraTexId, cameraMvp, cameraStMtx, MODE_OPAQUE)
+                }
+
                 // Skip the overlay until the UI process has actually produced a frame: an OES
                 // texture with no bound image samples undefined data over the whole picture.
+                // No staleness gate: the HUD is drawn at its own rate and reusing its last buffer
+                // is correct (that is what the recorded-AR path does). Gating on freshness made
+                // the overlay blink in and out whenever the UI process paused between draws.
                 if (hudEverUpdated) {
-                    program?.draw(hudTexId, identityMvp, hudTexMtx, MODE_LUMA_ALPHA)
+                    // PREMULTIPLIED source factor (GL_ONE), matching VideoCompositor. GL_SRC_ALPHA
+                    // applies alpha a second time on top of the shader's luma-as-alpha, which
+                    // darkens and tints the overlay.
+                    GLES20.glEnable(GLES20.GL_BLEND)
+                    GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                    program?.draw(hudTexId, hudMvp, hudTexMtx, MODE_LUMA_ALPHA)
+                    GLES20.glDisable(GLES20.GL_BLEND)
                 }
 
                 egl?.setPresentationTime(eglSurface!!, System.nanoTime() - startNanos)
                 egl?.swapBuffers(eglSurface!!)
+                frameIndex++
+                framesRendered++
 
                 drainEncoder()
+
+                val nowMs = System.currentTimeMillis()
+                val elapsed = nowMs - lastStatsAtMs
+                if (elapsed >= STATS_INTERVAL_MS) {
+                    val delta = framesRendered - statsBaseFrames
+                    val fps = delta * 1000.0 / elapsed
+                    log(
+                        "LiveArCompositor: stats framesRendered=$framesRendered " +
+                            "hudUpdatesApplied=$hudUpdatesApplied " +
+                            "fps=${"%.1f".format(fps)}"
+                    )
+                    lastStatsAtMs = nowMs
+                    statsBaseFrames = framesRendered
+                }
             } catch (t: Throwable) {
-                if (running) log("LiveArCompositor: render error: ${t.message}")
+                if (running) {
+                    log("LiveArCompositor: render error: ${t.javaClass.name}: ${t.message}")
+                }
+                // A dead codec or a released EGL/SurfaceTexture never recovers: the old code
+                // swallowed it and then threw the identical exception every frame forever, so the
+                // session looked alive while emitting nothing. Exit the loop instead, which runs
+                // releaseOnGlThread() for a clean teardown.
+                if (t is MediaCodec.CodecException || t is IllegalStateException) {
+                    log("LiveArCompositor: unrecoverable render error, stopping loop")
+                    running = false
+                }
             }
         }
         releaseOnGlThread()
@@ -398,6 +545,17 @@ class LiveArCompositor(private val context: Context) {
         started = false
         running = false
         synchronized(frameLock) { frameLock.notifyAll() }
+
+        // JOIN the GL thread before quitting the loopers. renderLoop() runs inside a posted
+        // message, so quitSafely() does NOT interrupt it -- it exits because `running` is false,
+        // and only then does releaseOnGlThread() run. Returning without waiting would report the
+        // camera/encoder/EGL as released while they are still held, and the next start would hit
+        // ERROR_CAMERA_IN_USE against our own stale session.
+        val gl = glThread
+        if (gl != null && Thread.currentThread() !== gl) {
+            try { gl.join(RELEASE_JOIN_TIMEOUT_MS) } catch (_: InterruptedException) {}
+            if (gl.isAlive) log("LiveArCompositor: GL thread did not finish releasing in time")
+        }
         quitThreads()
         log("LiveArCompositor: stopped")
     }
@@ -420,6 +578,8 @@ class LiveArCompositor(private val context: Context) {
         captureSession = null
         try { cameraDevice?.close() } catch (_: Exception) {}
         cameraDevice = null
+        try { sessionExecutor?.shutdown() } catch (_: Exception) {}
+        sessionExecutor = null
 
         try { encoder?.stop() } catch (_: Exception) {}
         try { encoder?.release() } catch (_: Exception) {}
@@ -619,16 +779,39 @@ class LiveArCompositor(private val context: Context) {
     private companion object {
         private const val TAG = "LiveArCompositor"
         private const val MIME = "video/avc"
-        private const val WIDTH = 1280
-        private const val HEIGHT = 720
+        // PORTRAIT output at the SENSOR'S OWN 4:3 aspect (rotated), not a forced 9:16.
+        //
+        // Using 720x1280 meant the 4:3 sensor image had to be letterboxed into a 9:16 frame, which
+        // wasted a third of the picture on black bars. 720x960 matches what the camera actually
+        // produces, so the stream looks like an ordinary recording of the same scene.
+        private const val WIDTH = 720
+        private const val HEIGHT = 960
 
         /** Rokid waveguide panel size -- the HUD layer is captured at its native resolution. */
         private const val HUD_WIDTH = 480
         private const val HUD_HEIGHT = 640
+
+        /** Fraction of the streamed frame width the HUD overlay spans. */
+        private const val HUD_COVERAGE = 0.55f
         private const val FPS = 30
         private const val BITRATE = 4_000_000
         private const val FRAME_WAIT_MS = 100L
         private const val CAMERA_OPEN_TIMEOUT_MS = 5_000L
+
+        /** Long enough for one render iteration plus full camera/encoder/EGL release. */
+        private const val RELEASE_JOIN_TIMEOUT_MS = 3_000L
+
+        /**
+         * How long a HUD buffer stays valid to composite. The UI draws at display rate, so ~3
+         * video frames of slack covers normal jitter while still dropping the overlay when the UI
+         * process stalls, rather than smearing a stale buffer over the picture.
+         */
+
+        /** How long without a camera buffer counts as a stalled feed. */
+        private const val CAMERA_STALE_MS = 1_000L
+
+        /** Cadence of the framesRendered / hudUpdatesApplied flicker instrumentation line. */
+        private const val STATS_INTERVAL_MS = 5_000L
 
         /** CameraDevice.StateCallback.ERROR_CAMERA_IN_USE */
         private const val ERROR_CAMERA_IN_USE = 1
@@ -652,16 +835,36 @@ class LiveArCompositor(private val context: Context) {
         private const val F_SHADER = """
             #extension GL_OES_EGL_image_external : require
             precision mediump float;
+            // No floor. Verified offline by compositing the real HUD and camera layers (the two
+            // files record_ar_screen produces) with this exact blend: with the premultiply in
+            // place the background tint is 0.00/255 at EVERY floor, so a floor buys nothing and
+            // only destroys content -- 0.0 keeps 46.9% of HUD content pixels, 0.12 keeps 36.6%,
+            // and the lost 10% is the antialiased text edges that kept disappearing on device.
+            #define HUD_BLACK_FLOOR 0.0
             uniform samplerExternalOES uTex;
             uniform int uMode;
             varying vec2 vTex;
             void main() {
                 vec4 c = texture2D(uTex, vTex);
                 if (uMode == 0) {
+                    // Camera: opaque, channels as sampled.
                     gl_FragColor = vec4(c.rgb, 1.0);
                 } else {
-                    float a = max(c.r, max(c.g, c.b));
-                    gl_FragColor = vec4(c.rgb, a);
+                    // Luma-as-alpha, PREMULTIPLIED.
+                    //
+                    // The premultiply is the fix for the green wash, and it is not optional: the
+                    // blend is GL_ONE/GL_ONE_MINUS_SRC_ALPHA, so src.rgb is added to the camera
+                    // REGARDLESS of alpha. Emitting straight colour therefore poured the HUD
+                    // background into every camera pixel even where alpha was 0 -- measured 125 of
+                    // 201 frames washed with straight colour, 0 of 202 with this premultiply.
+                    //
+                    // The tiny floor only discards sensor/encode noise around true black. It must
+                    // stay small: an earlier 0.34 floor sat just above the background level and
+                    // any per-frame jitter flipped the whole panel between opaque and invisible,
+                    // which is what made the HUD flicker.
+                    float i = max(c.r, max(c.g, c.b));
+                    float a = clamp((i - HUD_BLACK_FLOOR) / (1.0 - HUD_BLACK_FLOOR), 0.0, 1.0);
+                    gl_FragColor = vec4(c.rgb * a, a);
                 }
             }
         """

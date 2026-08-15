@@ -238,6 +238,26 @@ class BtManagerService : Service() {
             return hfpClient.setMicrophoneMute(deviceAddress, muted)
         }
 
+        override fun acquireA2dpSuppression(
+            deviceAddress: String, leaseMs: Long, owner: android.os.IBinder?
+        ): String? {
+            Log.i(TAG, "event=binder.acquireA2dpSuppression addr=$deviceAddress lease_ms=$leaseMs")
+            return a2dpSink.acquire(deviceAddress, leaseMs, owner)
+        }
+
+        override fun renewA2dpSuppression(token: String?) {
+            a2dpSink.renew(token)
+        }
+
+        override fun releaseA2dpSuppression(token: String?) {
+            Log.i(TAG, "event=binder.releaseA2dpSuppression token=$token")
+            a2dpSink.releaseLease(token)
+        }
+
+        override fun isA2dpSuppressed(deviceAddress: String): Boolean {
+            return a2dpSink.isSuppressed(deviceAddress)
+        }
+
         override fun setActiveSession(label: String) {
             rfcommManager.setActiveSession(label)
         }

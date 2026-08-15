@@ -42,6 +42,10 @@ class ArStreamServer(
     /** Set when a client connected before the encoder had produced its config frame. */
     @Volatile private var primePending = false
 
+    // Traffic counters so a silent link can be told apart from a stalled producer.
+    @Volatile private var encodedCount = 0L
+    @Volatile private var downlinkCount = 0L
+
     /** Bounded so a stalled client drops frames instead of growing the heap without limit. */
     private val videoQueue = LinkedBlockingQueue<ByteArray>(VIDEO_QUEUE_CAPACITY)
     private val audioQueue = LinkedBlockingQueue<ByteArray>(AUDIO_QUEUE_CAPACITY)
@@ -78,6 +82,8 @@ class ArStreamServer(
                 }
             }
 
+            thread(name = "ArStream-peerWatch") { peerWatchLoop() }
+
             // Wire producers.
             audio.onUplinkAudio = { pcm, len ->
                 offer(audioQueue, ArStreamProtocol.frameAudio(pcm, len))
@@ -94,6 +100,13 @@ class ArStreamServer(
 
     /** Called by the compositor for every encoded frame. */
     fun onEncodedFrame(payload: ByteArray, keyframe: Boolean, config: Boolean) {
+        encodedCount++
+        if (encodedCount == 1L || config || encodedCount % 150L == 0L) {
+            log?.invoke(
+                "ArStreamServer: encoded #$encodedCount len=${payload.size} key=$keyframe " +
+                    "config=$config client=${videoOut != null}"
+            )
+        }
         if (videoOut == null) return
         // A client that connected before the encoder emitted its first config frame got nothing to
         // prime with; send it the moment it exists, or that client decodes nothing forever.
@@ -127,6 +140,37 @@ class ArStreamServer(
             } catch (e: Exception) {
                 log?.invoke("ArStreamServer: video client setup failed: ${e.message}")
                 closeQuietly(socket)
+            }
+        }
+    }
+
+    /**
+     * Ends the session when the phone stops being a live peer.
+     *
+     * Every teardown path other than this one requires the phone to send CTRL_STOP.
+     * A force-stopped phone app, a BT/WiFi drop, or a half-open TCP connection sends
+     * nothing, so without this the glasses would stream to nobody -- camera, mics,
+     * P2P group and the A2DP hold all still up -- until the user noticed. The
+     * grace period covers the gap between the servers binding and the phone's first
+     * connect, and any brief mid-session reconnect.
+     */
+    private fun peerWatchLoop() {
+        val startedAt = System.currentTimeMillis()
+        var lastSeenPeer = startedAt
+        while (running.get()) {
+            try { Thread.sleep(PEER_WATCH_TICK_MS) } catch (_: InterruptedException) { return }
+            if (!running.get()) return
+            val connected = videoSocket?.isConnected == true && videoSocket?.isClosed == false ||
+                audioSocket?.isConnected == true && audioSocket?.isClosed == false
+            val now = System.currentTimeMillis()
+            if (connected) {
+                lastSeenPeer = now
+                continue
+            }
+            if (now - lastSeenPeer >= PEER_GRACE_MS) {
+                log?.invoke("ArStreamServer: no peer for ${(now - lastSeenPeer) / 1000}s -- stopping session")
+                try { onStopRequested?.invoke() } catch (_: Exception) {}
+                return
             }
         }
     }
@@ -181,6 +225,12 @@ class ArStreamServer(
                 when (body[0]) {
                     ArStreamProtocol.MSG_AUDIO -> {
                         val pcm = ArStreamProtocol.decodeAudio(body)
+                        downlinkCount++
+                        if (downlinkCount == 1L || downlinkCount % 200L == 0L) {
+                            var peak = 0
+                            for (s in pcm) { val a = kotlin.math.abs(s.toInt()); if (a > peak) peak = a }
+                            log?.invoke("ArStreamServer: downlink #$downlinkCount samples=${pcm.size} peak=$peak")
+                        }
                         audio.playDownlink(pcm, pcm.size)
                     }
                     ArStreamProtocol.MSG_CONTROL -> handleControl(body)
@@ -191,7 +241,9 @@ class ArStreamServer(
                 break
             }
         }
-        audioOut = null
+        // Only clear if this reader still owns the current socket: a superseded thread exiting
+        // late must not null out the replacement client's output stream.
+        if (socket === audioSocket) audioOut = null
     }
 
     private fun handleControl(body: ByteArray) {
@@ -215,6 +267,11 @@ class ArStreamServer(
         out: () -> OutputStream?,
         onBroken: () -> Unit,
     ) {
+        // A single failed write is not a dead client: a WiFi-Direct hiccup for one frame is
+        // routine, and dropping the socket on the first one closed the stream, which the phone
+        // saw as EOF and turned into finish() -- the whole session died from one bad frame.
+        // Only a RUN of failures means the peer is really gone.
+        var consecutiveFailures = 0
         while (running.get()) {
             val frame = try {
                 queue.poll(POLL_MS, java.util.concurrent.TimeUnit.MILLISECONDS) ?: continue
@@ -225,11 +282,21 @@ class ArStreamServer(
             try {
                 stream.write(frame)
                 stream.flush()
+                consecutiveFailures = 0
             } catch (e: Exception) {
-                if (running.get()) log?.invoke("ArStreamServer: send failed: ${e.message}")
-                // Drop the client rather than writing to a broken stream 30x a second (which
-                // floods the log AND blocks the next client from ever being primed).
-                onBroken()
+                consecutiveFailures++
+                if (running.get()) {
+                    log?.invoke(
+                        "ArStreamServer: send failed ($consecutiveFailures/$MAX_CONSECUTIVE_SEND_FAILURES): ${e.message}"
+                    )
+                }
+                if (consecutiveFailures >= MAX_CONSECUTIVE_SEND_FAILURES) {
+                    // Drop the client rather than writing to a broken stream 30x a second (which
+                    // floods the log AND blocks the next client from ever being primed).
+                    if (running.get()) log?.invoke("ArStreamServer: onBroken after $consecutiveFailures consecutive send failures")
+                    consecutiveFailures = 0
+                    onBroken()
+                }
             }
         }
     }
@@ -269,8 +336,20 @@ class ArStreamServer(
     }
 
     private companion object {
+        const val PEER_WATCH_TICK_MS = 2_000L
+
+        /**
+         * How long the session survives with no connected peer. Long enough for the
+         * phone's initial connect after start_ar_stream (and a brief reconnect), short
+         * enough that a dead phone does not strand the glasses streaming to nobody.
+         */
+        const val PEER_GRACE_MS = 20_000L
+
         const val VIDEO_QUEUE_CAPACITY = 30
         const val AUDIO_QUEUE_CAPACITY = 100
         const val POLL_MS = 200L
+
+        /** Consecutive failed writes before a client counts as gone. */
+        const val MAX_CONSECUTIVE_SEND_FAILURES = 3
     }
 }

@@ -43,6 +43,25 @@ class A2dpSinkController(
         private const val CONNECTION_POLICY_ALLOWED = 100
         private const val PRIORITY_AUTO_CONNECT = 1000
 
+        /** Safety net cadence for re-dropping a suppressed link that came back. */
+        private const val SUPPRESS_WATCHDOG_MS = 3_000L
+
+        /**
+         * How long a suppression lease stays valid without renewal.
+         *
+         * 5s with the holder renewing every 2s: two consecutive missed renewals
+         * (binder hiccup, GC pause) still keep the hold, while a dead holder costs
+         * the user at most ~5s + one watchdog tick of silence. MIN/MAX just keep a
+         * caller from asking for something absurd in either direction.
+         */
+        const val DEFAULT_LEASE_MS = 5_000L
+        private const val MIN_LEASE_MS = 2_000L
+        private const val MAX_LEASE_MS = 60_000L
+
+        /** Bounded post-release reconnect: attempts spread over ~10s. */
+        private const val RECONNECT_RETRY_MS = 2_000L
+        private const val RECONNECT_MAX_ATTEMPTS = 6
+
         // Hidden BluetoothA2dpSink intent actions (AOSP)
         private const val ACTION_CONNECTION_STATE_CHANGED =
             "android.bluetooth.a2dp-sink.profile.action.CONNECTION_STATE_CHANGED"
@@ -88,6 +107,195 @@ class A2dpSinkController(
     // Lets callers distinguish a self-initiated ACL (raised by our own connect
     // attempt) from a genuine user-initiated connection.
     private val lastConnectAttempt = ConcurrentHashMap<String, Long>()
+
+    // ---- Suppression leases ----
+    //
+    // While an AR stream session is open the phone plays the glasses' own uplink mic
+    // on STREAM_MUSIC, and because these glasses are the phone's A2DP sink Android
+    // routes it straight back to our speaker -- a real acoustic loop. So the link to
+    // that ONE address must be held down for the session.
+    //
+    // Enforcement is CONSTANT, not one-shot: Android's own profile-reconnect logic
+    // and our ProfileAutoConnector both re-establish A2DP within seconds, so a single
+    // disconnect() loses the race. Three enforcement points:
+    //   1. connect()/connectExclusive() refuse outright (blocks our own sweeps).
+    //   2. CONNECTION_STATE_CHANGED to CONNECTING/CONNECTED re-disconnects
+    //      (catches remote-initiated reconnects).
+    //   3. The watchdog re-disconnects anything that slipped past both.
+    //
+    // The hold is a LEASE keyed by an opaque token, never a boolean flag. A flag can
+    // only be cleared by code that runs; a client that is force-stopped, kill -9'd, or
+    // that crashes runs no cleanup at all -- which is exactly how a hold survived five
+    // minutes and two sessions in production. A lease needs positive action to STAY
+    // held, so every failure mode ends in release. Leases are token-keyed (a multiset,
+    // not a set) so overlapping holders cannot release each other's hold, and the map
+    // is in-memory only, so a bt-manager restart or a reboot starts fully unsuppressed.
+    private class Lease(
+        val addr: String,
+        val leaseMs: Long,
+        @Volatile var expiresAt: Long,
+        val owner: android.os.IBinder?,
+        val deathRecipient: android.os.IBinder.DeathRecipient?,
+    )
+
+    private val leases = ConcurrentHashMap<String, Lease>()
+    private val suppressHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /**
+     * Bumped on every change to [leases]. The watchdog captures it at entry and
+     * re-checks before acting: `removeCallbacks` cannot stop a runnable that has
+     * already started, so without this a tick already in flight when the last lease
+     * is released would disconnect the link we just restored.
+     */
+    private val suppressGeneration = java.util.concurrent.atomic.AtomicLong(0)
+
+    private val suppressWatchdog = object : Runnable {
+        override fun run() {
+            val now = SystemClock.elapsedRealtime()
+            for ((token, lease) in leases) {
+                if (now >= lease.expiresAt) {
+                    // Not renewed: the holder is gone (killed, crashed, wedged, or
+                    // simply never tore down). This is the path that makes a leak
+                    // impossible, so it is logged loudly.
+                    log("event=a2dp.suppress.expired token=$token addr=${lease.addr} overdue_ms=${now - lease.expiresAt}")
+                    dropLease(token, "lease_expired")
+                }
+            }
+            for (addr in suppressedAddresses()) {
+                if (isConnected(addr)) {
+                    log("event=a2dp.suppress.rearm reason=watchdog addr=$addr")
+                    disconnect(addr)
+                }
+            }
+            if (leases.isNotEmpty()) suppressHandler.postDelayed(this, SUPPRESS_WATCHDOG_MS)
+        }
+    }
+
+    private fun suppressedAddresses(): Set<String> =
+        leases.values.mapTo(HashSet()) { it.addr }
+
+    /**
+     * Take a suppression lease on [deviceAddress], valid for [leaseMs] and renewable.
+     *
+     * [owner] is a binder belonging to the caller. Its death releases the lease
+     * immediately, which is the fast path; the lease expiry is the backstop that also
+     * covers a caller that is alive but wedged. Returns the token, or null if rejected.
+     */
+    fun acquire(deviceAddress: String, leaseMs: Long, owner: android.os.IBinder?): String? {
+        if (deviceAddress.isBlank()) {
+            log("event=a2dp.suppress.reject reason=blank_addr")
+            return null
+        }
+        val effLeaseMs = leaseMs.coerceIn(MIN_LEASE_MS, MAX_LEASE_MS)
+        val token = "s${suppressGeneration.incrementAndGet()}-${SystemClock.elapsedRealtime()}"
+        var recipient: android.os.IBinder.DeathRecipient? = null
+        if (owner != null) {
+            recipient = android.os.IBinder.DeathRecipient {
+                log("event=a2dp.suppress.owner_died token=$token addr=$deviceAddress")
+                suppressHandler.post { dropLease(token, "owner_died") }
+            }
+            try {
+                owner.linkToDeath(recipient, 0)
+            } catch (e: Throwable) {
+                // Already dead: refuse rather than take a hold nothing will release.
+                log("event=a2dp.suppress.reject reason=owner_dead addr=$deviceAddress err=${e.message}")
+                return null
+            }
+        }
+        val wasSuppressed = isSuppressed(deviceAddress)
+        leases[token] = Lease(
+            deviceAddress, effLeaseMs, SystemClock.elapsedRealtime() + effLeaseMs, owner, recipient
+        )
+        suppressGeneration.incrementAndGet()
+        log("event=a2dp.suppress.on token=$token addr=$deviceAddress new=${!wasSuppressed} connected=${isConnected(deviceAddress)} lease_ms=$effLeaseMs holders=${leases.count { it.value.addr == deviceAddress }}")
+        cancelReconnect(deviceAddress)
+        disconnect(deviceAddress)
+        suppressHandler.removeCallbacks(suppressWatchdog)
+        suppressHandler.postDelayed(suppressWatchdog, SUPPRESS_WATCHDOG_MS)
+        return token
+    }
+
+    /** Extend a lease. Unknown/expired tokens are ignored (the hold is already gone). */
+    fun renew(token: String?) {
+        val lease = leases[token ?: return] ?: run {
+            log("event=a2dp.suppress.renew.unknown token=$token")
+            return
+        }
+        lease.expiresAt = SystemClock.elapsedRealtime() + lease.leaseMs
+    }
+
+    /** Explicit release. Idempotent; the fast path when teardown does run normally. */
+    fun releaseLease(token: String?) {
+        dropLease(token ?: return, "released")
+    }
+
+    private fun dropLease(token: String, reason: String) {
+        val lease = leases.remove(token) ?: return
+        suppressGeneration.incrementAndGet()
+        try {
+            if (lease.owner != null && lease.deathRecipient != null) {
+                lease.owner.unlinkToDeath(lease.deathRecipient, 0)
+            }
+        } catch (_: Throwable) {}
+        val stillHeld = isSuppressed(lease.addr)
+        log("event=a2dp.suppress.off token=$token addr=${lease.addr} reason=$reason still_held=$stillHeld")
+        if (leases.isEmpty()) suppressHandler.removeCallbacks(suppressWatchdog)
+        // Only the LAST holder of an address restores it. With a plain set, an
+        // overlapping second session's release would have un-suppressed the address
+        // out from under the first one.
+        if (!stillHeld) scheduleReconnect(lease.addr, reason)
+    }
+
+    // ---- Post-release reconnect ----
+    //
+    // Clearing the flag only stops the refusals; nothing brings the link back.
+    // ProfileAutoConnector's sweep eventually would, but its per-device connect
+    // cooldown is 20s and the device may be marked stale, so the user can sit
+    // without BT audio for minutes. Drive it explicitly, with bounded retries
+    // until the profile actually reports CONNECTED.
+
+    private val reconnectRunnables = ConcurrentHashMap<String, Runnable>()
+
+    private fun cancelReconnect(addr: String) {
+        reconnectRunnables.remove(addr)?.let { suppressHandler.removeCallbacks(it) }
+    }
+
+    fun scheduleReconnect(deviceAddress: String, reason: String) {
+        cancelReconnect(deviceAddress)
+        var attempt = 0
+        val r = object : Runnable {
+            override fun run() {
+                if (isSuppressed(deviceAddress)) {
+                    log("event=a2dp.restore.abort reason=resuppressed addr=$deviceAddress")
+                    reconnectRunnables.remove(deviceAddress)
+                    return
+                }
+                if (isConnected(deviceAddress)) {
+                    log("event=a2dp.restore.ok addr=$deviceAddress reason=$reason attempts=$attempt")
+                    reconnectRunnables.remove(deviceAddress)
+                    return
+                }
+                attempt++
+                if (attempt > RECONNECT_MAX_ATTEMPTS) {
+                    log("event=a2dp.restore.giveup addr=$deviceAddress reason=$reason attempts=${attempt - 1}")
+                    reconnectRunnables.remove(deviceAddress)
+                    return
+                }
+                // connectExclusive, not connect: the sink slot is last-writer-wins and
+                // another source may have taken it while we held the link down. The
+                // user's expectation after a session is that their phone is back.
+                val ok = connectExclusive(deviceAddress)
+                log("event=a2dp.restore.attempt addr=$deviceAddress reason=$reason attempt=$attempt result=$ok")
+                suppressHandler.postDelayed(this, RECONNECT_RETRY_MS)
+            }
+        }
+        reconnectRunnables[deviceAddress] = r
+        log("event=a2dp.restore.start addr=$deviceAddress reason=$reason")
+        suppressHandler.post(r)
+    }
+
+    fun isSuppressed(deviceAddress: String): Boolean =
+        leases.values.any { it.addr.equals(deviceAddress, true) }
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -157,6 +365,11 @@ class A2dpSinkController(
         } catch (_: Throwable) {}
         proxy = null
         listener = null
+        suppressHandler.removeCallbacks(suppressWatchdog)
+        for (r in reconnectRunnables.values) suppressHandler.removeCallbacks(r)
+        reconnectRunnables.clear()
+        for (t in leases.keys.toList()) dropLease(t, "controller_released")
+        leases.clear()
         deviceConnectionStates.clear()
         deviceAudioStates.clear()
         lastConnectAttempt.clear()
@@ -218,6 +431,10 @@ class A2dpSinkController(
      * Idempotent: if the target is already the only connected device, no-op.
      */
     fun connectExclusive(deviceAddress: String): Boolean = GT.section("bt.a2dp.connectExclusive") {
+        if (isSuppressed(deviceAddress)) {
+            log("event=a2dp.connectExclusive.refused reason=suppressed addr=$deviceAddress")
+            return@section false
+        }
         val current = connectedDevices()
         val alreadyOnly = current.size == 1 &&
             current.first().address.equals(deviceAddress, true)
@@ -236,6 +453,10 @@ class A2dpSinkController(
     }
 
     fun connect(deviceAddress: String): Boolean = GT.section("bt.a2dp.connect") {
+        if (isSuppressed(deviceAddress)) {
+            log("event=a2dp.connect.refused reason=suppressed addr=$deviceAddress")
+            return@section false
+        }
         lastConnectAttempt[deviceAddress] = SystemClock.elapsedRealtime()
         val p = proxy ?: run {
             log("event=a2dp.connect.fail reason=proxy_null addr=$deviceAddress")
@@ -294,6 +515,16 @@ class A2dpSinkController(
         lastConnectionState = newState
         if (addr.isNotEmpty()) lastDeviceAddress = addr
         log("event=a2dp.CONNECTION_STATE_CHANGED addr=$addr name=${dev?.name} prev=${profileStateLabel(prevState)} new=${profileStateLabel(newState)}${if (otherDevices.isNotEmpty()) " other_devices=[$otherDevices]" else ""}")
+        // Primary enforcement for suppression: the remote (or Android's own
+        // profile-reconnect) can raise the link at any time. Drop it the moment
+        // the state machine reports it coming up, without waiting for the watchdog.
+        if (addr.isNotEmpty() && isSuppressed(addr) &&
+            (newState == BluetoothProfile.STATE_CONNECTED ||
+                newState == BluetoothProfile.STATE_CONNECTING)
+        ) {
+            log("event=a2dp.suppress.rearm reason=state_changed addr=$addr state=${profileStateLabel(newState)}")
+            disconnect(addr)
+        }
         try {
             listener?.onA2dpConnectionChanged(addr, prevState, newState)
         } catch (e: Throwable) {

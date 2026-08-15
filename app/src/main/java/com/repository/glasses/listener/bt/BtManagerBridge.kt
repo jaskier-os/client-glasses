@@ -19,6 +19,16 @@ class BtManagerBridge(private val context: Context) {
         private const val TAG = "App:BtBridge"
         private const val BT_MANAGER_PACKAGE = "com.repository.glasses.btmanager"
         private const val BT_MANAGER_SERVICE = "com.repository.glasses.btmanager.BtManagerService"
+
+        /**
+         * A2DP suppression lease length. Must exceed the caller's renewal interval
+         * with enough slack to survive a missed heartbeat, and be short enough that
+         * a dead holder costs the user only a few seconds of BT audio.
+         */
+        const val A2DP_SUPPRESS_LEASE_MS = 5_000L
+
+        /** Renewal cadence for the above. */
+        const val A2DP_SUPPRESS_RENEW_MS = 2_000L
     }
 
     interface RfcommListener {
@@ -224,6 +234,11 @@ class BtManagerBridge(private val context: Context) {
                     manager?.registerCallback(callback)
                 } catch (e: Exception) {
                     remoteLog?.invoke("BtManager: registerCallback failed: ${e.message}")
+                }
+                // Before any listener runs: a rebind invalidated the old token, so the
+                // hold must be re-taken (or stay released) to match the desired state.
+                try { reassertA2dpSuppression() } catch (e: Exception) {
+                    remoteLog?.invoke("reassertA2dpSuppression failed: ${e.message}")
                 }
                 try { onBound?.invoke() } catch (e: Exception) {
                     remoteLog?.invoke("onBound failed: ${e.message}")
@@ -450,6 +465,88 @@ class BtManagerBridge(private val context: Context) {
             remoteLog?.invoke("BtManager: setHfMicMute failed: ${e.message}")
             false
         }
+    }
+
+    // ---- A2DP suppression lease ----
+    //
+    // Holds the phone's A2DP Sink link to these glasses DOWN for the duration of an AR
+    // stream session: the phone plays our own uplink mic on STREAM_MUSIC, which Android
+    // routes back to us over A2DP, so the wearer hears themselves and the echo canceller
+    // is poisoned.
+    //
+    // The bridge, not the caller, owns the token and the DESIRED state. Two reasons:
+    //   - A bt-manager crash/rebind loses the token; the desired state lets the next
+    //     bind re-assert it instead of silently dropping the hold (or, worse, dropping
+    //     a RELEASE, which would strand the user with no BT audio).
+    //   - The lease owner binder must live exactly as long as this PROCESS, so that
+    //     bt-manager's linkToDeath releases the hold the instant the listener dies.
+
+    /** Owner token for the lease. Its death (= this process dying) releases the hold. */
+    private val a2dpSuppressOwner = android.os.Binder()
+
+    /** Address we want held down, or null for "no hold". The authority on intent. */
+    @Volatile private var a2dpSuppressWantAddr: String? = null
+
+    /** Token from the current bt-manager instance; null when unbound or not held. */
+    @Volatile private var a2dpSuppressToken: String? = null
+
+    /**
+     * Ask bt-manager to hold [deviceAddress] down, or refresh an existing hold.
+     *
+     * Safe (and expected) to call repeatedly: this is the heartbeat that keeps the
+     * lease alive. If the token was lost to a rebind it silently re-acquires.
+     *
+     * @return true if a hold is currently established with bt-manager.
+     */
+    fun holdA2dpSuppressed(deviceAddress: String): Boolean {
+        a2dpSuppressWantAddr = deviceAddress
+        val m = manager ?: return false
+        return try {
+            val tok = a2dpSuppressToken
+            if (tok != null) {
+                m.renewA2dpSuppression(tok)
+                true
+            } else {
+                val fresh = m.acquireA2dpSuppression(
+                    deviceAddress, A2DP_SUPPRESS_LEASE_MS, a2dpSuppressOwner
+                )
+                a2dpSuppressToken = fresh
+                remoteLog?.invoke("BtManager: a2dp suppression acquired addr=$deviceAddress token=$fresh")
+                fresh != null
+            }
+        } catch (e: Exception) {
+            // Died mid-call: drop the token so the next heartbeat re-acquires.
+            a2dpSuppressToken = null
+            remoteLog?.invoke("BtManager: a2dp suppression hold failed: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Drop the hold. Never a no-op on "we think nothing is held": clearing intent is
+     * what stops a rebind from re-asserting a stale hold, and the release itself is
+     * oneway so a wedged bt-manager cannot block the caller's teardown.
+     */
+    fun clearA2dpSuppression() {
+        a2dpSuppressWantAddr = null
+        val tok = a2dpSuppressToken ?: return
+        a2dpSuppressToken = null
+        try {
+            manager?.releaseA2dpSuppression(tok)
+            remoteLog?.invoke("BtManager: a2dp suppression released token=$tok")
+        } catch (e: Exception) {
+            // The lease expires by itself within seconds, so a failed release costs
+            // the user a few seconds of silence, never a permanent one.
+            remoteLog?.invoke("BtManager: a2dp suppression release failed: ${e.message}")
+        }
+    }
+
+    /** Re-assert the desired hold after a (re)bind. Called from the onBound path. */
+    private fun reassertA2dpSuppression() {
+        a2dpSuppressToken = null
+        val want = a2dpSuppressWantAddr ?: return
+        remoteLog?.invoke("BtManager: re-asserting a2dp suppression addr=$want after rebind")
+        holdA2dpSuppressed(want)
     }
 
     // -- Active-session ref-counting (gates RFCOMM idle teardown in bt-manager) --

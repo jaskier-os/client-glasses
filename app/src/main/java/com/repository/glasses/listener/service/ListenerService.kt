@@ -2331,13 +2331,86 @@ class ListenerService : LifecycleService(),
         com.repository.glasses.listener.arstream.ArStreamSession(
             context = this,
             bridge = { remoteInputBridge },
-            openWifiDirect = {
-                val details = fileSyncBridge.openWifiDirectForSync()
-                if (details.isBlank() || details == "{}") null else details
+            openWifiDirect = { timeoutMs ->
+                // openWifiDirectForSync() is ASYNCHRONOUS: it returns "{}" immediately while the
+                // group forms, and the real details arrive on Listener.onWifiDirectReady seconds
+                // later. Treating the immediate return as the answer failed every start.
+                val q = java.util.concurrent.LinkedBlockingQueue<String>(1)
+                val l = object : com.repository.glasses.listener.sync.FileSyncBridge.Listener {
+                    override fun onWifiDirectReady(detailsJson: String) { q.offer(detailsJson) }
+                    override fun onWifiDirectError(reason: String) { q.offer("") }
+                }
+                fileSyncBridge.addListener(l)
+                try {
+                    // If a group is already up this returns the details synchronously.
+                    val immediate = fileSyncBridge.openWifiDirectForSync()
+                    if (immediate.isNotBlank() && immediate != "{}") {
+                        immediate
+                    } else {
+                        q.poll(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                            ?.takeIf { it.isNotBlank() }
+                    }
+                } finally {
+                    fileSyncBridge.removeListener(l)
+                }
             },
             closeWifiDirect = { fileSyncBridge.closeWifiDirect() },
+            setA2dpSuspended = { on -> setArStreamA2dpSuspended(on) },
             log = { btLog(it) }
         )
+    }
+
+    /**
+     * Drop / restore the phone's A2DP link to these glasses for an AR stream session.
+     *
+     * Targeted at the COMPANION PHONE's address only, so any other bonded audio source
+     * (real headphones, a second phone) keeps its link. Two enforcement layers:
+     *   - bt-manager (priv-app, hidden BluetoothA2dpSink + BLUETOOTH_PRIVILEGED) holds the
+     *     link down continuously and re-drops remote/auto reconnects for as long as the
+     *     hold is held. That is the authoritative one.
+     *   - AudioRoutingController is told too, so our own wear/fold logic stops trying to
+     *     reconnect underneath the hold and fight it.
+     */
+    // Last value pushed. The session RENEWS the hold every couple of seconds, so only
+    // transitions are logged -- otherwise the persistent log would fill with identical
+    // heartbeat lines for the whole session.
+    @Volatile private var lastArStreamA2dpSuspend: Boolean? = null
+
+    /**
+     * The address the hold was taken on. Re-reading btClient.companionAddress at
+     * release time is wrong: if it changed or went blank (BT dropped, re-pair) the
+     * release would target a different address, or be skipped entirely, and the
+     * original hold would never be lifted.
+     */
+    @Volatile private var arStreamA2dpHeldAddr: String? = null
+
+    private fun setArStreamA2dpSuspended(on: Boolean) {
+        val isTransition = lastArStreamA2dpSuspend != on
+        lastArStreamA2dpSuspend = on
+        if (on) {
+            val addr = arStreamA2dpHeldAddr ?: try {
+                if (::btClient.isInitialized) btClient.companionAddress else null
+            } catch (_: Exception) { null }
+            if (addr.isNullOrBlank()) {
+                if (isTransition) btErr("arstream a2dp suspend=true: no companion address known; local gate only")
+            } else if (::btManagerBridge.isInitialized) {
+                arStreamA2dpHeldAddr = addr
+                val ok = btManagerBridge.holdA2dpSuppressed(addr)
+                if (isTransition) btLog("arstream a2dp suspend=true addr=$addr reached_btmanager=$ok")
+            } else if (isTransition) {
+                btErr("arstream a2dp suspend=true addr=$addr: btManagerBridge not initialized")
+            }
+        } else {
+            val addr = arStreamA2dpHeldAddr
+            arStreamA2dpHeldAddr = null
+            if (::btManagerBridge.isInitialized) {
+                btManagerBridge.clearA2dpSuppression()
+                if (isTransition) btLog("arstream a2dp suspend=false addr=$addr released")
+            }
+        }
+        try { audioRouting?.setArStreamSuspend(on, arStreamA2dpHeldAddr) } catch (e: Exception) {
+            btErr("arstream a2dp local gate suspend=$on failed: ${e.message}")
+        }
     }
 
     override fun onCreate() = GT.section("svc.onCreate") {
@@ -2668,6 +2741,16 @@ class ListenerService : LifecycleService(),
         // Defer btClient.initialize() until onBound so MessageRelay.start() has a live bridge.
         btManagerBridge.onBound = {
             btLog("BtManagerBridge bound, initializing BT client + PC audio listener")
+            // Clear-on-start: if a previous listener process died holding an A2DP
+            // suppression, its lease also died with the owner binder -- but a lease
+            // taken by a still-live bt-manager under a DIFFERENT mechanism, or any
+            // hold this fresh process has no token for, must not survive us either.
+            // We have no AR session at bind time, so any hold is by definition stale.
+            if (!arStreamSession.isActive) {
+                try { setArStreamA2dpSuspended(false) } catch (e: Exception) {
+                    btErr("clear-on-start a2dp release failed: ${e.message}")
+                }
+            }
             try {
                 btClient.initialize()
                 btLog("BT initialized: ${btClient.initStatus}")
@@ -2804,6 +2887,14 @@ class ListenerService : LifecycleService(),
             assistantSuppressor.suppress()
             registerReceiver(sensorLongPressReceiver, IntentFilter(ACTION_SENSOR_LONG_PRESS))
             btLog("AssistantSuppressor activated")
+            if (com.repository.glasses.listener.BuildConfig.DEBUG) {
+                registerReceiver(
+                    adbCommandReceiver,
+                    IntentFilter("com.repository.glasses.listener.ADB_COMMAND"),
+                    Context.RECEIVER_EXPORTED
+                )
+                btLog("ADB_COMMAND receiver registered (debug build)")
+            }
             // Re-apply voice-control-off on every boot so a glasses reboot keeps
             // the Rokid wakeword/offline-voice suppressed (the phone may also re-send
             // voice_ctrl_off, which is idempotent).
@@ -5646,6 +5737,26 @@ class ListenerService : LifecycleService(),
         }
     }
 
+    /**
+     * Debug-build-only ADB hook to drive device commands without the phone.
+     *
+     * The AR-stream A2DP suppression can only be exercised end-to-end by starting and
+     * abnormally ending real sessions, and the abnormal cases (force-stop mid-session,
+     * kill -9, phone app death) cannot be produced from the phone at all -- the phone
+     * is precisely the thing that is gone. Registered only when BuildConfig.DEBUG.
+     *
+     *   adb shell am broadcast -a com.repository.glasses.listener.ADB_COMMAND \
+     *       --es type start_ar_stream -p com.repository.glasses.listener
+     */
+    private val adbCommandReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val type = intent?.getStringExtra("type") ?: return
+            val params = intent.getStringExtra("params") ?: "{}"
+            btLog("ADB_COMMAND: type=$type params=$params")
+            onCommand(type, "adb-${System.currentTimeMillis()}", params)
+        }
+    }
+
     override fun onCommand(type: String, requestId: String, paramsJson: String) {
         btLog("Command received: type=$type requestId=$requestId params=${paramsJson.take(100)}")
         val params = try { JSONObject(paramsJson) } catch (_: Exception) { JSONObject() }
@@ -5885,6 +5996,9 @@ class ListenerService : LifecycleService(),
                     arVideoRecorder?.isRecording == true -> "an AR recording is active"
                     runCatching { captureBridge.isRecordingActive() }.getOrDefault(false) ->
                         "a video recording is active"
+                    // ReID drives the camera through captureReidFrame(), which does NOT set the
+                    // recorder surface, so isRecordingActive() misses it entirely.
+                    reidController?.isRunning == true -> "face recognition is active"
                     else -> null
                 }
                 if (blocker != null) {
@@ -5895,10 +6009,14 @@ class ListenerService : LifecycleService(),
                     return
                 }
                 ensureActivityRunning()
+                // Live streaming to the paired phone is a remote-triggered capture, so it uses the
+                // same silent (no privacy LED) mode as the other phone-driven captures.
+                setCameraLedEnabled(false)
                 // Give the UI process a moment to come up and register its HUD sink.
                 Handler(Looper.getMainLooper()).postDelayed({
                     Thread {
                         val details = arStreamSession.start()
+                        if (details == null) setCameraLedEnabled(true)
                         btClient.sendCommandResult(requestId, JSONObject().apply {
                             if (details != null) {
                                 put("success", true)
@@ -5916,6 +6034,8 @@ class ListenerService : LifecycleService(),
             "stop_ar_stream" -> {
                 Thread {
                     arStreamSession.stop()
+                    // Restore the privacy LED to its normal (enabled) state.
+                    setCameraLedEnabled(true)
                     btClient.sendCommandResult(requestId, JSONObject().apply {
                         put("success", true)
                     }.toString())
@@ -9846,7 +9966,10 @@ class ListenerService : LifecycleService(),
         Log.d(TAG_LIFE, "event=onDestroy")
         // Stop the AR stream first: it holds the camera, both mics and the WiFi-Direct group, and
         // leaking any of those past service death is a battery incident rather than a cosmetic bug.
-        runCatching { if (arStreamSession.isActive) arStreamSession.stop() }
+        // Unconditional: stop() is idempotent and is the only thing that releases the
+        // A2DP hold. Gating on isActive would leak the hold when a session died on a
+        // failure path, leaving the user with no Bluetooth audio.
+        runCatching { arStreamSession.stop() }
         // Guarded on the source: if remote-input init failed, these lazies were never built, and
         // touching them here would construct a router, a prefs store and a thread just to stop them.
         remoteInputSource?.let { source ->

@@ -74,6 +74,82 @@ class AudioRoutingController(
      */
     @Volatile private var inCallSuspend: Boolean = false
 
+    /**
+     * True for the whole duration of an open AR stream session. The phone plays the
+     * glasses' own uplink mic on STREAM_MUSIC, and Android routes STREAM_MUSIC over
+     * A2DP straight back to us -- the wearer hears themselves and the echo canceller
+     * is poisoned. While set, this controller must never bring A2DP back up: it is
+     * the local half of the hold that bt-manager enforces on the profile itself.
+     */
+    @Volatile private var arStreamSuspend: Boolean = false
+
+    /** Either suspend source blocks A2DP; they are independent and both must be clear. */
+    private val a2dpBlocked: Boolean get() = inCallSuspend || arStreamSuspend
+
+    /**
+     * The address the AR-stream hold applies to, or null when no hold is held.
+     *
+     * Unlike a call, the AR-stream echo loop involves exactly ONE peer: the companion
+     * phone, which is playing our own uplink mic back at us. Any other A2DP source
+     * (the user's earbuds, a PC) is not part of that loop and must keep its link.
+     */
+    @Volatile private var arStreamSuspendAddr: String? = null
+
+    /**
+     * Hold ([on] = true) or release ([on] = false) the AR-stream A2DP block for
+     * [address]. Idempotent: repeated calls with the same value do nothing.
+     */
+    fun setArStreamSuspend(on: Boolean, address: String? = null) {
+        // Silent no-op: the session renews the hold every couple of seconds, so logging
+        // repeats here would put a line in the persistent log every 2s of a session.
+        if (on == arStreamSuspend) return
+        arStreamSuspend = on
+        arStreamSuspendAddr = if (on) address else null
+        log("setArStreamSuspend($on) addr=$address inCallSuspend=$inCallSuspend state=${stateRef.get()}")
+        val h = workHandler ?: run {
+            log("setArStreamSuspend($on): workHandler not ready, flag only")
+            return
+        }
+        if (on) {
+            val myGen = transitionGeneration.incrementAndGet()
+            h.post {
+                if (supersededBy(myGen)) return@post
+                val target = arStreamSuspendAddr
+                if (target.isNullOrBlank()) {
+                    // No address known: bt-manager cannot be holding anything either,
+                    // so there is nothing targeted to do. Dropping every source here
+                    // would take out audio devices that are not in the echo loop.
+                    log("arStream: no target address; skipping local disconnect")
+                    return@post
+                }
+                log("arStream: disconnecting A2DP source $target gen=$myGen")
+                try {
+                    val dev = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
+                        ?.getRemoteDevice(target)
+                    if (dev == null) {
+                        log("arStream: could not resolve $target")
+                    } else {
+                        a2dp.disconnectOne(dev, 5000) { ok ->
+                            log("arStream: a2dp.disconnectOne($target) ok=$ok")
+                        }
+                    }
+                } catch (e: Throwable) {
+                    log("arStream disconnect threw: ${e.message}")
+                }
+            }
+        } else if (!inCallSuspend) {
+            h.post {
+                log("arStream: released, re-evaluating fold=${foldedRef}")
+                if (foldedRef != true) {
+                    val myGen = transitionGeneration.incrementAndGet()
+                    workHandler?.post { transitionOn(myGen) }
+                } else {
+                    reevaluateOffHead("ar-stream-end")
+                }
+            }
+        }
+    }
+
     private val modeChangedListener = AudioManager.OnModeChangedListener { mode ->
         val callActive = mode != AudioManager.MODE_NORMAL
         log("audio mode changed -> ${audioModeName(mode)} callActive=$callActive")
@@ -103,6 +179,10 @@ class AudioRoutingController(
     }
 
     private fun resumeFromCall() {
+        if (arStreamSuspend) {
+            log("resumeFromCall: still arStreamSuspend; leaving A2DP down")
+            return
+        }
         log("resumeFromCall: re-evaluating fold after call end")
         // Resume based on fold state alone. If unfolded, glasses are on the user
         // (or about to be); reconnect. If folded, stay off.
@@ -190,7 +270,7 @@ class AudioRoutingController(
                     // leaves stateRef stuck at OFF_HEAD until the user re-folds.
                     a2dp.init { ok ->
                         log("A2dpSinkController re-init ready=$ok")
-                        if (ok && running && foldedRef == false && !inCallSuspend) {
+                        if (ok && running && foldedRef == false && !a2dpBlocked) {
                             val myGen = transitionGeneration.incrementAndGet()
                             log("BT back ON + unfolded; re-running transitionOn gen=$myGen")
                             workHandler?.post { transitionOn(myGen) }
@@ -217,11 +297,16 @@ class AudioRoutingController(
             GT.counter("audio.a2dp.connected", if (state == A2dpSinkController.STATE_CONNECTED) 1L else 0L)
             if (!running) return
             if (state != A2dpSinkController.STATE_CONNECTED) return
-            if (inCallSuspend) {
-                log("reactive: A2DP connection ${dev.address} while inCallSuspend; force-disconnect")
+            // An AR-stream hold is targeted at ONE address (the companion phone that is
+            // looping our uplink back at us); a call blocks everything. Without this
+            // split, starting a stream also killed the user's unrelated earbuds.
+            val blockedForThisDevice = inCallSuspend ||
+                (arStreamSuspend && arStreamSuspendAddr?.equals(dev.address, true) == true)
+            if (blockedForThisDevice) {
+                log("reactive: A2DP connection ${dev.address} while inCallSuspend=$inCallSuspend arStreamSuspend=$arStreamSuspend; force-disconnect")
                 workHandler?.post {
                     a2dp.disconnectOne(dev) { ok ->
-                        log("reactive in-call disconnect ok=$ok for ${dev.address}")
+                        log("reactive blocked-disconnect ok=$ok for ${dev.address} arStreamSuspend=$arStreamSuspend")
                     }
                 }
                 return
@@ -391,8 +476,8 @@ class AudioRoutingController(
             // since wear no longer drives transitionOn. Mirrors the historical
             // wear=true path: bump generation, post transitionOn.
             if (!running) return
-            if (inCallSuspend) {
-                log("setFolded(false) deferred: inCallSuspend; resumeFromCall will replay")
+            if (a2dpBlocked) {
+                log("setFolded(false) deferred: inCallSuspend=$inCallSuspend arStreamSuspend=$arStreamSuspend; release will replay")
                 return
             }
             val cur = stateRef.get()
@@ -435,12 +520,12 @@ class AudioRoutingController(
 
     private fun transitionOn(myGen: Long) {
         if (supersededBy(myGen)) return
-        if (inCallSuspend || audioMgr.mode != AudioManager.MODE_NORMAL) {
+        if (a2dpBlocked || audioMgr.mode != AudioManager.MODE_NORMAL) {
             // HFP call (or any non-NORMAL mode) is active. Music must NEVER
             // play through the glasses during a call. Leave the wear state
             // alone -- when the call ends, resumeFromCall() will re-fire
             // transitionOn if wear is still true.
-            log("transitionOn deferred: inCallSuspend=$inCallSuspend mode=${audioModeName(audioMgr.mode)}")
+            log("transitionOn deferred: inCallSuspend=$inCallSuspend arStreamSuspend=$arStreamSuspend mode=${audioModeName(audioMgr.mode)}")
             return
         }
         // If already ON_HEAD, still re-verify (idempotent).

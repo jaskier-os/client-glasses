@@ -1,7 +1,9 @@
 package com.repository.glasses.listener.arstream
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
@@ -29,7 +31,10 @@ import kotlin.concurrent.thread
  *    a second concurrent consumer is not possible. Raw ch2 with gain is the same path the
  *    existing 4-channel fallback already uses.
  */
-class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
+class ArAudioBridge(
+    private val context: Context,
+    private val log: ((String) -> Unit)? = null
+) {
 
     /** Emits mixed mono 16 kHz PCM16 for the phone. */
     var onUplinkAudio: ((ShortArray, Int) -> Unit)? = null
@@ -49,6 +54,12 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
     private val farEnd = FarEndBuffer()
 
     @Volatile private var framesWritten = 0L
+    @Volatile private var uplinkBlocks = 0L
+    @Volatile private var downlinkBlocks = 0L
+
+    /** Samples the AudioTrack refused because its buffer was full. Silent truncation otherwise. */
+    @Volatile private var shortWrites = 0L
+    @Volatile private var droppedSamples = 0L
 
     /**
      * Opens an 8-channel AudioRecord alongside the service's always-on mono mic pump. That is the
@@ -91,8 +102,11 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
         track = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    // Voice-communication usage so the platform treats this as a call leg.
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    // USAGE_ASSISTANT -> STREAM_MUSIC, exactly like the production-audible
+                    // TtsPlayer. USAGE_VOICE_COMMUNICATION maps to STREAM_VOICE_CALL, which in
+                    // MODE_NORMAL (nothing here ever sets MODE_IN_COMMUNICATION, and it must not:
+                    // it would preempt A2DP/HFP) routes to an absent call device = silence.
+                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build()
             )
@@ -112,11 +126,30 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
             if (!it.initialize()) log?.invoke("ArAudioBridge: AECM init failed, continuing without it")
         }
 
+        logAudioRouting()
+
         running = true
         rec.startRecording()
         uplinkThread = thread(name = "ArAudioBridge-uplink") { uplinkLoop() }
         log?.invoke("ArAudioBridge: started")
         return true
+    }
+
+    /**
+     * One-shot routing diagnostic. Audibility bugs on this device are always "which stream did the
+     * platform pick, and is its volume zero", and neither is visible from any other log line.
+     */
+    private fun logAudioRouting() {
+        val t = track
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        val streamType = try { t?.streamType } catch (_: Exception) { null }
+        val vol = am?.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val maxVol = am?.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        log?.invoke(
+            "ArAudioBridge: routing usage=ASSISTANT streamType=$streamType " +
+                "(STREAM_MUSIC=${AudioManager.STREAM_MUSIC}) musicVolume=$vol/$maxVol " +
+                "audioMode=${am?.mode} trackState=${t?.state} playState=${t?.playState}"
+        )
     }
 
     private fun uplinkLoop() {
@@ -126,10 +159,15 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
         val outward = ShortArray(BLOCK_FRAMES)
         val mixed = ShortArray(BLOCK_FRAMES)
         val cleaned = ShortArray(BLOCK_FRAMES)
-        // Leftover shorts from a read that did not land on a frame boundary. Without carrying
-        // them, the next read starts mid-frame and every channel index shifts for the rest of the
-        // session -- which would silently route the ch6/ch7 echo reference into the uplink, the
-        // exact feedback loop UplinkMixer exists to prevent.
+        // Leftover shorts from a read that did not land on a frame boundary.
+        //
+        // INVARIANT: every read starts on a frame boundary, which is exactly what this carry
+        // maintains. A remainder is therefore the HEAD of an incomplete frame (channels
+        // 0..carry-1), so leaving it at raw[0..carry-1] and appending the next read after it
+        // reconstructs that frame correctly. Do NOT "simplify" this by discarding the remainder:
+        // the next read would then begin mid-frame and every channel index would shift
+        // permanently, routing the ch6/ch7 echo reference into the uplink -- the exact feedback
+        // loop UplinkMixer exists to prevent.
         var carry = 0
 
         while (running) {
@@ -168,6 +206,12 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
                 cleaned
             } ?: mixed
 
+            uplinkBlocks++
+            if (uplinkBlocks == 1L || uplinkBlocks % 200L == 0L) {
+                var peak = 0
+                for (i in 0 until frames) { val a = kotlin.math.abs(out[i].toInt()); if (a > peak) peak = a }
+                log?.invoke("ArAudioBridge: uplink #$uplinkBlocks frames=$frames peak=$peak muted=$glassesMicMuted")
+            }
             if (!glassesMicMuted) onUplinkAudio?.invoke(out, frames)
         }
     }
@@ -184,6 +228,30 @@ class ArAudioBridge(private val log: ((String) -> Unit)? = null) {
             // stall control messages (mute, stop) behind a full playback buffer.
             val written = track?.write(pcm, 0, length, AudioTrack.WRITE_NON_BLOCKING) ?: 0
             if (written > 0) framesWritten += written
+            if (written < length) {
+                // Silently dropping the tail is how "audible but chopped" happens. Count it so the
+                // difference between a routing failure and a buffer-pressure failure is visible.
+                shortWrites++
+                droppedSamples += (length - written.coerceAtLeast(0))
+                if (shortWrites == 1L || shortWrites % 100L == 0L) {
+                    log?.invoke(
+                        "ArAudioBridge: short write #$shortWrites wrote=$written/$length " +
+                            "droppedSamples=$droppedSamples"
+                    )
+                }
+            }
+            downlinkBlocks++
+            if (downlinkBlocks == 1L || downlinkBlocks % 200L == 0L) {
+                var peak = 0
+                for (i in 0 until length) { val a = kotlin.math.abs(pcm[i].toInt()); if (a > peak) peak = a }
+                // playbackHeadPosition is the acceptance instrument: a track routed nowhere still
+                // accepts writes, but its head does not advance.
+                val head = try { track?.playbackHeadPosition } catch (_: Exception) { null }
+                log?.invoke(
+                    "ArAudioBridge: downlink #$downlinkBlocks samples=$length peak=$peak " +
+                        "head=$head written=$framesWritten shortWrites=$shortWrites"
+                )
+            }
         } catch (e: Exception) {
             log?.invoke("ArAudioBridge: playback write failed: ${e.message}")
         }
