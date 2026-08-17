@@ -371,7 +371,7 @@ class ProfileAutoConnector(
         // recent call audio (then address, for a stable tiebreak) instead of
         // leaving it to chance -- otherwise the winner flaps between boots.
         val ordered = bonded.sortedWith(
-            compareBy({ hfp.msSinceAudioActivity(it.address ?: "") }, { it.address ?: "" })
+            compareBy({ hfp.msSinceConnected(it.address ?: "") }, { it.address ?: "" })
         )
         var needHfp = 0; var needA2dp = 0; var skippedStale = 0; var skippedLe = 0
         var skippedFast = 0
@@ -398,14 +398,14 @@ class ProfileAutoConnector(
                 stillHere
             }
             if (live.size > 1) {
-                val keep = live.minByOrNull { hfp.msSinceAudioActivity(it.address) } ?: live.first()
-                for (d in live) {
-                    if (!d.address.equals(keep.address, true)) {
-                        log("autoconnect($reason) hfp slot has ${live.size} holders, kicking ${d.address} keeping ${keep.address}")
-                        hfp.disconnectTransient(d.address)
-                    }
-                }
+                // Last holder wins, matching the eviction done on connect.
+                val keep = live.minByOrNull { hfp.msSinceConnected(it.address) } ?: live.first()
+                log("autoconnect($reason) hfp slot has ${live.size} holders, keeping ${keep.address}")
+                hfp.evictOtherHfpHolders(keep.address)
             }
+            // Safe despite the eviction above: the keeper is itself in `live`,
+            // so a non-empty `live` always means one holder survives. Only the
+            // no-live-holders case leaves the slot free to be filled below.
             hfpSlotClaimed = live.isNotEmpty()
         }
         // A connect issued but not yet CONNECTED is invisible to the proxy, so

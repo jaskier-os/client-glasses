@@ -75,6 +75,15 @@ class HfpClientController(
          * can fail closed instead of mistaking ignorance for an idle link.
          */
         const val SCO_STATE_UNKNOWN = "?"
+
+        /**
+         * How long after being evicted a device is assumed to be auto-retrying
+         * rather than being chosen. Comfortably longer than the 1-5s an iPhone
+         * or BlueZ takes to re-initiate, short enough that a real switch back a
+         * few seconds later still works. A deliberate handoff bypasses it
+         * entirely via claimHfpSlot().
+         */
+        private const val EVICTION_BACKOFF_MS = 10_000L
         const val AUDIO_STATE_DISCONNECTED = 0
         const val AUDIO_STATE_CONNECTING = 1
         const val AUDIO_STATE_CONNECTED = 2
@@ -155,9 +164,13 @@ class HfpClientController(
     private val deviceHfpStates = ConcurrentHashMap<String, Int>()
     private val deviceAudioStates = ConcurrentHashMap<String, Int>()
 
-    // Last time each device had SCO audio. Picks the winner of the single HFP
-    // slot when more than one AG wants it.
-    private val lastAudioActivityMs = ConcurrentHashMap<String, Long>()
+    // When each device most recently reached HFP CONNECTED. Picks the winner of
+    // the single HFP slot: last holder wins.
+    private val lastConnectedMs = ConcurrentHashMap<String, Long>()
+
+    // When each device was last evicted from the HFP slot, to tell an AG's
+    // automatic retry apart from a genuine user handoff.
+    private val evictedAtMs = ConcurrentHashMap<String, Long>()
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -280,13 +293,58 @@ class HfpClientController(
     }
 
     /**
-     * Elapsed ms since [deviceAddress] last had SCO audio, or Long.MAX_VALUE if
-     * never seen. Used to pick which AG keeps the single HFP slot: the one that
-     * most recently carried a call is the one the wearer is actually using.
+     * Elapsed ms since [deviceAddress] most recently reached HFP CONNECTED, or
+     * Long.MAX_VALUE if never. Picks the winner of the single HFP slot:
+     * last holder wins.
      */
-    fun msSinceAudioActivity(deviceAddress: String): Long {
-        val at = lastAudioActivityMs[deviceAddress] ?: return Long.MAX_VALUE
+    fun msSinceConnected(deviceAddress: String): Long {
+        val at = lastConnectedMs[deviceAddress] ?: return Long.MAX_VALUE
         return SystemClock.elapsedRealtime() - at
+    }
+
+    /**
+     * Drop every HFP-HF holder except [keepAddress].
+     *
+     * Last-holder-wins: whoever connected most recently owns the slot. Uses
+     * disconnectTransient so the evicted device keeps CONNECTION_POLICY_ALLOWED
+     * and can take the slot back later by connecting again.
+     */
+    fun evictOtherHfpHolders(keepAddress: String) {
+        val others = connectedDevices().filter { !it.address.equals(keepAddress, true) }
+        if (others.isEmpty()) return
+        log("event=hfp.evict keep=$keepAddress dropping=${others.joinToString { "${it.address}(${it.name})" }}")
+        val now = SystemClock.elapsedRealtime()
+        for (d in others) {
+            evictedAtMs[d.address] = now
+            disconnectTransient(d.address)
+        }
+    }
+
+    /**
+     * Mark [deviceAddress] as the deliberately chosen HFP owner.
+     *
+     * A user-driven handoff must always win, so it clears any eviction backoff
+     * on the winner and starts one on everyone else. Without this the backoff
+     * that stops AG auto-retry storms would also block a genuine switch made a
+     * few seconds after the last one.
+     */
+    fun claimHfpSlot(deviceAddress: String) {
+        evictedAtMs.remove(deviceAddress)
+        lastConnectedMs[deviceAddress] = SystemClock.elapsedRealtime()
+    }
+
+    /**
+     * True when [deviceAddress] was evicted so recently that its arrival is
+     * almost certainly the AG retrying by itself rather than the user choosing
+     * it. Both an iPhone and BlueZ re-initiate HFP within seconds of being
+     * dropped, and since eviction deliberately leaves the connection policy
+     * ALLOWED, nothing else stops them: A evicts B, B's AG reconnects and evicts
+     * A, forever. Inside the window the newcomer loses instead of winning, which
+     * ends the exchange.
+     */
+    private fun inEvictionBackoff(deviceAddress: String): Boolean {
+        val at = evictedAtMs[deviceAddress] ?: return false
+        return SystemClock.elapsedRealtime() - at < EVICTION_BACKOFF_MS
     }
 
     /**
@@ -325,6 +383,9 @@ class HfpClientController(
             current.first().address.equals(deviceAddress, true)
         if (alreadyOnly) return@section true
         log("event=hfp.connectExclusive addr=$deviceAddress current=${current.joinToString { "${it.address}(${it.name})" }.ifEmpty { "none" }}")
+        // A deliberate handoff, so this device must win even if we evicted it
+        // moments ago.
+        claimHfpSlot(deviceAddress)
         for (d in current) {
             if (!d.address.equals(deviceAddress, true)) {
                 log("event=hfp.connectExclusive.kick addr=${d.address} name=${d.name} target=$deviceAddress")
@@ -797,11 +858,6 @@ class HfpClientController(
         val prevTracked = if (addr.isNotEmpty()) {
             val prev = deviceAudioStates[addr] ?: AUDIO_STATE_DISCONNECTED
             deviceAudioStates[addr] = newState
-            // Any SCO activity marks this AG as the one in real use, which is
-            // how the single HFP slot picks its winner when both want it.
-            if (newState != AUDIO_STATE_DISCONNECTED) {
-                lastAudioActivityMs[addr] = SystemClock.elapsedRealtime()
-            }
             prev
         } else lastAudioState
         lastAudioState = newState
@@ -860,6 +916,24 @@ class HfpClientController(
         lastHfpState = newState
         if (addr.isNotEmpty()) lastDeviceAddress = addr
         log("event=hfp.CONNECTION_STATE_CHANGED addr=$addr name=${dev?.name} prev=${connectionStateLabel(prevState)} new=${connectionStateLabel(newState)}${if (otherDevices.isNotEmpty()) " other_devices=[$otherDevices]" else ""}")
+        // Last holder wins: the device that just connected takes the slot, and
+        // every other holder is dropped immediately. Enforced here rather than
+        // in the sweep because the sweep runs up to 5s later, and for that whole
+        // window two AGs are connected -- which is the state the HF client
+        // cannot serve and answers with an SCO reject.
+        if (newState == BluetoothProfile.STATE_CONNECTED && addr.isNotEmpty()) {
+            if (inEvictionBackoff(addr)) {
+                // We dropped this device moments ago and its AG dialled straight
+                // back. Honouring last-holder-wins here would hand it the slot
+                // and evict the current owner, whose AG would do the same in
+                // return. Drop the newcomer instead; the exchange ends.
+                log("event=hfp.evict.backoff addr=$addr reconnected during backoff, dropping again")
+                disconnectTransient(addr)
+            } else {
+                lastConnectedMs[addr] = SystemClock.elapsedRealtime()
+                evictOtherHfpHolders(addr)
+            }
+        }
         try {
             listener?.onHfpConnectionChanged(addr, newState)
         } catch (e: Throwable) {
