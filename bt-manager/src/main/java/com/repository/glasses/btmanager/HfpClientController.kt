@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Parcelable
+import android.os.SystemClock
 import android.util.Log
 import com.repository.glasses.tracing.GT
 import org.json.JSONObject
@@ -154,6 +155,10 @@ class HfpClientController(
     private val deviceHfpStates = ConcurrentHashMap<String, Int>()
     private val deviceAudioStates = ConcurrentHashMap<String, Int>()
 
+    // Last time each device had SCO audio. Picks the winner of the single HFP
+    // slot when more than one AG wants it.
+    private val lastAudioActivityMs = ConcurrentHashMap<String, Long>()
+
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -270,6 +275,85 @@ class HfpClientController(
             list?.any { it.address.equals(deviceAddress, true) } == true
         } catch (e: Throwable) {
             log("HfpClient.getConnectedDevices failed: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Elapsed ms since [deviceAddress] last had SCO audio, or Long.MAX_VALUE if
+     * never seen. Used to pick which AG keeps the single HFP slot: the one that
+     * most recently carried a call is the one the wearer is actually using.
+     */
+    fun msSinceAudioActivity(deviceAddress: String): Long {
+        val at = lastAudioActivityMs[deviceAddress] ?: return Long.MAX_VALUE
+        return SystemClock.elapsedRealtime() - at
+    }
+
+    /**
+     * Every device currently connected on HFP-HF.
+     */
+    fun connectedDevices(): List<BluetoothDevice> {
+        val p = proxy ?: return emptyList()
+        return try {
+            val m = p.javaClass.getMethod("getConnectedDevices")
+            m.isAccessible = true
+            @Suppress("UNCHECKED_CAST")
+            (m.invoke(p) as? List<BluetoothDevice>).orEmpty()
+        } catch (e: Throwable) {
+            log("HfpClient.connectedDevices failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Make [deviceAddress] the ONLY device connected on HFP-HF.
+     *
+     * Fluoride's HF client cannot actually serve two AGs at once. With both an
+     * iPhone and a PC connected it fails to resolve the right control block
+     * ("bta_hf_client_find_cb_by_rfc_handle: no cb yet") and answers the second
+     * AG's SCO request with HCI 0x0f, Connection Rejected due to Unacceptable
+     * BD_ADDR -- so call audio silently never arrives on that device even though
+     * dumpsys reports it CONNECTED. Keeping the slot single-occupancy is what
+     * makes HFP work at all; it is not a policy preference.
+     *
+     * Losers are dropped with [disconnectTransient] so their connection policy
+     * stays ALLOWED and the sweep can hand the slot back later.
+     */
+    fun connectExclusive(deviceAddress: String): Boolean = GT.section("bt.hfp.connectExclusive") {
+        val current = connectedDevices()
+        val alreadyOnly = current.size == 1 &&
+            current.first().address.equals(deviceAddress, true)
+        if (alreadyOnly) return@section true
+        log("event=hfp.connectExclusive addr=$deviceAddress current=${current.joinToString { "${it.address}(${it.name})" }.ifEmpty { "none" }}")
+        for (d in current) {
+            if (!d.address.equals(deviceAddress, true)) {
+                log("event=hfp.connectExclusive.kick addr=${d.address} name=${d.name} target=$deviceAddress")
+                disconnectTransient(d.address)
+            }
+        }
+        connect(deviceAddress)
+    }
+
+    /**
+     * Drop HFP-HF to [deviceAddress] WITHOUT forbidding the connection policy,
+     * so the sweep (or the AG itself) can bring it back later. Used when handing
+     * the single HFP slot to another device.
+     */
+    fun disconnectTransient(deviceAddress: String): Boolean = GT.section("bt.hfp.disconnectTransient") {
+        val p = proxy ?: return@section false
+        val dev = resolveDevice(deviceAddress) ?: return@section false
+        try {
+            val m = p.javaClass.methods.firstOrNull {
+                it.name == "disconnect" &&
+                    it.parameterTypes.size == 1 &&
+                    it.parameterTypes[0] == BluetoothDevice::class.java
+            } ?: return@section false
+            m.isAccessible = true
+            val ok = (m.invoke(p, dev) as? Boolean) ?: false
+            log("event=hfp.disconnectTransient addr=${dev.address} name=${dev.name} result=$ok")
+            ok
+        } catch (e: Throwable) {
+            log("event=hfp.disconnectTransient.error addr=$deviceAddress err=${e.message}")
             false
         }
     }
@@ -713,6 +797,11 @@ class HfpClientController(
         val prevTracked = if (addr.isNotEmpty()) {
             val prev = deviceAudioStates[addr] ?: AUDIO_STATE_DISCONNECTED
             deviceAudioStates[addr] = newState
+            // Any SCO activity marks this AG as the one in real use, which is
+            // how the single HFP slot picks its winner when both want it.
+            if (newState != AUDIO_STATE_DISCONNECTED) {
+                lastAudioActivityMs[addr] = SystemClock.elapsedRealtime()
+            }
             prev
         } else lastAudioState
         lastAudioState = newState

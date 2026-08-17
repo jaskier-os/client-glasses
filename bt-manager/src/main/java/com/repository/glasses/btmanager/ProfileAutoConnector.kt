@@ -193,6 +193,12 @@ class ProfileAutoConnector(
                                         val currentA2dp = a2dp.connectedDevices()
                                         log("autoconnect acl_connected.swap addr=$addr current_a2dp=${currentA2dp.joinToString { "${it.address}(${it.name})" }.ifEmpty { "none" }}")
                                         a2dp.connectExclusive(addr)
+                                        // HFP follows the same device. The slot is
+                                        // single-occupancy because the HF client
+                                        // rejects a second AG's SCO, so the newly
+                                        // active source has to own it or its calls
+                                        // get no audio.
+                                        hfp.connectExclusive(addr)
                                     } catch (e: Throwable) {
                                         log("acl_connected swap threw: ${e.message}")
                                     }
@@ -360,8 +366,54 @@ class ProfileAutoConnector(
             log("autoconnect($reason): no bonded devices")
             return@section
         }
+        // bondedDevices() is an unordered Set, and HFP has exactly one slot, so
+        // iteration order decides which AG gets it on a cold boot. Order by most
+        // recent call audio (then address, for a stable tiebreak) instead of
+        // leaving it to chance -- otherwise the winner flaps between boots.
+        val ordered = bonded.sortedWith(
+            compareBy({ hfp.msSinceAudioActivity(it.address ?: "") }, { it.address ?: "" })
+        )
         var needHfp = 0; var needA2dp = 0; var skippedStale = 0; var skippedLe = 0
         var skippedFast = 0
+        // HFP is single-occupancy (the HF client rejects a second AG's SCO), so
+        // reconcile the slot before doing anything else.
+        //
+        // Holders whose ACL is gone do not count: the stack can keep reporting
+        // CONNECTED for a device that has walked away, and treating that as a
+        // full slot would leave HFP down for everyone, permanently. Drop those.
+        //
+        // If more than one holder is left, the AG re-connected behind our back --
+        // policy stays ALLOWED for kicked devices precisely so they can, and
+        // nothing else evicts them. Keep the most recently active and kick the
+        // rest, or the two-AG state silently returns.
+        var hfpSlotClaimed = false
+        run {
+            val holders = hfp.connectedDevices()
+            val live = holders.filter { h ->
+                val stillHere = bonded.any { it.address.equals(h.address, true) && isAclConnected(it) }
+                if (!stillHere) {
+                    log("autoconnect($reason) hfp slot holder ${h.address} has no ACL, releasing")
+                    hfp.disconnectTransient(h.address)
+                }
+                stillHere
+            }
+            if (live.size > 1) {
+                val keep = live.minByOrNull { hfp.msSinceAudioActivity(it.address) } ?: live.first()
+                for (d in live) {
+                    if (!d.address.equals(keep.address, true)) {
+                        log("autoconnect($reason) hfp slot has ${live.size} holders, kicking ${d.address} keeping ${keep.address}")
+                        hfp.disconnectTransient(d.address)
+                    }
+                }
+            }
+            hfpSlotClaimed = live.isNotEmpty()
+        }
+        // A connect issued but not yet CONNECTED is invisible to the proxy, so
+        // without this a later tick would hand the slot to a second device while
+        // the first is still CONNECTING -- the same two-AG race, displaced.
+        if (!hfpSlotClaimed && lastHfpAttemptMs.keys.any { !cooledDown(lastHfpAttemptMs, it) }) {
+            hfpSlotClaimed = true
+        }
         // Replay a handoff that arrived during a call. Runs before the per-device
         // work so the winner is decided before any A2DP connect is issued.
         // Not while folded: connectExclusive() would bring A2DP back up and undo
@@ -380,12 +432,12 @@ class ProfileAutoConnector(
             } else if (hfp.noCallAudioExceptFor(want)) {
                 pendingSwapAddr = null
                 log("autoconnect($reason) replaying deferred swap addr=$want")
-                try { a2dp.connectExclusive(want) } catch (e: Throwable) {
+                try { a2dp.connectExclusive(want); hfp.connectExclusive(want) } catch (e: Throwable) {
                     log("autoconnect($reason) deferred swap threw: ${e.message}")
                 }
             }
         }
-        for (dev in bonded) {
+        for (dev in ordered) {
             val addr = dev.address ?: continue
             // LE-only bonds can't carry HFP-HF / A2DP Sink. Skip before the stale
             // counters so they never accumulate sweeps for a device that is not a
@@ -450,12 +502,22 @@ class ProfileAutoConnector(
             // repair. Re-connecting it here would fight that and disturb the
             // call's audio path. HFP is still repaired: that is the call itself.
             val a2dpAllowed = hfp.noCallAudioExceptFor(addr)
-            val hfpDue = !hfpUp && cooledDown(lastHfpAttemptMs, addr)
+            // HFP is single-occupancy: Fluoride's HF client cannot serve two AGs
+            // and rejects the second one's SCO outright (HCI 0x0f), so bringing
+            // it up everywhere is what BREAKS call audio rather than enabling it.
+            // Only fill the slot when it is empty; handing it between devices is
+            // the ACL handler's job.
+            // hfpSlotClaimed is tracked across the whole loop, not re-read per
+            // device: connect() is async, so a second device evaluated in the
+            // same sweep would still see the slot empty and both would be
+            // connected -- recreating the exact two-AG state that breaks SCO.
+            val hfpDue = !hfpUp && !hfpSlotClaimed && cooledDown(lastHfpAttemptMs, addr)
             val a2dpDue = !a2dpUp && a2dpAllowed && cooledDown(lastA2dpAttemptMs, addr)
             if (!hfpDue && !a2dpDue) continue
             log("autoconnect($reason) addr=$addr name=${dev.name} hfp=$hfpUp a2dp=$a2dpUp folded=$folded sweeps=${disconnectedSweeps[addr] ?: 0}")
             if (hfpDue) {
                 needHfp++
+                hfpSlotClaimed = true
                 lastHfpAttemptMs[addr] = SystemClock.elapsedRealtime()
                 val ok = hfp.connect(addr)
                 if (!ok) log("autoconnect($reason) hfp.connect FAILED addr=$addr")
