@@ -36,7 +36,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/system_properties.h>
+#include <sys/ioctl.h>
 #include <linux/input.h>
+#include <linux/rtc.h>
 
 // ATRACE shim: write directly to ftrace's trace_marker so we don't depend on
 // libcutils gating ATRACE_TAG_APP via debug.atrace.tags.enableflags. The NDK
@@ -89,6 +91,14 @@ static inline void pwr_end(void) {
 #define LED_ARM_FLAG_FILE  "glasses-led-battery-arm"  // basename in cfg_dir
 #define LED_REASSERT_MS    5000LL
 #define KILL_SWITCH_PROP    "persist.glasses.power_daemon.disable"
+// 2020-01-01. Below this an epoch is a powered-up-from-nothing default (this
+// hardware's RTC comes back at 1970), not a real time. Used both to decide the
+// system clock is trustworthy enough to push into the RTC, and to detect an RTC
+// that needs re-syncing.
+#define RTC_SANE_MIN_EPOCH  1577836800L
+// How often the main loop re-checks a stale RTC (the boot check is useless if
+// the system clock was also wrong then).
+#define RTC_RECHECK_MS      (60LL * 1000)
 
 struct Config {
     int  screen_timeout_s;
@@ -116,6 +126,11 @@ static long long fold_since_ms       = 0;
 static int       charge_rearm_latched = 0;
 static long long config_loaded_ms    = 0;
 static unsigned  reload_counter      = 0;
+
+static long long rtc_check_last_ms  = 0;  // last periodic stale-RTC re-check
+// Latched when RTC_SET_TIME returns EPERM (driver built without allow-set-time).
+// Permanent for this build, so stop retrying. Harmless: alarms are relative.
+static int       rtc_set_unsupported = 0;
 
 static long long led_last_assert_ms = 0;
 static int       led_active         = 0;  // 1 = we currently own the LED
@@ -465,6 +480,10 @@ static int kill_switch_active(void) {
 static void on_hup(int sig) { (void)sig; g_reload = 1; }
 static void on_term(int sig) { (void)sig; g_stop = 1; }
 
+// Defined further down with the other RTC helpers; used by apply_time_sync.
+static void sync_rtc_from_system(const char *reason);
+static long long read_rtc_epoch(void);
+
 // Apply a time+timezone sync dropped by the glasses app at <dir>/glasses-time.sync.
 // File format: "<epochMillis>\n<tzId>\n". We call clock_settime(CLOCK_REALTIME)
 // and set persist.sys.timezone via `setprop`. The file is consumed (removed)
@@ -492,6 +511,11 @@ static void apply_time_sync(const char *path) {
         log_line("time-sync: clock_settime failed: %s", strerror(errno));
     } else {
         log_line("time-sync: clock_settime ok (epoch_ms=%lld)", epoch_ms);
+        // Push the corrected time into the RTC hardware too. Setting only
+        // CLOCK_REALTIME leaves the RTC at whatever it powered up with, and
+        // every wake alarm we arm is expressed in the RTC's time base -- so a
+        // stale RTC silently disables fold-shutdown.
+        sync_rtc_from_system("time-sync");
     }
     if (ok_tz && tz[0] != '\0') {
         pid_t pid = fork();
@@ -817,21 +841,137 @@ static void suspend_teardown(void) {
 }
 
 // Set RTC alarm to wake from freeze after `seconds` seconds.
-static void set_rtc_alarm(int seconds) {
-    if (seconds <= 0) return;
-    time_t now = time(NULL);
-    time_t wake = now + seconds;
+// Read the RTC's OWN notion of epoch seconds. This is NOT the same clock as
+// time(NULL): CLOCK_REALTIME gets corrected by NTP / our time-sync file, while
+// the RTC hardware only advances from whatever it was last set to. On this
+// device the RTC backup rail loses state, so it comes up at 1970 and stays
+// there -- observed since_epoch=761865 (1970-01-09) against a system clock
+// reading 2026. Returns -1 if unreadable.
+static long long read_rtc_epoch(void) {
+    int fd = open("/sys/class/rtc/rtc0/since_epoch", O_RDONLY);
+    if (fd < 0) return -1;
+    char buf[32] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    errno = 0;
+    char *end = NULL;
+    long long v = strtoll(buf, &end, 10);
+    // A freshly-reset RTC legitimately reads 0, so only NEGATIVE is invalid.
+    // Treating 0 as unreadable would needlessly block arming: the alarm is
+    // armed RELATIVE to this value, so 0 + seconds is perfectly serviceable.
+    if (errno != 0 || end == buf || v < 0) return -1;
+    return v;
+}
+
+// Try to push the current system time into the RTC hardware.
+//
+// EXPECTED TO FAIL ON THIS HARDWARE -- kept as best-effort only. The rtc-pm8xxx
+// driver rejects RTC_SET_TIME with EPERM unless its devicetree node carries
+// `allow-set-time`, and this device's node does not (verified: /proc/device-tree
+// .../pm8150_rtc/ contains only compatible/interrupts/name/phandle/reg/reg-names).
+// SELinux is Permissive and we are root, so this is a kernel/DT block, not a
+// permissions one; even /system/bin/hwclock -w fails the same way. Fixing it
+// would require reflashing the kernel DTB.
+//
+// That is fine: set_rtc_alarm() arms alarms RELATIVE to the RTC's own
+// since_epoch, so a permanently-1970 RTC still produces correct wakeups
+// (verified on-device: a +30s alarm fired, pm8xxx_rtc_alarm IRQ incremented).
+// This function stays because it costs nothing, logs the real reason once, and
+// will silently start working on any unit whose DT does allow it.
+static void sync_rtc_from_system(const char *reason) {
+    if (rtc_set_unsupported) return;  // driver refuses; see note above
+    time_t sys_now = time(NULL);
+    if (sys_now < RTC_SANE_MIN_EPOCH) {
+        log_line("rtc-sync: system clock not yet valid (%ld), skipping (%s)",
+                 (long)sys_now, reason);
+        return;
+    }
+    struct tm tm_utc;
+    if (!gmtime_r(&sys_now, &tm_utc)) {
+        log_line("rtc-sync: gmtime_r failed (%s)", reason);
+        return;
+    }
+    // The RTC is always UTC; the kernel applies no timezone to it.
+    struct rtc_time rt = {0};
+    rt.tm_sec  = tm_utc.tm_sec;
+    rt.tm_min  = tm_utc.tm_min;
+    rt.tm_hour = tm_utc.tm_hour;
+    rt.tm_mday = tm_utc.tm_mday;
+    rt.tm_mon  = tm_utc.tm_mon;
+    rt.tm_year = tm_utc.tm_year;
+
+    int fd = open("/dev/rtc0", O_RDWR);
+    if (fd < 0) {
+        log_line("rtc-sync: open(/dev/rtc0) failed: %s (%s)", strerror(errno), reason);
+        return;
+    }
+    if (ioctl(fd, RTC_SET_TIME, &rt) != 0) {
+        // A refusal here is a permanent property of this kernel build (the DT
+        // node lacks allow-set-time), not a transient error, so latch it and
+        // stop retrying/logging forever. This device reports EACCES
+        // ("Permission denied"); EPERM is the other spelling drivers use, and
+        // ENOTTY covers a driver with no set_time op at all. Alarms are armed
+        // relative to the RTC, so nothing depends on this succeeding.
+        if (errno == EACCES || errno == EPERM || errno == ENOTTY)
+            rtc_set_unsupported = 1;
+        log_line("rtc-sync: RTC_SET_TIME failed: %s (%s)%s", strerror(errno), reason,
+                 rtc_set_unsupported ? " -- driver does not support setting the RTC;"
+                                       " relying on relative alarms (no further retries)"
+                                     : "");
+        close(fd);
+        return;
+    }
+    close(fd);
+    log_line("rtc-sync: RTC set to %ld (%s); rtc_epoch now %lld",
+             (long)sys_now, reason, read_rtc_epoch());
+}
+
+// Arm the wake alarm. Skew between the RTC and CLOCK_REALTIME is the whole
+// hazard here: /sys/class/rtc/rtc0/wakealarm is interpreted in the RTC's OWN
+// time base, so writing time(NULL)+seconds into an RTC stuck at 1970 arms an
+// alarm ~56 years out that never fires. The device then freezes until some
+// other wakeup source happens to fire -- observed as a single 165490s (45.9h)
+// freeze that blew straight past a 604s shutdown deadline, which is why
+// fold-shutdown never ran. Always compute the deadline from the RTC's own
+// clock, and never fall back to time(NULL).
+// Returns 1 if an alarm is genuinely armed, 0 otherwise. Callers MUST NOT
+// freeze on a 0 return when they depend on a timed wake -- see suspend_loop.
+static int set_rtc_alarm(int seconds) {
+    if (seconds <= 0) return 0;
     char buf[32];
 
-    // Clear previous alarm
+    // Clear any previous alarm FIRST, so a stale one can never survive the
+    // unreadable-RTC path below and fire at an unexpected time.
     int fd = open("/sys/class/rtc/rtc0/wakealarm", O_WRONLY);
     if (fd >= 0) { write(fd, "0\n", 2); close(fd); }
 
-    // Set new alarm
-    snprintf(buf, sizeof(buf), "%ld\n", (long)wake);
+    long long rtc_now = read_rtc_epoch();
+    if (rtc_now < 0) {
+        // Rate-limited: the caller retries this every ~5s while polling.
+        static unsigned skip_log = 0;
+        if ((skip_log++ % 60) == 0)
+            log_line("suspend: RTC alarm SKIPPED (since_epoch unreadable)");
+        return 0;
+    }
+    long long wake = rtc_now + seconds;
+
+    // Set new alarm, in the RTC's own time base.
+    snprintf(buf, sizeof(buf), "%lld\n", wake);
     fd = open("/sys/class/rtc/rtc0/wakealarm", O_WRONLY);
-    if (fd >= 0) { write(fd, buf, strlen(buf)); close(fd); }
-    log_line("suspend: RTC alarm in %ds (epoch %ld)", seconds, (long)wake);
+    if (fd < 0) {
+        log_line("suspend: RTC alarm open failed: %s", strerror(errno));
+        return 0;
+    }
+    ssize_t w = write(fd, buf, strlen(buf));
+    close(fd);
+    if (w < 0) {
+        log_line("suspend: RTC alarm write failed: %s", strerror(errno));
+        return 0;
+    }
+    log_line("suspend: RTC alarm in %ds (rtc_epoch %lld, sys_epoch %ld)",
+             seconds, wake, (long)(time(NULL) + seconds));
+    return 1;
 }
 
 // Enter freeze. Blocks until wakeup (PSoC unfold or RTC alarm).
@@ -897,6 +1037,8 @@ static int suspend_loop(void) {
     }
 
     int consecutive_failures = 0;
+    unsigned poll_iterations = 0;  // rate-limits the no-RTC-alarm poll log
+    int unknown_rounds = 0;        // consecutive poll rounds with no readable fold state
 
     while (1) {
         time_t wall_now = time(NULL);
@@ -909,8 +1051,71 @@ static int suspend_loop(void) {
             return 1;
         }
 
-        // Set RTC alarm to wake for shutdown check
-        if (shutdown_epoch > 0) set_rtc_alarm(remain_s);
+        // Set RTC alarm to wake for the shutdown check.
+        //
+        // If a shutdown deadline exists but the alarm could NOT be armed, do
+        // NOT freeze. Freezing without a timed wake source leaves only a
+        // physical unfold to end it, so the deadline is silently never enforced
+        // and the glasses sit frozen long past their power-off time (the 45.9h
+        // freeze that motivated this fix). Instead stay awake and poll: burns
+        // battery, but keeps the shutdown reachable, and the loop still exits
+        // promptly on unfold. Bounded by power_timeout_s, after which we power
+        // off -- which is the outcome the user actually wants.
+        if (shutdown_epoch > 0 && !set_rtc_alarm(remain_s)) {
+            // Rate-limited: this branch repeats every ~5s for up to
+            // power_timeout_s, and set_rtc_alarm already logs each failure.
+            if ((poll_iterations++ % 60) == 0) {
+                log_line("suspend: no RTC alarm could be armed; polling instead of "
+                         "freezing (shutdown in %ds)", remain_s);
+            }
+            // A cable arriving mid-poll must abort exactly like the freeze
+            // path does, otherwise we would keep polling (and eventually power
+            // off) while the user is charging.
+            if (usb_cable_connected()) {
+                log_line("suspend: USB connected during poll, aborting");
+                suspend_teardown();
+                return 0;
+            }
+            // Re-check fold here: skipping do_freeze() also skips the post-wake
+            // fold re-read below, so without this an unfold during the wait
+            // would go unnoticed until the deadline. Poll in 1s steps rather
+            // than one sleep(5) so an unfold is noticed promptly -- the device
+            // is awake anyway, so responsiveness costs nothing here.
+            // Require a CONFIRMED unfold (== 0), not merely "not folded".
+            // Exiting here returns 0, and the caller unconditionally clears
+            // shutdown_armed_until_ms -- so treating a transient unreadable
+            // property (-1) as an unfold would silently discard the power-off
+            // deadline. Re-read a few times and only bail on a real 0; an
+            // unknown reading just keeps polling, which is harmless because the
+            // deadline still applies and a genuine unfold is caught next pass.
+            int unfolded = 0, saw_known = 0;
+            for (int i = 0; i < 5; ++i) {
+                sleep(1);
+                int sp = read_fold_from_spread();
+                if (sp >= 0) saw_known = 1;
+                if (sp == 0) { unfolded = 1; break; }
+            }
+            if (unfolded) {
+                suspend_teardown();
+                return 0;
+            }
+            // Bail out if fold state has been UNKNOWN for the whole window,
+            // repeatedly. is_spread only reads -1 when the property is absent
+            // or empty, so this means the fold signal is genuinely gone rather
+            // than flaky -- and continuing would eventually power off a device
+            // whose fold state we cannot confirm. Staying awake is recoverable;
+            // powering off in the user's hand is not. A single unknown round is
+            // tolerated so ordinary flakiness does not abandon the deadline.
+            unknown_rounds = saw_known ? 0 : (unknown_rounds + 1);
+            if (unknown_rounds >= 12) {  // ~60s of no readable fold state
+                log_line("suspend: fold state unreadable for %d poll rounds; "
+                         "abandoning shutdown deadline rather than powering off blind",
+                         unknown_rounds);
+                suspend_teardown();
+                return 0;
+            }
+            continue;  // top of loop re-evaluates remain_s and powers off when due
+        }
 
         // Freeze (blocks until PSoC unfold or RTC alarm)
         int frozen_s = do_freeze();
@@ -1184,6 +1389,42 @@ int main(int argc, char **argv) {
             PWR_TRACE_BEGIN("pwr.boot.apply_wifi_request");
             apply_wifi_request(wpath0);
             PWR_TRACE_END();
+        }
+        PWR_TRACE_END();
+    }
+
+    // Repair a stale RTC at boot, independently of the time-sync file.
+    //
+    // apply_time_sync() consumes (unlinks) its file, so it only runs when the
+    // app has just dropped a fresh one -- it cannot be relied on to fix an RTC
+    // that reset later. This device's RTC backup rail loses state on a full
+    // drain and comes back at 1970, which silently breaks every wake alarm and
+    // therefore fold-shutdown. Check on every start and re-sync whenever the
+    // RTC is implausible while the system clock is good (NTP/app already fixed
+    // it). Cheap, idempotent, and the thing that makes the fix self-healing
+    // rather than one-shot.
+    {
+        PWR_TRACE_BEGIN("pwr.boot.rtc_check");
+        long long rtc_now = read_rtc_epoch();
+        time_t sys_now = time(NULL);
+        if (rtc_now < 0) {
+            log_line("rtc-check: since_epoch unreadable");
+        } else if (rtc_now < RTC_SANE_MIN_EPOCH) {
+            log_line("rtc-check: RTC stale (epoch %lld < %ld), system=%ld -> re-syncing",
+                     rtc_now, (long)RTC_SANE_MIN_EPOCH, (long)sys_now);
+            sync_rtc_from_system("boot-stale");
+        } else {
+            // Both clocks look sane; correct any large drift so alarm deadlines
+            // stay accurate. Small skew is harmless and not worth a write.
+            long long skew = (long long)sys_now - rtc_now;
+            if (skew < 0) skew = -skew;
+            if (sys_now >= RTC_SANE_MIN_EPOCH && skew > 120) {
+                log_line("rtc-check: RTC drift %llds (rtc=%lld sys=%ld) -> re-syncing",
+                         skew, rtc_now, (long)sys_now);
+                sync_rtc_from_system("boot-drift");
+            } else {
+                log_line("rtc-check: RTC ok (epoch %lld, skew %llds)", rtc_now, skew);
+            }
         }
         PWR_TRACE_END();
     }
@@ -1498,6 +1739,26 @@ int main(int argc, char **argv) {
         // Battery-indicator LED (charging + app says still). The arm flag lives
         // in the inotify-watched config dir alongside the .conf.
         led_tick(cfg_dir, now);
+
+        // Periodic RTC repair. The boot check can't fix anything if the system
+        // clock was ALSO wrong at that moment (cold boot before NTP or before
+        // the app drops a time-sync). Re-check occasionally so the RTC gets
+        // repaired as soon as the system clock becomes trustworthy, instead of
+        // staying broken until the next reboot. Only acts while the RTC is
+        // implausible and the system clock is sane, so steady state is one
+        // cheap sysfs read per interval.
+        if (now - rtc_check_last_ms >= RTC_RECHECK_MS) {
+            rtc_check_last_ms = now;
+            if (!rtc_set_unsupported) {
+                long long rtc_now = read_rtc_epoch();
+                if (rtc_now >= 0 && rtc_now < RTC_SANE_MIN_EPOCH &&
+                    time(NULL) >= RTC_SANE_MIN_EPOCH) {
+                    log_line("rtc-check: RTC still stale (epoch %lld), system clock now valid",
+                             rtc_now);
+                    sync_rtc_from_system("periodic");
+                }
+            }
+        }
 
         // Idle screen-lock.
         if (!disabled && screen_on &&
