@@ -179,7 +179,7 @@ class ProfileAutoConnector(
                                         // call ends. Without a call, the slot is
                                         // freely reassigned as before -- interrupting
                                         // music costs the user nothing.
-                                        if (!hfp.noCallAudioExceptFor(addr)) {
+                                        if (!hfp.noCallAudioAnywhere()) {
                                             // Remember it: dropping the swap
                                             // outright would leave the sink slot
                                             // shared between both sources once the
@@ -429,7 +429,7 @@ class ProfileAutoConnector(
             if (!stillHere) {
                 pendingSwapAddr = null
                 log("autoconnect($reason) dropping deferred swap addr=$want (no longer connected)")
-            } else if (hfp.noCallAudioExceptFor(want)) {
+            } else if (hfp.noCallAudioAnywhere()) {
                 pendingSwapAddr = null
                 log("autoconnect($reason) replaying deferred swap addr=$want")
                 try { a2dp.connectExclusive(want); hfp.connectExclusive(want) } catch (e: Throwable) {
@@ -501,7 +501,18 @@ class ProfileAutoConnector(
             // a2dpUp=false during a call is the intended state, not a gap to
             // repair. Re-connecting it here would fight that and disturb the
             // call's audio path. HFP is still repaired: that is the call itself.
-            val a2dpAllowed = hfp.noCallAudioExceptFor(addr)
+            // Nobody may have SCO up, not even this device. A reconnect
+            // renegotiates the shared audio path and kills the live SCO of
+            // whoever holds it -- including the holder itself, which is exactly
+            // the case a per-device check would wave through.
+            //
+            // A host that cannot carry both makes this permanent rather than
+            // momentary. A Linux box exposes one audio profile at a time, so
+            // while something holds the mic its card carries headset only.
+            // Connecting A2DP there makes its gateway drop the call it is
+            // hosting: captured as +CIEV: 2,1 -> +CIEV: 2,0, with SCO torn down
+            // 1.6-10.9ms after the 0 edge, 23 times out of 23.
+            val a2dpAllowed = hfp.noCallAudioAnywhere()
             // HFP is single-occupancy: Fluoride's HF client cannot serve two AGs
             // and rejects the second one's SCO outright (HCI 0x0f), so bringing
             // it up everywhere is what BREAKS call audio rather than enabling it.

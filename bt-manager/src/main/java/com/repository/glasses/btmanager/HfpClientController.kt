@@ -728,10 +728,28 @@ class HfpClientController(
      * cannot prove there is no call, and wrongly disturbing a live call is much
      * worse than briefly deferring a music handoff.
      */
-    fun noCallAudioExceptFor(exceptFor: String): Boolean {
+    /**
+     * True only when we know NO device has SCO up.
+     *
+     * The right test before touching A2DP: SCO is live call audio no matter who
+     * owns it, and reconnecting A2DP renegotiates the shared audio path -- on
+     * the SCO owner too, not just on the other device. A Linux host makes that
+     * fatal: its BlueZ card carries
+     * either a2dp-sink or headset-head-unit, never both, so it drops A2DP the
+     * moment something opens the mic. Answering that drop with a reconnect
+     * fights the host for the profile and the peer tears SCO down (HCI 0x13,
+     * Remote User Terminated).
+     *
+     * Deliberately does NOT depend on a call being reported. Discord, Zoom and
+     * the rest never raise a call indication -- they just open SCO -- so the
+     * call state is IDLE while real audio is flowing. SCO itself is the signal.
+     *
+     * Fails closed: unknown means do not touch A2DP.
+     */
+    fun noCallAudioAnywhere(): Boolean {
         val owner = scoActiveAddress()
         if (owner == SCO_STATE_UNKNOWN) return false
-        return owner.isEmpty() || owner.equals(exceptFor, true)
+        return owner.isEmpty()
     }
 
     /**
