@@ -386,12 +386,12 @@ class HfpClientController(
         // A deliberate handoff, so this device must win even if we evicted it
         // moments ago.
         claimHfpSlot(deviceAddress)
-        for (d in current) {
-            if (!d.address.equals(deviceAddress, true)) {
-                log("event=hfp.connectExclusive.kick addr=${d.address} name=${d.name} target=$deviceAddress")
-                disconnectTransient(d.address)
-            }
-        }
+        // Route through evictOtherHfpHolders so the kicked device lands in the
+        // eviction backoff. Kicking it directly skipped that, and a phone AG
+        // redials within a second of being dropped -- so it came straight back,
+        // read as "last holder", and evicted the device the user had just
+        // chosen. Observed: PC picked, phone redialed 0.8s later, PC evicted.
+        evictOtherHfpHolders(deviceAddress)
         connect(deviceAddress)
     }
 
